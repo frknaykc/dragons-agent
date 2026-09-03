@@ -1,8 +1,19 @@
 # Dragons Agent
 
+[![npm version](https://img.shields.io/npm/v/dragons-agent?logo=npm&label=npm)](https://www.npmjs.com/package/dragons-agent)
+[![npm downloads](https://img.shields.io/npm/dm/dragons-agent?logo=npm&label=downloads)](https://www.npmjs.com/package/dragons-agent)
+[![CI](https://github.com/frknaykc/dragons-agent/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/frknaykc/dragons-agent/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/frknaykc/dragons-agent)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/frknaykc/dragons-agent?style=flat)](https://github.com/frknaykc/dragons-agent)
+
 Dragons Agent is a terminal-native AI coding agent. Its own local runtime owns the agent loop, workspace tools, authorization decisions, sessions, and extensions rather than delegating those controls to a provider client.
 
-**Status:** early release — **v0.1.0**.
+**Status:** early public release — **v0.1.0**.
+
+<p align="center">
+  <img src="docs/assets/dragons-cli.png" alt="Dragons Agent interactive CLI showing the banner, a read_file tool call, and a final response." width="960">
+</p>
+<p align="center"><sub>Sanitized deterministic capture of the current interactive CLI, rendered through the real runtime with no provider credentials or workspace data.</sub></p>
 
 ## Installation
 
