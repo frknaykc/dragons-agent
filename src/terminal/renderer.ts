@@ -41,11 +41,14 @@ const ANSI = {
   reset: "\x1b[0m",
   dim: "\x1b[2m",
   cyan: "\x1b[36m",
-  magenta: "\x1b[35m",
   yellow: "\x1b[33m",
+  orange: "\x1b[33m",
+  brightYellow: "\x1b[93m",
   green: "\x1b[32m",
   red: "\x1b[31m",
 };
+
+const FIRE_PALETTE = [ANSI.red, ANSI.orange, ANSI.brightYellow];
 
 function truncate(text: string, width: number): string {
   const characters = Array.from(text);
@@ -56,6 +59,11 @@ function truncate(text: string, width: number): string {
 
 function style(text: string, sequence: string, color: boolean): string {
   return color ? `${sequence}${text}${ANSI.reset}` : text;
+}
+
+/** Uses only broadly supported ANSI foreground colours when truecolor is unavailable. */
+function fireGradient(text: string, color: boolean): string {
+  return text.split("\n").map((line, index) => style(line, FIRE_PALETTE[index % FIRE_PALETTE.length]!, color)).join("\n");
 }
 
 function activityBar(state: ActivityState, frame: number): string {
@@ -137,7 +145,7 @@ export class TerminalRenderer {
   renderStartup(metadata: StartupMetadata): void {
     this.metadata = metadata;
     if (!this.options.isTTY) return;
-    this.options.write(`${style(DRAGONS_BANNER, ANSI.magenta, this.options.color)}\n${style(`${metadata.provider} · ${metadata.model}`, ANSI.dim, this.options.color)}\n${style(metadata.workingDirectory, ANSI.dim, this.options.color)}\n\n`);
+    this.options.write(`${fireGradient(DRAGONS_BANNER, this.options.color)}\n${style(`${metadata.provider} · ${metadata.model}`, ANSI.dim, this.options.color)}\n${style(metadata.workingDirectory, ANSI.dim, this.options.color)}\n\n`);
   }
 
   renderComposer(): void {
@@ -147,9 +155,10 @@ export class TerminalRenderer {
     }
     const line = this.statusLine();
     const separator = style(formatSeparator(this.options.width), ANSI.dim, this.options.color);
-    const identity = style("𓆩 DRAGON 𓆪", ANSI.magenta, this.options.color);
+    const identity = style("𓆩 DRAGON 𓆪", ANSI.orange, this.options.color);
     const hint = style("Ask anything, or type / for commands…", ANSI.dim, this.options.color);
-    this.options.write(`${line}\n${separator}\n  ${identity} ${hint}\n${separator}\n  ${identity} `);
+    const cursor = style("›", ANSI.brightYellow, this.options.color);
+    this.options.write(`${line}\n${separator}\n  ${identity} ${hint} ${cursor} `);
   }
 
   startRun(state: ActivityState = "thinking"): void {

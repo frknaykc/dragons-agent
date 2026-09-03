@@ -60,6 +60,41 @@ test("M14 banner and composer render the active TTY identity", () => {
   assert.match(rendered, /𓆩 DRAGON 𓆪 Ask anything, or type \/ for commands…/);
 });
 
+test("M14 renders one warm-colored interactive input surface", () => {
+  const output: string[] = [];
+  const renderer = createTerminalRenderer({
+    write: (text) => output.push(text),
+    isTTY: true,
+    color: true,
+    width: 100,
+    now: () => 0,
+  });
+
+  renderer.renderStartup({ provider: "OpenAI API", model: "gpt-4.1-mini", workingDirectory: "." });
+  renderer.renderComposer();
+
+  const rendered = output.join("");
+  const plain = rendered.replace(/\x1b\[[0-9;]*m/gu, "");
+  assert.equal((plain.match(/𓆩 DRAGON 𓆪/gu) ?? []).length, 1);
+  assert.match(plain, /𓆩 DRAGON 𓆪 Ask anything, or type \/ for commands… › /u);
+  assert.match(rendered, /\x1b\[31m/);
+  assert.match(rendered, /\x1b\[33m/);
+  assert.match(rendered, /\x1b\[93m/);
+  assert.doesNotMatch(rendered, /\x1b\[35m/);
+
+  const noColorOutput: string[] = [];
+  const noColorRenderer = createTerminalRenderer({
+    write: (text) => noColorOutput.push(text),
+    isTTY: true,
+    color: false,
+    width: 100,
+    now: () => 0,
+  });
+  noColorRenderer.renderStartup({ provider: "OpenAI API", model: "gpt-4.1-mini", workingDirectory: "." });
+  noColorRenderer.renderComposer();
+  assert.doesNotMatch(noColorOutput.join(""), /\x1b\[/);
+});
+
 test("M14 presentation formatters retain real values and concise distinctions", () => {
   assert.equal(formatElapsedTime(0), "0s");
   assert.equal(formatElapsedTime(44_000), "44s");

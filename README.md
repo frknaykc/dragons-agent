@@ -11,7 +11,7 @@ Dragons Agent is a terminal-native AI coding agent. Its own local runtime owns t
 **Status:** early public release — **v0.1.0**.
 
 <p align="center">
-  <img src="docs/assets/dragons-cli.png" alt="Dragons Agent interactive CLI showing the banner, a read_file tool call, and a final response." width="960">
+  <img src="docs/assets/dragons-cli.png" alt="Dragons Agent interactive CLI showing the banner and a single inline prompt." width="960">
 </p>
 <p align="center"><sub>Sanitized deterministic capture of the current interactive CLI, rendered through the real runtime with no provider credentials or workspace data.</sub></p>
 
