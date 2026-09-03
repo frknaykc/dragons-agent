@@ -1,0 +1,59 @@
+import { createInterface } from "node:readline";
+
+const mode = process.argv[2] ?? "normal";
+
+function send(message: Record<string, unknown>): void {
+  process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+function tools(): Array<Record<string, unknown>> {
+  const normal = {
+    name: "inspect",
+    description: "Inspect a nested value.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        nested: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+      },
+      required: ["nested"],
+    },
+  };
+  if (mode === "duplicate") return [normal, { ...normal }];
+  if (mode === "two-schemas") return [normal, { ...normal, name: "inspect-two" }];
+  if (mode === "large-schema") return [{ ...normal, inputSchema: { type: "object", description: "x".repeat(20_000) } }];
+  if (mode === "large-name") return [{ ...normal, name: "n".repeat(4_097) }];
+  if (mode === "large-description") return [{ ...normal, description: "d".repeat(16_385) }];
+  return [normal];
+}
+
+if (mode === "malformed") {
+  process.stdout.write("{not-json}\n");
+} else {
+  const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+  input.on("line", (line) => {
+    let request: Record<string, unknown>;
+    try { request = JSON.parse(line) as Record<string, unknown>; }
+    catch { return; }
+    const id = request.id;
+    if (request.method === "initialize") {
+      send({ jsonrpc: "2.0", id, result: { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1.0.0" } } });
+      return;
+    }
+    if (request.method === "tools/list") {
+      if (mode === "list-error") {
+        send({ jsonrpc: "2.0", id, error: { code: -32000, message: "server-secret-marker" } });
+        return;
+      }
+      send({ jsonrpc: "2.0", id, result: { tools: tools() } });
+      return;
+    }
+    if (request.method === "tools/call") {
+      if (mode === "exit-on-call") process.exit(1);
+      if (mode === "wait") return;
+      const params = request.params as Record<string, unknown>;
+      const args = params.arguments as { nested?: { query?: string } };
+      const text = mode === "large-result" ? "x".repeat(70_000) : `result:${args.nested?.query ?? ""}`;
+      send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text }] } });
+    }
+  });
+}

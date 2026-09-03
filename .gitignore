@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+coverage/
+*.tgz
+.DS_Store
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local Dragons/Hermes state and internal planning artifacts.
+.hermes/
+IDEA.md
+MILESTONES.md

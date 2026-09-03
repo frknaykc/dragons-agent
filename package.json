@@ -1,0 +1,60 @@
+{
+  "name": "dragons-agent",
+  "version": "0.1.0",
+  "description": "Terminal-native coding agent with explicit local tool authorization.",
+  "keywords": ["ai", "agent", "coding-agent", "cli", "terminal"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frknaykc/dragons-agent.git"
+  },
+  "homepage": "https://github.com/frknaykc/dragons-agent#readme",
+  "bugs": {
+    "url": "https://github.com/frknaykc/dragons-agent/issues"
+  },
+  "type": "module",
+  "bin": {
+    "dragons": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "package.json",
+    "!dist/**/*.test.js",
+    "!dist/acceptance-*.js",
+    "!dist/provider-acceptance.js",
+    "!dist/live-smoke.js",
+    "!dist/chatgpt-stream-trace.js",
+    "!dist/mcp-mock-server.js",
+    "!dist/mcp-official-sdk-server.js"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm build && node --test dist/*.test.js dist/provider/*.test.js",
+    "dragons": "pnpm build && node dist/cli.js",
+    "smoke:live": "pnpm build && node dist/live-smoke.js",
+    "acceptance:openai": "pnpm build && node dist/acceptance-openai.js",
+    "acceptance:chatgpt": "pnpm build && node dist/acceptance-chatgpt.js",
+    "acceptance:mcp": "pnpm build && node --test dist/m32-mcp-acceptance.test.js",
+    "verify:package": "pnpm build && node scripts/verify-package.mjs",
+    "release:check": "node scripts/release-check.mjs",
+    "release:pack": "pnpm release:check && pnpm pack"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "@napi-rs/keyring": "2.0.0",
+    "openai": "^7.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "packageManager": "pnpm@11.17.0"
+}
