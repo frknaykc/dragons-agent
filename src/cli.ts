@@ -281,6 +281,7 @@ function writeMcpStatus(manager: McpClientManager, write: (text: string) => void
   for (const server of servers) {
     const metadata = [
       server.transport,
+      server.authentication === "bearer" ? "auth bearer" : undefined,
       server.protocolVersion ? `MCP ${server.protocolVersion}` : undefined,
       server.connectDurationMilliseconds !== undefined ? `connect ${server.connectDurationMilliseconds}ms` : undefined,
       server.discoveryDurationMilliseconds !== undefined ? `discover ${server.discoveryDurationMilliseconds}ms` : undefined,

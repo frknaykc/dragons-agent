@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
 
-import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { Client, InsufficientScopeError, StreamableHTTPClientTransport, UnauthorizedError } from "@modelcontextprotocol/client";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/client/stdio";
 
+import { createNativeMcpBearerTokenStore, type McpBearerTokenStore, type McpCredentialScope } from "./mcp-credential-store.js";
 import type { AgentTool, ToolExecutionOptions, ToolOperation, ToolResult } from "./tools.js";
+
+export type { McpBearerTokenStore, McpCredentialScope } from "./mcp-credential-store.js";
 
 export const DEFAULT_MCP_CONNECT_TIMEOUT_MILLISECONDS = 10_000;
 export const DEFAULT_MCP_TOOL_TIMEOUT_MILLISECONDS = 30_000;
@@ -21,6 +24,7 @@ const MAX_MCP_SERVER_TOOL_DESCRIPTION_BYTES = 16_384;
 const SAFE_ENVIRONMENT_NAMES = new Set(["PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR", "NO_COLOR", "TZ", "NODE_ENV"]);
 const SECRET_ENVIRONMENT_PATTERN = /(?:secret|token|password|credential|authorization|api[_-]?key|bearer)/i;
 const SERVER_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/;
+const CREDENTIAL_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/;
 const PROVIDER_TOOL_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const CREDENTIAL_ARGUMENT_PATTERN = /^--?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|credential|authorization|auth)(?:=|$)|^(?:Bearer\s+|sk-|rk-)/i;
 
@@ -39,12 +43,14 @@ export type HttpMcpServerConfig = {
   id: string;
   transport: "http";
   url: string;
+  /** Bearer token is resolved only from Dragons native credential storage. */
+  auth?: { type: "bearer"; credentialId?: string };
   operation?: ToolOperation;
 };
 
 export type McpServerConfig = StdioMcpServerConfig | HttpMcpServerConfig;
 export type McpTransport = "stdio" | "http";
-export type McpFailureCategory = "connection" | "discovery" | "timeout" | "cancelled" | "tool";
+export type McpFailureCategory = "connection" | "discovery" | "authentication" | "timeout" | "cancelled" | "tool";
 
 export type McpClientOptions = {
   connectTimeoutMilliseconds?: number;
@@ -53,11 +59,13 @@ export type McpClientOptions = {
   maxSchemaBytes?: number;
   maxTotalSchemaBytes?: number;
   maxOutputBytes?: number;
+  credentialStore?: Pick<McpBearerTokenStore, "load">;
 };
 
 export type McpServerStatus = {
   id: string;
   transport: McpTransport;
+  authentication: "none" | "bearer";
   state: "disconnected" | "connected";
   toolCount: number;
   /** Safe negotiated MCP metadata only; no server payloads or transport details. */
@@ -77,6 +85,7 @@ type Connection = {
   config: McpServerConfig;
   client: Client;
   transport: StdioClientTransport | StreamableHTTPClientTransport;
+  sensitiveValues: Set<string>;
   tools: AgentTool[];
   state: "connected" | "disconnected";
   protocolVersion?: string;
@@ -93,6 +102,10 @@ type Connection = {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : "Unexpected MCP error.";
+}
+
+class McpAuthenticationError extends Error {
+  constructor() { super("MCP authentication required or rejected."); }
 }
 
 function boundedOutput(output: string, maximum: number): string {
@@ -123,11 +136,13 @@ function boundedHttpResponse(response: Response, maximum: number): Response {
   return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
-function redactMcpText(value: string): string {
-  return value
+function redactMcpText(value: string, sensitiveValues: Iterable<string> = []): string {
+  let redacted = value
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
     .replace(/((?:\\?["'])?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|credential|authorization|auth)(?:\\?["'])?\s*(?:=|:)\s*\\?["']?)[^\s,\\"'}\]]+/gi, "$1[REDACTED]")
     .replace(/\b(?:sk|rk)-[A-Za-z0-9._~-]+\b/gi, "[REDACTED]");
+  for (const sensitiveValue of sensitiveValues) if (sensitiveValue) redacted = redacted.split(sensitiveValue).join("[REDACTED]");
+  return redacted;
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
@@ -181,8 +196,13 @@ function transportOf(config: McpServerConfig): McpTransport {
   return config.transport === "http" ? "http" : "stdio";
 }
 
+function isAuthenticatedHttp(config: McpServerConfig): config is HttpMcpServerConfig & { auth: NonNullable<HttpMcpServerConfig["auth"]> } {
+  return config.transport === "http" && config.auth !== undefined;
+}
+
 function failureCategory(error: unknown, fallback: "connection" | "discovery" | "tool", signal?: AbortSignal): McpFailureCategory {
   if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) return "cancelled";
+  if (error instanceof McpAuthenticationError || error instanceof UnauthorizedError || error instanceof InsufficientScopeError) return "authentication";
   if (error instanceof Error && /timed out/i.test(error.message)) return "timeout";
   return fallback;
 }
@@ -206,6 +226,23 @@ function normalizedHttpUrl(value: unknown, id: string): string {
   return url.toString();
 }
 
+function normalizedHttpAuth(value: unknown, id: string): HttpMcpServerConfig["auth"] {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`MCP HTTP server ${id} auth must be a bearer credential reference.`);
+  const auth = value as Record<string, unknown>;
+  for (const key of Object.keys(auth)) if (key !== "type" && key !== "credentialId") throw new Error(`Unknown MCP auth config key: ${key}`);
+  if (auth.type !== "bearer") throw new Error(`MCP HTTP server ${id} auth type must be bearer.`);
+  if (auth.credentialId !== undefined && (typeof auth.credentialId !== "string" || !CREDENTIAL_ID_PATTERN.test(auth.credentialId))) {
+    throw new Error(`MCP HTTP server ${id} credential ID must use letters, numbers, hyphens, and underscores only.`);
+  }
+  return { type: "bearer", ...(auth.credentialId === undefined ? {} : { credentialId: auth.credentialId }) };
+}
+
+function permitsBearerOverHttp(url: string): boolean {
+  const parsed = new URL(url);
+  return parsed.protocol === "https:" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
+}
+
 function normalizeConfig(value: McpServerConfig): McpServerConfig {
   const config = value as Record<string, unknown>;
   const id = config.id;
@@ -217,11 +254,13 @@ function normalizeConfig(value: McpServerConfig): McpServerConfig {
     if (config.command !== undefined || config.args !== undefined || config.env !== undefined) {
       throw new Error(`MCP HTTP server ${id} must not include stdio command, args, or env settings.`);
     }
-    return { id, transport: "http", url: normalizedHttpUrl(config.url, id), ...(operation ? { operation } : {}) };
+    const auth = normalizedHttpAuth(config.auth, id);
+    const url = normalizedHttpUrl(config.url, id);
+    if (auth && !permitsBearerOverHttp(url)) throw new Error(`MCP HTTP server ${id} bearer auth requires HTTPS or loopback HTTP.`);
+    return { id, transport: "http", url, ...(auth ? { auth } : {}), ...(operation ? { operation } : {}) };
   }
-  if (config.url !== undefined) {
-    throw new Error(`MCP server ${id} URL requires transport: http.`);
-  }
+  if (config.url !== undefined) throw new Error(`MCP server ${id} URL requires transport: http.`);
+  if (config.auth !== undefined) throw new Error(`MCP stdio server ${id} must not include HTTP auth settings.`);
   if (typeof config.command !== "string" || !config.command.trim()) throw new Error(`MCP server ${id} command must be a non-empty string.`);
   if (config.args !== undefined && (!Array.isArray(config.args) || config.args.some((argument) => typeof argument !== "string"))) {
     throw new Error(`MCP server ${id} args must be strings.`);
@@ -255,7 +294,7 @@ function mappedToolName(serverId: string, toolName: string): string {
 export function parseMcpServerConfig(value: unknown): McpServerConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("MCP server config must be an object.");
   const config = value as Record<string, unknown>;
-  for (const key of Object.keys(config)) if (!new Set(["id", "transport", "command", "args", "env", "url", "operation"]).has(key)) throw new Error(`Unknown MCP server config key: ${key}`);
+  for (const key of Object.keys(config)) if (!new Set(["id", "transport", "command", "args", "env", "url", "auth", "operation"]).has(key)) throw new Error(`Unknown MCP server config key: ${key}`);
   return normalizeConfig(config as McpServerConfig);
 }
 
@@ -275,10 +314,12 @@ export class McpClientManager {
   private readonly connections = new Map<string, Connection>();
   private readonly connecting = new Map<string, Promise<AgentTool[]>>();
   private readonly options: Required<McpClientOptions>;
+  private readonly credentialStore: Pick<McpBearerTokenStore, "load">;
 
   constructor(configs: readonly McpServerConfig[] = [], options: McpClientOptions = {}) {
     const normalized = parseMcpServerConfigs(configs);
     this.configs = new Map(normalized.map((config) => [config.id, config]));
+    this.credentialStore = options.credentialStore ?? createNativeMcpBearerTokenStore();
     this.options = {
       connectTimeoutMilliseconds: positiveInteger(options.connectTimeoutMilliseconds, DEFAULT_MCP_CONNECT_TIMEOUT_MILLISECONDS),
       toolTimeoutMilliseconds: positiveInteger(options.toolTimeoutMilliseconds, DEFAULT_MCP_TOOL_TIMEOUT_MILLISECONDS),
@@ -286,6 +327,7 @@ export class McpClientManager {
       maxSchemaBytes: positiveInteger(options.maxSchemaBytes, DEFAULT_MAX_MCP_SCHEMA_BYTES),
       maxTotalSchemaBytes: positiveInteger(options.maxTotalSchemaBytes, DEFAULT_MAX_MCP_TOTAL_SCHEMA_BYTES),
       maxOutputBytes: positiveInteger(options.maxOutputBytes, DEFAULT_MAX_MCP_OUTPUT_BYTES),
+      credentialStore: this.credentialStore,
     };
   }
 
@@ -301,6 +343,7 @@ export class McpClientManager {
       return {
         id: config.id,
         transport: transportOf(config),
+        authentication: config.transport === "http" && config.auth ? "bearer" : "none",
         state: connection?.state ?? "disconnected",
         toolCount: connection?.state === "connected" ? connection.tools.length : 0,
         capabilities: connection?.capabilities ?? { tools: false },
@@ -335,8 +378,9 @@ export class McpClientManager {
     const current = this.connections.get(id);
     if (current?.state === "connected") return current.tools;
     const client = new Client({ name: "dragons-agent", version: "0.1.0" });
-    const transport = this.createTransport(config);
-    const connection: Connection = { config, client, transport, tools: [], state: "disconnected", capabilities: { tools: false }, callCount: 0, failureCount: 0, cancellationCount: 0 };
+    const sensitiveValues = new Set<string>();
+    const transport = this.createTransport(config, sensitiveValues);
+    const connection: Connection = { config, client, transport, sensitiveValues, tools: [], state: "disconnected", capabilities: { tools: false }, callCount: 0, failureCount: 0, cancellationCount: 0 };
     transport.onerror = () => { connection.lastError = "MCP transport error."; };
     transport.onclose = () => { connection.state = "disconnected"; };
     this.connections.set(id, connection);
@@ -381,7 +425,11 @@ export class McpClientManager {
       connection.lastError = "MCP connection or discovery failed.";
       connection.lastFailureCategory = failureCategory(error, phase, signal);
       await this.close(id);
-      const message = redactMcpText(errorMessage(error));
+      if (connection.lastFailureCategory === "authentication") {
+        throw new Error("MCP authentication required or rejected.");
+      }
+      if (isAuthenticatedHttp(config)) throw new Error("MCP connection or discovery failed.");
+      const message = redactMcpText(errorMessage(error), connection.sensitiveValues);
       if (error instanceof Error && message === error.message) throw error;
       throw new Error(message);
     }
@@ -417,13 +465,31 @@ export class McpClientManager {
     } finally {
       try { await connection.client.close(); }
       catch { try { await connection.transport.close(); } catch { /* already closed */ } }
+      connection.sensitiveValues.clear();
     }
   }
 
-  private createTransport(config: McpServerConfig): StdioClientTransport | StreamableHTTPClientTransport {
+  private createTransport(config: McpServerConfig, sensitiveValues: Set<string>): StdioClientTransport | StreamableHTTPClientTransport {
     if (config.transport === "http") {
+      const scope: McpCredentialScope | undefined = config.auth
+        ? { serverId: config.id, origin: new URL(config.url).origin, credentialId: config.auth.credentialId ?? "default" }
+        : undefined;
       return new StreamableHTTPClientTransport(new URL(config.url), {
-        fetch: async (input, init) => boundedHttpResponse(await fetch(input, { ...(init ?? {}), redirect: "error" }), DEFAULT_MAX_MCP_HTTP_RESPONSE_BYTES),
+        ...(scope ? {
+          authProvider: {
+            token: async () => {
+              const token = await this.credentialStore.load(scope);
+              if (token) sensitiveValues.add(token);
+              return token;
+            },
+          },
+          onInsufficientScope: "throw" as const,
+        } : {}),
+        fetch: async (input, init) => {
+          const response = await fetch(input, { ...(init ?? {}), redirect: "error" });
+          if (scope && (response.status === 401 || response.status === 403)) throw new McpAuthenticationError();
+          return boundedHttpResponse(response, DEFAULT_MAX_MCP_HTTP_RESPONSE_BYTES);
+        },
         reconnectionOptions: {
           initialReconnectionDelay: 100,
           maxReconnectionDelay: 100,
@@ -458,7 +524,8 @@ export class McpClientManager {
             connection.failureCount += 1;
             connection.lastFailureCategory = "tool";
           }
-          return { ok: !result.isError, output: boundedOutput(redactMcpText(JSON.stringify(result.content)), this.options.maxOutputBytes) };
+          if (result.isError && isAuthenticatedHttp(connection.config)) return { ok: false, output: "MCP tool reported failure." };
+          return { ok: !result.isError, output: boundedOutput(redactMcpText(JSON.stringify(result.content), connection.sensitiveValues), this.options.maxOutputBytes) };
         } catch (error: unknown) {
           const cancelled = execution.signal?.aborted || (error instanceof DOMException && error.name === "AbortError");
           const timedOut = error instanceof Error && error.message.startsWith("MCP tool call timed out");
@@ -467,7 +534,9 @@ export class McpClientManager {
           if (cancelled) { connection.cancellationCount += 1; return { ok: false, output: "MCP tool call cancelled." }; }
           if (timedOut) { connection.failureCount += 1; return { ok: false, output: error.message }; }
           connection.failureCount += 1;
-          return { ok: false, output: boundedOutput(redactMcpText(`MCP tool ${mappedName} failed: ${errorMessage(error)}`), this.options.maxOutputBytes) };
+          if (connection.lastFailureCategory === "authentication") return { ok: false, output: "MCP authentication required or rejected." };
+          if (isAuthenticatedHttp(connection.config)) return { ok: false, output: "MCP authenticated HTTP tool call failed." };
+          return { ok: false, output: boundedOutput(redactMcpText(`MCP tool ${mappedName} failed: ${errorMessage(error)}`, connection.sensitiveValues), this.options.maxOutputBytes) };
         } finally {
           connection.lastInvocationDurationMilliseconds = Date.now() - invocationStartedAt;
         }

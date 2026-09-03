@@ -126,7 +126,7 @@ Skills are explicit, local advisory instructions stored in Dragons-owned local s
 
 ## MCP
 
-Dragons uses the official MCP SDK for explicitly configured **stdio** and unauthenticated Streamable HTTP servers. External MCP servers should be trusted deliberately. Dragons keeps authorization authoritative over exposed MCP tools; external tools default conservatively to `EXECUTE` unless configuration classifies them more narrowly.
+Dragons uses the official MCP SDK for explicitly configured **stdio** and Streamable HTTP servers. External MCP servers should be trusted deliberately. Dragons keeps authorization authoritative over exposed MCP tools; external tools default conservatively to `EXECUTE` unless configuration classifies them more narrowly.
 
 Existing stdio entries remain valid. Add an HTTP server with an explicit transport and endpoint:
 
@@ -134,12 +134,13 @@ Existing stdio entries remain valid. Add an HTTP server with an explicit transpo
 {
   "mcpServers": [
     { "id": "local-tools", "command": "node", "args": ["server.mjs"] },
-    { "id": "remote-tools", "transport": "http", "url": "https://mcp.example.test/mcp" }
+    { "id": "remote-tools", "transport": "http", "url": "https://mcp.example.test/mcp" },
+    { "id": "private-tools", "transport": "http", "url": "https://private.example.test/mcp", "auth": { "type": "bearer", "credentialId": "private-tools" } }
   ]
 }
 ```
 
-HTTP endpoints must be `http` or `https`, must not contain credentials, fragments, or query parameters, and redirects are rejected. Remote authentication headers and OAuth configuration are intentionally not accepted yet. MCP connection, discovery, and invocation work is time-bounded; each HTTP response is capped at 1 MiB; automatic reconnect is disabled. `dragons mcp status` reports safe transport, lifecycle, capability-count, timing, and failure-category metadata without exposing endpoints or secrets.
+HTTP endpoints must be `http` or `https`, must not contain credentials, fragments, or query parameters, and redirects are rejected. HTTP bearer auth is opt-in and reads a token only from Dragons native credential storage, scoped by server ID, origin, and credential ID. Tokens and raw headers are rejected in configuration, command arguments, diagnostics, status output, sessions, and errors. The current CLI deliberately has no token argument or plaintext-file fallback; interactive OAuth and credential provisioning are not implemented. MCP connection, discovery, and invocation work is time-bounded; each HTTP response is capped at 1 MiB; automatic reconnect is disabled. `dragons mcp status` reports safe transport, auth mode, lifecycle, capability-count, timing, and failure-category metadata without exposing endpoints or secrets.
 
 Use `dragons mcp list`, `dragons mcp connect <id>`, `dragons mcp status`, and `dragons mcp disconnect <id>` after adding valid non-secret server configuration to Dragons' local config.
 
