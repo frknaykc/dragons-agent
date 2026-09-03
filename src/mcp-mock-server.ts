@@ -38,7 +38,7 @@ if (mode === "malformed") {
     catch { return; }
     const id = request.id;
     if (request.method === "initialize") {
-      send({ jsonrpc: "2.0", id, result: { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1.0.0" } } });
+      send({ jsonrpc: "2.0", id, result: { protocolVersion: "2025-11-25", capabilities: { tools: {}, resources: {}, prompts: {} }, serverInfo: { name: "fixture", version: "1.0.0" } } });
       return;
     }
     if (request.method === "tools/list") {
@@ -58,6 +58,11 @@ if (mode === "malformed") {
       const args = params.arguments as { nested?: { query?: string } };
       const text = mode === "large-result" ? "x".repeat(70_000) : `result:${args.nested?.query ?? ""}`;
       send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text }] } });
+      return;
     }
+    if (request.method === "resources/list") { send({ jsonrpc: "2.0", id, result: { resources: [{ uri: "fixture://note", name: "Note", mimeType: "text/plain" }] } }); return; }
+    if (request.method === "resources/read") { send({ jsonrpc: "2.0", id, result: { contents: [{ uri: "fixture://note", text: "fixture resource" }] } }); return; }
+    if (request.method === "prompts/list") { send({ jsonrpc: "2.0", id, result: { prompts: [{ name: "fixture-prompt", description: "Fixture prompt" }] } }); return; }
+    if (request.method === "prompts/get") { send({ jsonrpc: "2.0", id, result: { messages: [{ role: "user", content: { type: "text", text: "fixture prompt body" } }] } }); }
   });
 }

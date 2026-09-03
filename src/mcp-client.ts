@@ -525,6 +525,46 @@ export class McpClientManager {
     await this.close(id);
   }
 
+  /** Resource and prompt payloads remain explicit caller requests; they are never injected during discovery. */
+  async listResources(id: string, signal?: AbortSignal): Promise<Array<{ uri: string; name: string; mimeType?: string }>> {
+    const result = await this.resourceOperation(id, signal, (client) => client.listResources());
+    return result.resources.map((resource) => ({ uri: resource.uri, name: resource.name, ...(resource.mimeType ? { mimeType: resource.mimeType } : {}) }));
+  }
+
+  async readResource(id: string, uri: string, signal?: AbortSignal): Promise<Array<{ uri: string; text?: string; blob?: string; mimeType?: string }>> {
+    if (!uri || Buffer.byteLength(uri, "utf8") > 4_096) throw new Error("MCP resource URI is invalid.");
+    const result = await this.resourceOperation(id, signal, (client) => client.readResource({ uri }));
+    return result.contents.map((content) => ({ uri: content.uri, ...("text" in content ? { text: boundedOutput(redactMcpText(content.text, this.connections.get(id)?.sensitiveValues), this.options.maxOutputBytes) } : { blob: boundedOutput(redactMcpText(content.blob, this.connections.get(id)?.sensitiveValues), this.options.maxOutputBytes) }), ...(content.mimeType ? { mimeType: content.mimeType } : {}) }));
+  }
+
+  async listPrompts(id: string, signal?: AbortSignal): Promise<Array<{ name: string; description?: string }>> {
+    const result = await this.resourceOperation(id, signal, (client) => client.listPrompts());
+    return result.prompts.map((prompt) => ({ name: prompt.name, ...(prompt.description ? { description: prompt.description } : {}) }));
+  }
+
+  async getPrompt(id: string, name: string, signal?: AbortSignal): Promise<unknown[]> {
+    if (!name || Buffer.byteLength(name, "utf8") > 4_096) throw new Error("MCP prompt name is invalid.");
+    const result = await this.resourceOperation(id, signal, (client) => client.getPrompt({ name }));
+    const output = redactMcpText(JSON.stringify(result.messages), this.connections.get(id)?.sensitiveValues);
+    if (Buffer.byteLength(output, "utf8") > this.options.maxOutputBytes) throw new Error(`MCP prompt exceeds ${this.options.maxOutputBytes} bytes.`);
+    return JSON.parse(output) as unknown[];
+  }
+
+  private async resourceOperation<T>(id: string, signal: AbortSignal | undefined, operation: (client: Client) => Promise<T>): Promise<T> {
+    const connection = this.connections.get(id);
+    if (!connection || connection.state !== "connected") throw new Error(`MCP server ${id} is disconnected.`);
+    try {
+      connection.callCount += 1;
+      return await timeout(operation(connection.client), this.options.toolTimeoutMilliseconds, signal, `MCP resource or prompt request timed out after ${this.options.toolTimeoutMilliseconds}ms.`);
+    } catch (error: unknown) {
+      connection.failureCount += 1;
+      connection.lastFailureCategory = failureCategory(error, "tool", signal);
+      if (signal?.aborted) { connection.cancellationCount += 1; throw new Error("MCP resource or prompt request cancelled."); }
+      if (isAuthenticatedHttp(connection.config)) throw new Error("MCP resource or prompt request failed.");
+      throw new Error(redactMcpText(`MCP resource or prompt request failed: ${errorMessage(error)}`, connection.sensitiveValues));
+    }
+  }
+
   async closeAll(): Promise<void> {
     await Promise.all([...this.configs.keys()].map(async (id) => {
       const connecting = this.connecting.get(id);
