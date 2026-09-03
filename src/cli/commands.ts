@@ -27,6 +27,7 @@ export type CliCommand =
   | { kind: "plan"; action: "remove"; sessionId: string; id: string }
   | { kind: "mcp"; action: "list" }
   | { kind: "mcp"; action: "status" }
+  | { kind: "mcp"; action: "connect-all" }
   | { kind: "mcp"; action: "connect"; id: string }
   | { kind: "mcp"; action: "disconnect"; id: string };
 
@@ -106,8 +107,9 @@ export function parseCliCommand(arguments_: string[]): CliCommand {
   if (forwardedArguments[0] === "plan") return parsePlanCommand(forwardedArguments);
   if (forwardedArguments[0] === "mcp") {
     if ((forwardedArguments[1] === "list" || forwardedArguments[1] === "status") && forwardedArguments.length === 2) return { kind: "mcp", action: forwardedArguments[1] };
+    if (forwardedArguments[1] === "connect-all" && forwardedArguments.length === 2) return { kind: "mcp", action: "connect-all" };
     if ((forwardedArguments[1] === "connect" || forwardedArguments[1] === "disconnect") && forwardedArguments[2] && forwardedArguments.length === 3) return { kind: "mcp", action: forwardedArguments[1], id: forwardedArguments[2] };
-    throw new Error("Use dragons mcp list, dragons mcp connect <id>, dragons mcp status, or dragons mcp disconnect <id>.");
+    throw new Error("Use dragons mcp list, dragons mcp connect <id>, dragons mcp connect-all, dragons mcp status, or dragons mcp disconnect <id>.");
   }
   if (forwardedArguments[0] === "memory") {
     const scope = forwardedArguments[2] === "project" ? "project" : "user";

@@ -10,6 +10,9 @@ export type { McpBearerTokenStore, McpCredentialScope } from "./mcp-credential-s
 
 export const DEFAULT_MCP_CONNECT_TIMEOUT_MILLISECONDS = 10_000;
 export const DEFAULT_MCP_TOOL_TIMEOUT_MILLISECONDS = 30_000;
+export const DEFAULT_MAX_MCP_SERVERS = 8;
+export const DEFAULT_MAX_MCP_CONCURRENT_CONNECTIONS = 2;
+export const DEFAULT_MAX_MCP_TOTAL_TOOLS = 128;
 export const DEFAULT_MCP_HTTP_SESSION_TERMINATION_TIMEOUT_MILLISECONDS = 1_000;
 export const DEFAULT_MAX_MCP_TOOLS = 64;
 export const DEFAULT_MAX_MCP_SCHEMA_BYTES = 16_384;
@@ -55,11 +58,18 @@ export type McpFailureCategory = "connection" | "discovery" | "authentication" |
 export type McpClientOptions = {
   connectTimeoutMilliseconds?: number;
   toolTimeoutMilliseconds?: number;
+  maxConcurrentConnections?: number;
   maxTools?: number;
+  maxTotalTools?: number;
   maxSchemaBytes?: number;
   maxTotalSchemaBytes?: number;
   maxOutputBytes?: number;
   credentialStore?: Pick<McpBearerTokenStore, "load">;
+};
+
+export type McpConnectAllResult = {
+  connected: string[];
+  failed: string[];
 };
 
 export type McpServerStatus = {
@@ -146,7 +156,9 @@ function redactMcpText(value: string, sensitiveValues: Iterable<string> = []): s
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
-  return value === undefined ? fallback : Math.max(1, Math.floor(value));
+  if (value === undefined) return fallback;
+  if (!Number.isFinite(value)) throw new Error("MCP bounds must be finite positive integers.");
+  return Math.max(1, Math.floor(value));
 }
 
 function isJsonValue(value: unknown, seen = new Set<unknown>()): boolean {
@@ -285,9 +297,9 @@ function normalizeConfig(value: McpServerConfig): McpServerConfig {
 /** Produces a stable, provider-safe namespace without trusting arbitrary server tool names. */
 function mappedToolName(serverId: string, toolName: string): string {
   const direct = `mcp__${serverId}__${toolName}`;
-  if (PROVIDER_TOOL_NAME_PATTERN.test(direct)) return direct;
+  if (!serverId.includes("__") && !toolName.includes("__") && PROVIDER_TOOL_NAME_PATTERN.test(direct)) return direct;
   const digest = createHash("sha256").update(`${serverId}\0${toolName}`, "utf8").digest("hex").slice(0, 24);
-  return `mcp__${serverId.slice(0, 24)}__${digest}`;
+  return `mcp__${digest}`;
 }
 
 /** Parse one config entry; config values are app-owned and never include secret transport credentials. */
@@ -300,6 +312,7 @@ export function parseMcpServerConfig(value: unknown): McpServerConfig {
 
 export function parseMcpServerConfigs(value: unknown): McpServerConfig[] {
   if (!Array.isArray(value)) throw new Error("MCP servers must be an array.");
+  if (value.length > DEFAULT_MAX_MCP_SERVERS) throw new Error(`Dragons supports at most ${DEFAULT_MAX_MCP_SERVERS} MCP servers.`);
   const servers = value.map(parseMcpServerConfig);
   const ids = new Set<string>();
   for (const server of servers) {
@@ -313,6 +326,8 @@ export class McpClientManager {
   private readonly configs: Map<string, McpServerConfig>;
   private readonly connections = new Map<string, Connection>();
   private readonly connecting = new Map<string, Promise<AgentTool[]>>();
+  private activeConnectionCount = 0;
+  private readonly connectionWaiters: Array<() => void> = [];
   private readonly options: Required<McpClientOptions>;
   private readonly credentialStore: Pick<McpBearerTokenStore, "load">;
 
@@ -323,7 +338,9 @@ export class McpClientManager {
     this.options = {
       connectTimeoutMilliseconds: positiveInteger(options.connectTimeoutMilliseconds, DEFAULT_MCP_CONNECT_TIMEOUT_MILLISECONDS),
       toolTimeoutMilliseconds: positiveInteger(options.toolTimeoutMilliseconds, DEFAULT_MCP_TOOL_TIMEOUT_MILLISECONDS),
+      maxConcurrentConnections: positiveInteger(options.maxConcurrentConnections, DEFAULT_MAX_MCP_CONCURRENT_CONNECTIONS),
       maxTools: positiveInteger(options.maxTools, DEFAULT_MAX_MCP_TOOLS),
+      maxTotalTools: positiveInteger(options.maxTotalTools, DEFAULT_MAX_MCP_TOTAL_TOOLS),
       maxSchemaBytes: positiveInteger(options.maxSchemaBytes, DEFAULT_MAX_MCP_SCHEMA_BYTES),
       maxTotalSchemaBytes: positiveInteger(options.maxTotalSchemaBytes, DEFAULT_MAX_MCP_TOTAL_SCHEMA_BYTES),
       maxOutputBytes: positiveInteger(options.maxOutputBytes, DEFAULT_MAX_MCP_OUTPUT_BYTES),
@@ -361,15 +378,80 @@ export class McpClientManager {
   }
 
   async connect(id: string, existingTools: readonly AgentTool[] = [], signal?: AbortSignal): Promise<AgentTool[]> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     const ongoing = this.connecting.get(id);
     if (ongoing) return ongoing;
-    const connecting = Promise.resolve().then(() => this.connectOnce(id, existingTools, signal));
+    const connecting = this.connectWithinLimit(id, existingTools, signal);
     this.connecting.set(id, connecting);
     try {
       return await connecting;
     } finally {
       if (this.connecting.get(id) === connecting) this.connecting.delete(id);
     }
+  }
+
+  private async connectWithinLimit(id: string, existingTools: readonly AgentTool[], signal?: AbortSignal): Promise<AgentTool[]> {
+    await this.acquireConnectionSlot(signal);
+    try {
+      return await this.connectOnce(id, existingTools, signal);
+    } finally {
+      this.releaseConnectionSlot();
+    }
+  }
+
+  private async acquireConnectionSlot(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    if (this.activeConnectionCount < this.options.maxConcurrentConnections) {
+      this.activeConnectionCount += 1;
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const grant = (): void => {
+        signal?.removeEventListener("abort", abort);
+        this.activeConnectionCount += 1;
+        resolve();
+      };
+      const abort = (): void => {
+        const index = this.connectionWaiters.indexOf(grant);
+        if (index >= 0) this.connectionWaiters.splice(index, 1);
+        reject(new DOMException("Aborted", "AbortError"));
+      };
+      this.connectionWaiters.push(grant);
+      signal?.addEventListener("abort", abort, { once: true });
+    });
+  }
+
+  private releaseConnectionSlot(): void {
+    this.activeConnectionCount -= 1;
+    this.connectionWaiters.shift()?.();
+  }
+
+  async connectAll(existingTools: readonly AgentTool[] = [], signal?: AbortSignal): Promise<McpConnectAllResult> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    const ids = [...this.configs.keys()];
+    const outcomes = new Map<string, boolean>();
+    let nextIndex = 0;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        if (signal?.aborted) return;
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= ids.length) return;
+        const id = ids[index]!;
+        try {
+          await this.connect(id, [...existingTools, ...this.tools()], signal);
+          outcomes.set(id, true);
+        } catch {
+          outcomes.set(id, false);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(ids.length, this.options.maxConcurrentConnections) }, worker));
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    return {
+      connected: ids.filter((id) => outcomes.get(id) === true),
+      failed: ids.filter((id) => outcomes.get(id) === false),
+    };
   }
 
   private async connectOnce(id: string, existingTools: readonly AgentTool[] = [], signal?: AbortSignal): Promise<AgentTool[]> {
@@ -400,6 +482,9 @@ export class McpClientManager {
       const listed = await timeout(client.listTools(), this.options.connectTimeoutMilliseconds, signal, `MCP server ${id} tool discovery timed out.`);
       connection.discoveryDurationMilliseconds = Date.now() - discoveryStartedAt;
       if (listed.tools.length > this.options.maxTools) throw new Error(`MCP server ${id} exposes more than ${this.options.maxTools} tools.`);
+      if (this.tools().length + listed.tools.length > this.options.maxTotalTools) {
+        throw new Error(`MCP tools across connected servers exceed ${this.options.maxTotalTools}.`);
+      }
       const names = new Set(existingTools.map((tool) => tool.name));
       let totalSchemaBytes = 0;
       const tools = listed.tools.map((tool) => {

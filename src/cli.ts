@@ -300,6 +300,19 @@ async function connectMcp(manager: McpClientManager, id: string, tools: AgentToo
   write(`Connected MCP server ${id} (${connected.length} tool${connected.length === 1 ? "" : "s"})\n`);
 }
 
+async function connectAllMcp(manager: McpClientManager, tools: AgentTool[], operations: Map<string, AgentTool["operation"]>, write: (text: string) => void): Promise<void> {
+  const result = await manager.connectAll(tools);
+  for (const id of result.connected) {
+    for (const tool of manager.toolsFor(id)) {
+      if (!tools.some((candidate) => candidate.name === tool.name)) tools.push(tool);
+      operations.set(tool.name, tool.operation);
+    }
+  }
+  if (result.connected.length === 0 && result.failed.length === 0) { write("No MCP servers are configured.\n"); return; }
+  if (result.connected.length > 0) write(`Connected MCP servers: ${result.connected.join(", ")}\n`);
+  if (result.failed.length > 0) write(`Failed MCP servers: ${result.failed.join(", ")}\n`);
+}
+
 async function disconnectMcp(manager: McpClientManager, id: string, tools: AgentTool[], operations: Map<string, AgentTool["operation"]>, write: (text: string) => void): Promise<void> {
   const names = new Set(manager.toolsFor(id).map((tool) => tool.name));
   await manager.disconnect(id);
@@ -388,7 +401,7 @@ async function runInteractiveConversation(
         return;
       }
       if (task === "/help") {
-        write("Slash commands: /help, /status, /diagnostics, /new, /sessions, /resume <id>, /model, /provider, /tasks start <prompt>|show <id>|cancel <id>, /tasks, /skills, /skills list|show|activate|deactivate, /memory list|add|delete, /plan [list|add|update|status|remove], /mcp list|connect|status|disconnect, /context, /clear, /exit\n");
+        write("Slash commands: /help, /status, /diagnostics, /new, /sessions, /resume <id>, /model, /provider, /tasks start <prompt>|show <id>|cancel <id>, /tasks, /skills, /skills list|show|activate|deactivate, /memory list|add|delete, /plan [list|add|update|status|remove], /mcp list|connect|connect-all|status|disconnect, /context, /clear, /exit\n");
         continue;
       }
       if (task === "/status" || task === "/session") {
@@ -561,6 +574,10 @@ async function runInteractiveConversation(
       }
       if (task === "/mcp list") { writeMcpList(mcp, write); continue; }
       if (task === "/mcp status") { writeMcpStatus(mcp, write); continue; }
+      if (task === "/mcp connect-all") {
+        await connectAllMcp(mcp, tools, operations, write);
+        continue;
+      }
       if (task.startsWith("/mcp connect ")) {
         const id = task.slice("/mcp connect ".length).trim();
         try { await connectMcp(mcp, id, tools, operations, write); }
@@ -697,6 +714,15 @@ export async function main(
     try {
       if (parsedCommand.action === "list") { writeMcpList(mcp, write); return; }
       if (parsedCommand.action === "status") { writeMcpStatus(mcp, write); return; }
+      if (parsedCommand.action === "connect-all") {
+        const result = await mcp.connectAll();
+        if (result.connected.length === 0 && result.failed.length === 0) write("No MCP servers are configured.\n");
+        else {
+          if (result.connected.length > 0) write(`Connected MCP servers: ${result.connected.join(", ")}\n`);
+          if (result.failed.length > 0) write(`Failed MCP servers: ${result.failed.join(", ")}\n`);
+        }
+        return;
+      }
       if (parsedCommand.action === "connect") {
         const tools = await mcp.connect(parsedCommand.id, []);
         write(`Connected MCP server ${parsedCommand.id} (${tools.length} tool${tools.length === 1 ? "" : "s"})\n`);

@@ -19,6 +19,8 @@ function tools(): Array<Record<string, unknown>> {
     },
   };
   if (mode === "duplicate") return [normal, { ...normal }];
+  if (mode === "collision-left") return [{ ...normal, name: "b__c" }];
+  if (mode === "collision-right") return [{ ...normal, name: "c" }];
   if (mode === "two-schemas") return [normal, { ...normal, name: "inspect-two" }];
   if (mode === "large-schema") return [{ ...normal, inputSchema: { type: "object", description: "x".repeat(20_000) } }];
   if (mode === "large-name") return [{ ...normal, name: "n".repeat(4_097) }];
@@ -44,7 +46,9 @@ if (mode === "malformed") {
         send({ jsonrpc: "2.0", id, error: { code: -32000, message: "server-secret-marker" } });
         return;
       }
-      send({ jsonrpc: "2.0", id, result: { tools: tools() } });
+      const response = { jsonrpc: "2.0", id, result: { tools: tools() } };
+      if (mode === "slow-list") setTimeout(() => send(response), 100);
+      else send(response);
       return;
     }
     if (request.method === "tools/call") {
