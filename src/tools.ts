@@ -213,6 +213,7 @@ function runShellCommand(
     let settled = false;
     let termination: "cancelled" | "timed_out" | undefined;
     let forceKill: NodeJS.Timeout | undefined;
+    let processTreeTermination = Promise.resolve();
 
     const appendOutput = (chunk: Buffer | string): void => {
       const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
@@ -234,20 +235,25 @@ function runShellCommand(
         : captured;
     };
 
-    const terminateProcessTree = (signalName: NodeJS.Signals): void => {
+    const terminateProcessTree = (signalName: NodeJS.Signals): Promise<void> => {
       if (process.platform === "win32" && child.pid) {
-        spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).unref();
-        return;
+        return new Promise((resolveTermination) => {
+          const taskkill = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+          taskkill.once("error", resolveTermination);
+          taskkill.once("close", resolveTermination);
+          taskkill.unref();
+        });
       }
       if (child.pid) {
         try {
           process.kill(-child.pid, signalName);
-          return;
+          return Promise.resolve();
         } catch {
           // POSIX uses the detached shell's process group; otherwise kill its direct child.
         }
       }
       child.kill(signalName);
+      return Promise.resolve();
     };
 
     const cancel = (): void => requestTermination("cancelled");
@@ -265,8 +271,8 @@ function runShellCommand(
     const requestTermination = (reason: "cancelled" | "timed_out"): void => {
       if (termination) return;
       termination = reason;
-      terminateProcessTree("SIGTERM");
-      forceKill = setTimeout(() => terminateProcessTree("SIGKILL"), 250);
+      processTreeTermination = terminateProcessTree("SIGTERM");
+      forceKill = setTimeout(() => { void terminateProcessTree("SIGKILL"); }, 250);
       forceKill.unref();
     };
     const timeout = setTimeout(() => requestTermination("timed_out"), options.shellTimeoutMilliseconds);
@@ -281,23 +287,26 @@ function runShellCommand(
     });
     child.once("error", (error) => finish(toolError(error)));
     child.once("close", (code) => {
-      if (termination === "cancelled") {
-        finish({ ok: false, output: "Command cancelled." });
-        return;
-      }
-      if (termination === "timed_out") {
+      void processTreeTermination.then(() => {
+        if (settled) return;
+        if (termination === "cancelled") {
+          finish({ ok: false, output: "Command cancelled." });
+          return;
+        }
+        if (termination === "timed_out") {
+          const captured = output();
+          onTimeout?.();
+          finish({
+            ok: false,
+            output: `Command timed out after ${options.shellTimeoutMilliseconds}ms.${captured ? `\n${captured}` : ""}`,
+          });
+          return;
+        }
         const captured = output();
-        onTimeout?.();
         finish({
-          ok: false,
-          output: `Command timed out after ${options.shellTimeoutMilliseconds}ms.${captured ? `\n${captured}` : ""}`,
+          ok: code === 0,
+          output: captured || `Command exited with code ${code ?? "unknown"}.`,
         });
-        return;
-      }
-      const captured = output();
-      finish({
-        ok: code === 0,
-        output: captured || `Command exited with code ${code ?? "unknown"}.`,
       });
     });
   });

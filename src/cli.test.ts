@@ -449,7 +449,7 @@ test("CLI Ctrl+C cancels an outstanding approval prompt without waiting for inpu
 
   const result = await Promise.race([
     run.then(() => "completed", (error: unknown) => error),
-    new Promise<"timed out">((resolve) => setTimeout(() => resolve("timed out"), 100)),
+    new Promise<"timed out">((resolve) => setTimeout(() => resolve("timed out"), 1_000)),
   ]);
   input.end();
 
