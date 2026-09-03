@@ -241,7 +241,6 @@ function runShellCommand(
           const taskkill = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
           taskkill.once("error", resolveTermination);
           taskkill.once("close", resolveTermination);
-          taskkill.unref();
         });
       }
       if (child.pid) {
