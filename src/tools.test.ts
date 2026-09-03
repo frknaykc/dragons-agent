@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -231,7 +231,7 @@ test("shell runs in the workspace and returns non-zero output as a tool result",
     });
 
     assert.equal(success.ok, true);
-    assert.match(success.output, new RegExp(workspace.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.equal(success.output.trim(), await realpath(workspace));
     assert.deepEqual(failure, { ok: false, output: "broken\n" });
   } finally {
     await rm(workspace, { recursive: true, force: true });

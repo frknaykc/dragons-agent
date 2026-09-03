@@ -83,7 +83,7 @@ test("device login persists Dragons-owned credentials without printing secret va
   ].join(""));
   assert.equal(writes.join("").includes(accessToken), false);
   assert.equal(writes.join("").includes(refreshToken), false);
-  assert.equal((await stat(credentialFile)).mode & 0o777, 0o600);
+  if (process.platform !== "win32") assert.equal((await stat(credentialFile)).mode & 0o777, 0o600);
   assert.match(await readFile(credentialFile, "utf8"), /"version": 1/);
 });
 

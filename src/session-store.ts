@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { compactContextText } from "./context-budget.js";
 import { isSkillReference, type SkillReference } from "./skills.js";
 import { isDragonsPlan, type DragonsPlan } from "./plan.js";
+import { joinPlatformPath } from "./platform-path.js";
 
 export type SessionProvider = "openai-api" | "chatgpt";
 
@@ -88,9 +89,9 @@ export function getDragonsSessionDirectory(options: DragonsSessionDirectoryOptio
   const platform = options.platform ?? process.platform;
   const homeDirectory = options.homeDirectory ?? process.env.HOME ?? process.env.USERPROFILE;
   if (!homeDirectory) throw new Error("Unable to determine a home directory for Dragons sessions.");
-  if (platform === "darwin") return join(homeDirectory, "Library", "Application Support", "Dragons Agent", "sessions");
-  if (platform === "win32") return join(options.appData ?? process.env.APPDATA ?? homeDirectory, "Dragons Agent", "sessions");
-  return join(options.xdgConfigHome ?? process.env.XDG_CONFIG_HOME ?? join(homeDirectory, ".config"), "dragons-agent", "sessions");
+  if (platform === "darwin") return joinPlatformPath(platform, homeDirectory, "Library", "Application Support", "Dragons Agent", "sessions");
+  if (platform === "win32") return joinPlatformPath(platform, options.appData ?? process.env.APPDATA ?? homeDirectory, "Dragons Agent", "sessions");
+  return joinPlatformPath(platform, options.xdgConfigHome ?? process.env.XDG_CONFIG_HOME ?? joinPlatformPath(platform, homeDirectory, ".config"), "dragons-agent", "sessions");
 }
 
 function sessionPath(directory: string, id: string): string {

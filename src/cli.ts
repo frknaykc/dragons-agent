@@ -60,7 +60,7 @@ export type CliDependencies = {
   workingDirectory?: string;
   model?: AgentModel;
   modelFactory?: (provider: ProviderName, model?: string) => AgentModel;
-  chatgptAuth?: Pick<ChatGPTAuthService, "login" | "status" | "logout">;
+  chatgptAuth?: Pick<ChatGPTAuthService, "login" | "status" | "logout"> & Partial<Pick<ChatGPTAuthService, "credentials">>;
   tools?: AgentTool[];
   input?: NodeJS.ReadableStream;
   write?: (text: string) => void;
@@ -191,15 +191,25 @@ function terminalRenderer(
   return createTerminalRenderer({ write, isTTY, color, width });
 }
 
-function defaultModel(provider: ProviderName, model: string | undefined, write: (text: string) => void): AgentModel {
+function defaultModel(
+  provider: ProviderName,
+  model: string | undefined,
+  write: (text: string) => void,
+  chatgptAuth?: Pick<ChatGPTAuthService, "credentials">,
+): AgentModel {
   if (provider === "openai-api") return createOpenAIAgentModel(model);
-  const auth = createChatGPTAuthService({ write });
+  const auth = chatgptAuth ?? createChatGPTAuthService({ write });
   return createCodexAgentModel({ credentials: auth.credentials, model });
 }
 
 /** Child delegation intentionally never reuses the parent model instance or continuation. */
 function createFreshSubagentModel(dependencies: CliDependencies, provider: ProviderName, model: string | undefined, write: (text: string) => void): AgentModel {
-  return dependencies.modelFactory?.(provider, model) ?? defaultModel(provider, model, write);
+  return dependencies.modelFactory?.(provider, model) ?? defaultModel(
+    provider,
+    model,
+    write,
+    dependencies.chatgptAuth?.credentials ? { credentials: dependencies.chatgptAuth.credentials } : undefined,
+  );
 }
 
 async function runAuthCommand(command: Extract<CliCommand, { kind: "auth" }>, dependencies: CliDependencies, write: (text: string) => void): Promise<void> {
@@ -782,7 +792,12 @@ export async function main(
   }
   const model = dependencies.model
     ?? dependencies.modelFactory?.(command.provider, command.model)
-    ?? defaultModel(command.provider, command.model, write);
+    ?? defaultModel(
+      command.provider,
+      command.model,
+      write,
+      dependencies.chatgptAuth?.credentials ? { credentials: dependencies.chatgptAuth.credentials } : undefined,
+    );
   if (command.provider === "chatgpt") write("ChatGPT Subscription (Experimental)\n");
   const input = dependencies.input ?? process.stdin;
   const renderer = terminalRenderer(dependencies, input, write, false);

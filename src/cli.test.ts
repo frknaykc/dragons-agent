@@ -36,12 +36,25 @@ test("CLI reports a missing OpenAI API key", () => {
   assert.match(result.stderr, /OPENAI_API_KEY is not set/);
 });
 
-test("CLI reports that ChatGPT Subscription login is required without falling back to an API key", () => {
-  const result = runCli(["--provider", "chatgpt", "Say hello"], { HOME: "/tmp/dragons-cli-no-auth" });
+test("CLI reports that ChatGPT Subscription login is required without falling back to an API key", async () => {
+  const output: string[] = [];
+  await assert.rejects(main(["--provider", "chatgpt", "Say hello"], {
+    chatgptAuth: {
+      credentials: {
+        async getValidCredentials() {
+          throw new Error("ChatGPT Subscription login is required. Run dragons auth login --provider chatgpt.");
+        },
+      },
+      async login() {},
+      async status() { return { authenticated: false }; },
+      async logout() {},
+    },
+    tools: [],
+    input: Readable.from([]),
+    write: (text: string) => output.push(text),
+  }), /ChatGPT Subscription login is required/);
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /ChatGPT Subscription login is required/);
-  assert.doesNotMatch(result.stderr, /OPENAI_API_KEY/);
+  assert.doesNotMatch(output.join(""), /OPENAI_API_KEY/);
 });
 
 const inputSchema = {

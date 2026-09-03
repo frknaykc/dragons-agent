@@ -1,8 +1,9 @@
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { parseMcpServerConfigs, type McpServerConfig } from "./mcp-client.js";
+import { joinPlatformPath } from "./platform-path.js";
 
 export type DragonsConfig = {
   version?: 1;
@@ -26,9 +27,9 @@ export function getDragonsConfigPath(options: ConfigPathOptions = {}): string {
   const platform = options.platform ?? process.platform;
   const home = options.homeDirectory ?? process.env.HOME ?? process.env.USERPROFILE;
   if (!home) throw new Error("Unable to determine a home directory for Dragons config.");
-  if (platform === "darwin") return join(home, "Library", "Application Support", "Dragons Agent", "config.json");
-  if (platform === "win32") return join(options.appData ?? process.env.APPDATA ?? home, "Dragons Agent", "config.json");
-  return join(options.xdgConfigHome ?? process.env.XDG_CONFIG_HOME ?? join(home, ".config"), "dragons-agent", "config.json");
+  if (platform === "darwin") return joinPlatformPath(platform, home, "Library", "Application Support", "Dragons Agent", "config.json");
+  if (platform === "win32") return joinPlatformPath(platform, options.appData ?? process.env.APPDATA ?? home, "Dragons Agent", "config.json");
+  return joinPlatformPath(platform, options.xdgConfigHome ?? process.env.XDG_CONFIG_HOME ?? joinPlatformPath(platform, home, ".config"), "dragons-agent", "config.json");
 }
 function positiveInteger(value: unknown, key: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(`Dragons config ${key} must be a positive integer.`);

@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { join } from "node:path";
 import {
   createLegacyCodexCredentialStore,
   createLoginReplacementCodexCredentialStore,
@@ -8,6 +7,7 @@ import {
   type CodexCredentialStore,
   type CodexCredentials,
 } from "./credential-store.js";
+import { joinPlatformPath } from "../platform-path.js";
 
 export {
   createLegacyCodexCredentialStore as createCodexCredentialStore,
@@ -39,9 +39,9 @@ export function getDragonsChatGPTCredentialPath(options: DragonsCredentialPathOp
   const platform = options.platform ?? process.platform;
   const homeDirectory = options.homeDirectory ?? process.env.HOME ?? process.env.USERPROFILE;
   if (!homeDirectory) throw new Error("Unable to determine a home directory for Dragons credentials.");
-  if (platform === "darwin") return join(homeDirectory, "Library", "Application Support", "Dragons Agent", "auth.json");
-  if (platform === "win32") return join(options.appData ?? process.env.APPDATA ?? homeDirectory, "Dragons Agent", "auth.json");
-  return join(options.xdgConfigHome ?? process.env.XDG_CONFIG_HOME ?? join(homeDirectory, ".config"), "dragons-agent", "auth.json");
+  if (platform === "darwin") return joinPlatformPath(platform, homeDirectory, "Library", "Application Support", "Dragons Agent", "auth.json");
+  if (platform === "win32") return joinPlatformPath(platform, options.appData ?? process.env.APPDATA ?? homeDirectory, "Dragons Agent", "auth.json");
+  return joinPlatformPath(platform, options.xdgConfigHome ?? process.env.XDG_CONFIG_HOME ?? joinPlatformPath(platform, homeDirectory, ".config"), "dragons-agent", "auth.json");
 }
 
 function extractAccountId(accessToken: string): string | undefined {

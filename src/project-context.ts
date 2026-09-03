@@ -81,7 +81,7 @@ async function discoverGitSnapshot(workspace: string): Promise<GitSnapshot> {
 
   return {
     isRepository: true,
-    repositoryRoot,
+    repositoryRoot: resolve(repositoryRoot),
     branch: branchOutput?.trim() || undefined,
     dirty: statusOutput === undefined ? undefined : changedFileCount > 0,
     changedFiles: statusOutput === undefined ? undefined : changedFiles,

@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 
 import { preparePatch } from "./apply-patch.js";
 import { formatChangeReview, RunChangeTracker } from "./change-review.js";
+import { portablePath } from "./platform-path.js";
 import { discoverRepositoryInfo, formatRepositoryInfo } from "./repository-intelligence.js";
 import { formatReferences, formatSymbols, findSyntacticReferences, findWorkspaceSymbols, listFileSymbols } from "./symbol-navigation.js";
 import { formatTestRecommendations, suggestTests } from "./test-intelligence.js";
@@ -234,7 +235,11 @@ function runShellCommand(
     };
 
     const terminateProcessTree = (signalName: NodeJS.Signals): void => {
-      if (process.platform !== "win32" && child.pid) {
+      if (process.platform === "win32" && child.pid) {
+        spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).unref();
+        return;
+      }
+      if (child.pid) {
         try {
           process.kill(-child.pid, signalName);
           return;
@@ -299,6 +304,7 @@ function runShellCommand(
 }
 
 async function collectMatchingFiles(
+  workspace: string,
   directory: string,
   query: string,
   matches: string[],
@@ -323,7 +329,7 @@ async function collectMatchingFiles(
 
     if (entry.isDirectory()) {
       if (!IGNORED_DIRECTORIES.has(entry.name)) {
-        await collectMatchingFiles(entryPath, query, matches);
+        await collectMatchingFiles(workspace, entryPath, query, matches);
       }
       continue;
     }
@@ -338,7 +344,7 @@ async function collectMatchingFiles(
 
       for (const [index, line] of lines.entries()) {
         if (line.includes(query)) {
-          matches.push(`${entryPath}:${index + 1}:${line}`);
+          matches.push(`${portablePath(relative(workspace, entryPath))}:${index + 1}:${line}`);
           if (matches.length >= MAX_SEARCH_RESULTS) {
             return;
           }
@@ -370,7 +376,7 @@ async function collectRegexMatchesFromFile(
       state.limited = true;
       return;
     }
-    state.matches.push(`${relative(workspace, filePath)}:${index + 1}:${line}`);
+    state.matches.push(`${portablePath(relative(workspace, filePath))}:${index + 1}:${line}`);
   }
 }
 
@@ -519,10 +525,8 @@ export async function createReadTools(
 
         try {
           const matches: string[] = [];
-          await collectMatchingFiles(workspace, query, matches);
-          const output = matches
-            .map((match) => `${relative(workspace, match.slice(0, match.indexOf(":")))}${match.slice(match.indexOf(":"))}`)
-            .join("\n");
+          await collectMatchingFiles(workspace, workspace, query, matches);
+          const output = matches.join("\n");
           return { ok: true, output: output || "No matches found." };
         } catch (error: unknown) {
           return toolError(error);

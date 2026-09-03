@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { joinPlatformPath } from "./platform-path.js";
+
 export const MEMORY_STORAGE_VERSION = 1;
 export const DEFAULT_MAX_MEMORY_BODY_CHARS = 4_000;
 export const DEFAULT_MAX_MEMORY_CONTEXT_CHARS = 12_000;
@@ -69,9 +71,9 @@ export function getDragonsMemoryDirectory(options: MemoryDirectoryOptions = {}):
   const platform = options.platform ?? process.platform;
   const homeDirectory = options.homeDirectory ?? process.env.HOME ?? process.env.USERPROFILE;
   if (!homeDirectory) throw new Error("Unable to determine a home directory for Dragons memories.");
-  if (platform === "darwin") return join(homeDirectory, "Library", "Application Support", "Dragons Agent", "memory");
-  if (platform === "win32") return join(options.appData ?? process.env.APPDATA ?? homeDirectory, "Dragons Agent", "memory");
-  return join(options.xdgConfigHome ?? process.env.XDG_CONFIG_HOME ?? join(homeDirectory, ".config"), "dragons-agent", "memory");
+  if (platform === "darwin") return joinPlatformPath(platform, homeDirectory, "Library", "Application Support", "Dragons Agent", "memory");
+  if (platform === "win32") return joinPlatformPath(platform, options.appData ?? process.env.APPDATA ?? homeDirectory, "Dragons Agent", "memory");
+  return joinPlatformPath(platform, options.xdgConfigHome ?? process.env.XDG_CONFIG_HOME ?? joinPlatformPath(platform, homeDirectory, ".config"), "dragons-agent", "memory");
 }
 
 /** Hashes a resolved local directory, avoiding a raw workspace path in the persistent memory file. */

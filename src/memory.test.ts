@@ -46,8 +46,10 @@ test("M26 stores add and delete events in a versioned append-only restricted JSO
       { type: "add", id: SECOND_ID, body: "Keep the workspace boundary intact." },
       { type: "delete", id: FIRST_ID, body: undefined },
     ]);
-    assert.equal((await stat(directory)).mode & 0o777, 0o700);
-    assert.equal((await stat(join(directory, "memories.json"))).mode & 0o777, 0o600);
+    if (process.platform !== "win32") {
+      assert.equal((await stat(directory)).mode & 0o777, 0o700);
+      assert.equal((await stat(join(directory, "memories.json"))).mode & 0o777, 0o600);
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

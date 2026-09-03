@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, realpath } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 
+import { joinPlatformPath } from "./platform-path.js";
+
 export const DEFAULT_MAX_SKILL_BODY_CHARS = 12_000;
 export const DEFAULT_MAX_ACTIVE_SKILLS_CHARS = 48_000;
 
@@ -63,9 +65,9 @@ export function getDragonsSkillsDirectory(options: SkillsDirectoryOptions = {}):
   const platform = options.platform ?? process.platform;
   const homeDirectory = options.homeDirectory ?? process.env.HOME ?? process.env.USERPROFILE;
   if (!homeDirectory) throw new Error("Unable to determine a home directory for Dragons skills.");
-  if (platform === "darwin") return join(homeDirectory, "Library", "Application Support", "Dragons Agent", "skills");
-  if (platform === "win32") return join(options.appData ?? process.env.APPDATA ?? homeDirectory, "Dragons Agent", "skills");
-  return join(options.xdgConfigHome ?? process.env.XDG_CONFIG_HOME ?? join(homeDirectory, ".config"), "dragons-agent", "skills");
+  if (platform === "darwin") return joinPlatformPath(platform, homeDirectory, "Library", "Application Support", "Dragons Agent", "skills");
+  if (platform === "win32") return joinPlatformPath(platform, options.appData ?? process.env.APPDATA ?? homeDirectory, "Dragons Agent", "skills");
+  return joinPlatformPath(platform, options.xdgConfigHome ?? process.env.XDG_CONFIG_HOME ?? joinPlatformPath(platform, homeDirectory, ".config"), "dragons-agent", "skills");
 }
 
 async function ownedRoot(directory: string): Promise<string | undefined> {

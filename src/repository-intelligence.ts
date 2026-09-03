@@ -1,6 +1,8 @@
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 
+import { portablePath } from "./platform-path.js";
+
 export type RepositoryCommandName = "test" | "typecheck" | "build" | "lint";
 
 export type RepositoryInfo = {
@@ -78,7 +80,7 @@ async function discoverWorkspacePackages(root: string, patterns: string[]): Prom
       if (packages.length >= MAX_WORKSPACE_PACKAGES || !entry.isDirectory() || entry.isSymbolicLink()) continue;
       const packageRoot = join(base, entry.name);
       const metadata = await readPackage(join(root, packageRoot));
-      if (metadata) packages.push({ name: typeof metadata.name === "string" ? metadata.name : packageRoot, root: packageRoot });
+      if (metadata) packages.push({ name: typeof metadata.name === "string" ? metadata.name : packageRoot, root: portablePath(packageRoot) });
     }
   }
   return packages;

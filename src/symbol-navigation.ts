@@ -1,6 +1,8 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 
+import { portablePath } from "./platform-path.js";
+
 export type SymbolKind = "function" | "class" | "method" | "interface" | "type" | "enum" | "variable";
 export type CodeSymbol = { file: string; line: number; kind: SymbolKind; name: string; topLevel: boolean };
 
@@ -84,7 +86,7 @@ export async function collectSourceFiles(root: string, directory = root, files: 
 
 export async function listFileSymbols(root: string, filePath: string): Promise<CodeSymbol[]> {
   const content = await readFile(filePath, "utf8");
-  return symbolsInSource(relative(root, filePath), content).filter((symbol) => symbol.topLevel).slice(0, MAX_SYMBOL_RESULTS);
+  return symbolsInSource(portablePath(relative(root, filePath)), content).filter((symbol) => symbol.topLevel).slice(0, MAX_SYMBOL_RESULTS);
 }
 
 export async function findWorkspaceSymbols(root: string, name: string): Promise<CodeSymbol[]> {
@@ -93,7 +95,7 @@ export async function findWorkspaceSymbols(root: string, name: string): Promise<
   for (const file of files) {
     if (result.length >= MAX_SYMBOL_RESULTS) break;
     const content = await readFile(file, "utf8");
-    result.push(...symbolsInSource(relative(root, file), content).filter((symbol) => symbol.name === name).slice(0, MAX_SYMBOL_RESULTS - result.length));
+    result.push(...symbolsInSource(portablePath(relative(root, file)), content).filter((symbol) => symbol.name === name).slice(0, MAX_SYMBOL_RESULTS - result.length));
   }
   return result;
 }
@@ -107,7 +109,7 @@ export async function findSyntacticReferences(root: string, name: string): Promi
     const code = codeOnly(await readFile(file, "utf8"));
     matcher.lastIndex = 0;
     for (let match = matcher.exec(code); match; match = matcher.exec(code)) {
-      result.push({ file: relative(root, file), line: lineOf(code, match.index) });
+      result.push({ file: portablePath(relative(root, file)), line: lineOf(code, match.index) });
       if (result.length >= MAX_SYMBOL_RESULTS) break;
     }
   }
