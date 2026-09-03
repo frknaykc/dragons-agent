@@ -101,7 +101,7 @@ The built-in defaults are `gpt-4.1-mini` for OpenAI Platform API and `gpt-5.6-te
 - Persistent sessions and bounded context handling
 - Explicit local Skills and local user/project Memory
 - Bounded plans, one-level subagents, and read-only process-local background tasks
-- Official-SDK, explicitly activated **stdio** MCP connections
+- Official-SDK, explicitly activated **stdio** and Streamable HTTP MCP connections
 - Local runtime diagnostics
 
 ## Safety & permissions
@@ -126,7 +126,20 @@ Skills are explicit, local advisory instructions stored in Dragons-owned local s
 
 ## MCP
 
-Dragons uses the official MCP SDK for explicitly configured **stdio** servers. External MCP servers are local processes that should be trusted deliberately. Dragons keeps authorization authoritative over exposed MCP tools; external tools default conservatively. HTTP and OAuth MCP transports are not supported in v0.1.0.
+Dragons uses the official MCP SDK for explicitly configured **stdio** and unauthenticated Streamable HTTP servers. External MCP servers should be trusted deliberately. Dragons keeps authorization authoritative over exposed MCP tools; external tools default conservatively to `EXECUTE` unless configuration classifies them more narrowly.
+
+Existing stdio entries remain valid. Add an HTTP server with an explicit transport and endpoint:
+
+```json
+{
+  "mcpServers": [
+    { "id": "local-tools", "command": "node", "args": ["server.mjs"] },
+    { "id": "remote-tools", "transport": "http", "url": "https://mcp.example.test/mcp" }
+  ]
+}
+```
+
+HTTP endpoints must be `http` or `https`, must not contain credentials, fragments, or query parameters, and redirects are rejected. Remote authentication headers and OAuth configuration are intentionally not accepted yet. MCP connection, discovery, and invocation work is time-bounded; each HTTP response is capped at 1 MiB; automatic reconnect is disabled. `dragons mcp status` reports safe transport, lifecycle, capability-count, timing, and failure-category metadata without exposing endpoints or secrets.
 
 Use `dragons mcp list`, `dragons mcp connect <id>`, `dragons mcp status`, and `dragons mcp disconnect <id>` after adding valid non-secret server configuration to Dragons' local config.
 

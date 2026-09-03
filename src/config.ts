@@ -16,7 +16,7 @@ export type DragonsConfig = {
   shellTimeoutMilliseconds?: number;
   contextBudgetChars?: number;
   retryMaxAttempts?: number;
-  /** Explicit, app-owned stdio MCP servers. Never auto-connected or persisted in sessions. */
+  /** Explicit, app-owned stdio or Streamable HTTP MCP servers. Never auto-connected or persisted in sessions. */
   mcpServers?: McpServerConfig[];
 };
 

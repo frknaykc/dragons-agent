@@ -1,17 +1,19 @@
 import { createHash } from "node:crypto";
 
-import { Client } from "@modelcontextprotocol/client";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/client/stdio";
 
 import type { AgentTool, ToolExecutionOptions, ToolOperation, ToolResult } from "./tools.js";
 
 export const DEFAULT_MCP_CONNECT_TIMEOUT_MILLISECONDS = 10_000;
 export const DEFAULT_MCP_TOOL_TIMEOUT_MILLISECONDS = 30_000;
+export const DEFAULT_MCP_HTTP_SESSION_TERMINATION_TIMEOUT_MILLISECONDS = 1_000;
 export const DEFAULT_MAX_MCP_TOOLS = 64;
 export const DEFAULT_MAX_MCP_SCHEMA_BYTES = 16_384;
 export const DEFAULT_MAX_MCP_TOTAL_SCHEMA_BYTES = 262_144;
 export const DEFAULT_MAX_MCP_OUTPUT_BYTES = 65_536;
 export const DEFAULT_MAX_MCP_TRANSPORT_BUFFER_BYTES = 1_048_576;
+export const DEFAULT_MAX_MCP_HTTP_RESPONSE_BYTES = 1_048_576;
 
 const MAX_MCP_SERVER_TOOL_NAME_BYTES = 4_096;
 const MAX_MCP_SERVER_TOOL_DESCRIPTION_BYTES = 16_384;
@@ -22,14 +24,27 @@ const SERVER_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/;
 const PROVIDER_TOOL_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const CREDENTIAL_ARGUMENT_PATTERN = /^--?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|credential|authorization|auth)(?:=|$)|^(?:Bearer\s+|sk-|rk-)/i;
 
-export type McpServerConfig = {
+export type StdioMcpServerConfig = {
   id: string;
+  /** Omitted for compatibility with existing stdio configuration. */
+  transport?: "stdio";
   command: string;
   args?: string[];
   /** Safe, non-secret overrides only. The subprocess otherwise receives the SDK's safe default environment. */
   env?: Record<string, string>;
   operation?: ToolOperation;
 };
+
+export type HttpMcpServerConfig = {
+  id: string;
+  transport: "http";
+  url: string;
+  operation?: ToolOperation;
+};
+
+export type McpServerConfig = StdioMcpServerConfig | HttpMcpServerConfig;
+export type McpTransport = "stdio" | "http";
+export type McpFailureCategory = "connection" | "discovery" | "timeout" | "cancelled" | "tool";
 
 export type McpClientOptions = {
   connectTimeoutMilliseconds?: number;
@@ -42,6 +57,7 @@ export type McpClientOptions = {
 
 export type McpServerStatus = {
   id: string;
+  transport: McpTransport;
   state: "disconnected" | "connected";
   toolCount: number;
   /** Safe negotiated MCP metadata only; no server payloads or transport details. */
@@ -50,13 +66,17 @@ export type McpServerStatus = {
   callCount: number;
   failureCount: number;
   cancellationCount: number;
+  connectDurationMilliseconds?: number;
+  discoveryDurationMilliseconds?: number;
+  lastInvocationDurationMilliseconds?: number;
+  lastFailureCategory?: McpFailureCategory;
   lastError?: string;
 };
 
 type Connection = {
   config: McpServerConfig;
   client: Client;
-  transport: StdioClientTransport;
+  transport: StdioClientTransport | StreamableHTTPClientTransport;
   tools: AgentTool[];
   state: "connected" | "disconnected";
   protocolVersion?: string;
@@ -64,6 +84,10 @@ type Connection = {
   callCount: number;
   failureCount: number;
   cancellationCount: number;
+  connectDurationMilliseconds?: number;
+  discoveryDurationMilliseconds?: number;
+  lastInvocationDurationMilliseconds?: number;
+  lastFailureCategory?: McpFailureCategory;
   lastError?: string;
 };
 
@@ -77,6 +101,33 @@ function boundedOutput(output: string, maximum: number): string {
   const marker = `[MCP output truncated at ${maximum} bytes]`;
   const available = Math.max(0, maximum - Buffer.byteLength(`\n${marker}`));
   return `${bytes.subarray(0, available).toString("utf8")}\n${marker}`;
+}
+
+function boundedHttpResponse(response: Response, maximum: number): Response {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength && /^\d+$/.test(contentLength) && Number(contentLength) > maximum) {
+    throw new Error(`MCP HTTP response exceeds the ${maximum}-byte limit.`);
+  }
+  if (!response.body) return response;
+  let bytes = 0;
+  const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      bytes += chunk.byteLength;
+      if (bytes > maximum) {
+        controller.error(new Error(`MCP HTTP response exceeds the ${maximum}-byte limit.`));
+        return;
+      }
+      controller.enqueue(chunk);
+    },
+  }));
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+}
+
+function redactMcpText(value: string): string {
+  return value
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
+    .replace(/((?:\\?["'])?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|credential|authorization|auth)(?:\\?["'])?\s*(?:=|:)\s*\\?["']?)[^\s,\\"'}\]]+/gi, "$1[REDACTED]")
+    .replace(/\b(?:sk|rk)-[A-Za-z0-9._~-]+\b/gi, "[REDACTED]");
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
@@ -126,28 +177,70 @@ function timeout<T>(operation: Promise<T>, milliseconds: number, signal: AbortSi
   });
 }
 
+function transportOf(config: McpServerConfig): McpTransport {
+  return config.transport === "http" ? "http" : "stdio";
+}
+
+function failureCategory(error: unknown, fallback: "connection" | "discovery" | "tool", signal?: AbortSignal): McpFailureCategory {
+  if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) return "cancelled";
+  if (error instanceof Error && /timed out/i.test(error.message)) return "timeout";
+  return fallback;
+}
+
+function normalizedOperation(value: unknown, id: string): ToolOperation | undefined {
+  if (value !== undefined && !["READ", "WRITE", "EXECUTE"].includes(value as ToolOperation)) {
+    throw new Error(`MCP server ${id} operation must be READ, WRITE, or EXECUTE.`);
+  }
+  return value as ToolOperation | undefined;
+}
+
+function normalizedHttpUrl(value: unknown, id: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`MCP server ${id} URL must be a non-empty HTTP or HTTPS URL.`);
+  let url: URL;
+  try { url = new URL(value.trim()); }
+  catch { throw new Error(`MCP server ${id} URL must be a valid HTTP or HTTPS URL.`); }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`MCP server ${id} URL must use HTTP or HTTPS.`);
+  if (url.username || url.password) throw new Error(`MCP server ${id} URL must not include credentials.`);
+  if (url.hash) throw new Error(`MCP server ${id} URL must not include a fragment.`);
+  if (url.search) throw new Error(`MCP server ${id} URL must not include query parameters.`);
+  return url.toString();
+}
+
 function normalizeConfig(value: McpServerConfig): McpServerConfig {
-  if (!SERVER_ID_PATTERN.test(value.id)) throw new Error("MCP server ID must use letters, numbers, hyphens, and underscores only.");
-  if (typeof value.command !== "string" || !value.command.trim()) throw new Error(`MCP server ${value.id} command must be a non-empty string.`);
-  if (value.args !== undefined && (!Array.isArray(value.args) || value.args.some((argument) => typeof argument !== "string"))) {
-    throw new Error(`MCP server ${value.id} args must be strings.`);
+  const config = value as Record<string, unknown>;
+  const id = config.id;
+  if (typeof id !== "string" || !SERVER_ID_PATTERN.test(id)) throw new Error("MCP server ID must use letters, numbers, hyphens, and underscores only.");
+  const transport = config.transport;
+  if (transport !== undefined && transport !== "stdio" && transport !== "http") throw new Error(`MCP server ${id} transport must be stdio or http.`);
+  const operation = normalizedOperation(config.operation, id);
+  if (transport === "http") {
+    if (config.command !== undefined || config.args !== undefined || config.env !== undefined) {
+      throw new Error(`MCP HTTP server ${id} must not include stdio command, args, or env settings.`);
+    }
+    return { id, transport: "http", url: normalizedHttpUrl(config.url, id), ...(operation ? { operation } : {}) };
   }
-  if (value.args?.some((argument) => CREDENTIAL_ARGUMENT_PATTERN.test(argument))) {
-    throw new Error(`MCP server ${value.id} args must not contain credential-like arguments.`);
+  if (config.url !== undefined) {
+    throw new Error(`MCP server ${id} URL requires transport: http.`);
   }
-  if (value.operation !== undefined && !["READ", "WRITE", "EXECUTE"].includes(value.operation)) {
-    throw new Error(`MCP server ${value.id} operation must be READ, WRITE, or EXECUTE.`);
+  if (typeof config.command !== "string" || !config.command.trim()) throw new Error(`MCP server ${id} command must be a non-empty string.`);
+  if (config.args !== undefined && (!Array.isArray(config.args) || config.args.some((argument) => typeof argument !== "string"))) {
+    throw new Error(`MCP server ${id} args must be strings.`);
   }
-  if (value.env !== undefined) {
-    if (!value.env || typeof value.env !== "object" || Array.isArray(value.env)) throw new Error(`MCP server ${value.id} env must be a safe environment object.`);
-    for (const [key, environmentValue] of Object.entries(value.env)) {
+  const args = config.args as string[] | undefined;
+  if (args?.some((argument) => CREDENTIAL_ARGUMENT_PATTERN.test(argument))) {
+    throw new Error(`MCP server ${id} args must not contain credential-like arguments.`);
+  }
+  const environment = config.env;
+  if (environment !== undefined) {
+    if (!environment || typeof environment !== "object" || Array.isArray(environment)) throw new Error(`MCP server ${id} env must be a safe environment object.`);
+    for (const [key, environmentValue] of Object.entries(environment)) {
       if ((!SAFE_ENVIRONMENT_NAMES.has(key) && !key.startsWith("XDG_")) || SECRET_ENVIRONMENT_PATTERN.test(key)
         || typeof environmentValue !== "string" || SECRET_ENVIRONMENT_PATTERN.test(environmentValue) || environmentValue.length > 2048) {
-        throw new Error(`MCP server ${value.id} env must contain only safe environment values.`);
+        throw new Error(`MCP server ${id} env must contain only safe environment values.`);
       }
     }
   }
-  return { id: value.id, command: value.command.trim(), args: value.args ? [...value.args] : [], ...(value.env ? { env: { ...value.env } } : {}), ...(value.operation ? { operation: value.operation } : {}) };
+  return { id, ...(transport === "stdio" ? { transport: "stdio" as const } : {}), command: config.command.trim(), args: args ? [...args] : [], ...(environment ? { env: { ...(environment as Record<string, string>) } } : {}), ...(operation ? { operation } : {}) };
 }
 
 /** Produces a stable, provider-safe namespace without trusting arbitrary server tool names. */
@@ -162,7 +255,7 @@ function mappedToolName(serverId: string, toolName: string): string {
 export function parseMcpServerConfig(value: unknown): McpServerConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("MCP server config must be an object.");
   const config = value as Record<string, unknown>;
-  for (const key of Object.keys(config)) if (!new Set(["id", "command", "args", "env", "operation"]).has(key)) throw new Error(`Unknown MCP server config key: ${key}`);
+  for (const key of Object.keys(config)) if (!new Set(["id", "transport", "command", "args", "env", "url", "operation"]).has(key)) throw new Error(`Unknown MCP server config key: ${key}`);
   return normalizeConfig(config as McpServerConfig);
 }
 
@@ -207,12 +300,17 @@ export class McpClientManager {
       const connection = this.connections.get(config.id);
       return {
         id: config.id,
+        transport: transportOf(config),
         state: connection?.state ?? "disconnected",
         toolCount: connection?.state === "connected" ? connection.tools.length : 0,
         capabilities: connection?.capabilities ?? { tools: false },
         callCount: connection?.callCount ?? 0,
         failureCount: connection?.failureCount ?? 0,
         cancellationCount: connection?.cancellationCount ?? 0,
+        ...(connection?.connectDurationMilliseconds !== undefined ? { connectDurationMilliseconds: connection.connectDurationMilliseconds } : {}),
+        ...(connection?.discoveryDurationMilliseconds !== undefined ? { discoveryDurationMilliseconds: connection.discoveryDurationMilliseconds } : {}),
+        ...(connection?.lastInvocationDurationMilliseconds !== undefined ? { lastInvocationDurationMilliseconds: connection.lastInvocationDurationMilliseconds } : {}),
+        ...(connection?.lastFailureCategory ? { lastFailureCategory: connection.lastFailureCategory } : {}),
         ...(connection?.protocolVersion ? { protocolVersion: connection.protocolVersion } : {}),
         ...(connection?.lastError ? { lastError: connection.lastError } : {}),
       };
@@ -237,26 +335,26 @@ export class McpClientManager {
     const current = this.connections.get(id);
     if (current?.state === "connected") return current.tools;
     const client = new Client({ name: "dragons-agent", version: "0.1.0" });
-    const transport = new StdioClientTransport({
-      command: config.command,
-      args: config.args,
-      env: { ...getDefaultEnvironment(), ...config.env },
-      stderr: "pipe",
-      maxBufferSize: DEFAULT_MAX_MCP_TRANSPORT_BUFFER_BYTES,
-    });
+    const transport = this.createTransport(config);
     const connection: Connection = { config, client, transport, tools: [], state: "disconnected", capabilities: { tools: false }, callCount: 0, failureCount: 0, cancellationCount: 0 };
     transport.onerror = () => { connection.lastError = "MCP transport error."; };
     transport.onclose = () => { connection.state = "disconnected"; };
     this.connections.set(id, connection);
+    let phase: "connection" | "discovery" = "connection";
     try {
+      const connectStartedAt = Date.now();
       await timeout(client.connect(transport), this.options.connectTimeoutMilliseconds, signal, `MCP server ${id} connection timed out.`);
+      connection.connectDurationMilliseconds = Date.now() - connectStartedAt;
       connection.protocolVersion = client.getNegotiatedProtocolVersion();
       const capabilities = client.getServerCapabilities();
       connection.capabilities = { tools: Boolean(capabilities?.tools) };
       if (!connection.protocolVersion || !connection.capabilities.tools) {
         throw new Error(`MCP server ${id} did not negotiate the required tools capability.`);
       }
+      phase = "discovery";
+      const discoveryStartedAt = Date.now();
       const listed = await timeout(client.listTools(), this.options.connectTimeoutMilliseconds, signal, `MCP server ${id} tool discovery timed out.`);
+      connection.discoveryDurationMilliseconds = Date.now() - discoveryStartedAt;
       if (listed.tools.length > this.options.maxTools) throw new Error(`MCP server ${id} exposes more than ${this.options.maxTools} tools.`);
       const names = new Set(existingTools.map((tool) => tool.name));
       let totalSchemaBytes = 0;
@@ -281,8 +379,11 @@ export class McpClientManager {
       return tools;
     } catch (error: unknown) {
       connection.lastError = "MCP connection or discovery failed.";
+      connection.lastFailureCategory = failureCategory(error, phase, signal);
       await this.close(id);
-      throw error;
+      const message = redactMcpText(errorMessage(error));
+      if (error instanceof Error && message === error.message) throw error;
+      throw new Error(message);
     }
   }
 
@@ -304,8 +405,40 @@ export class McpClientManager {
     if (!connection) return;
     connection.state = "disconnected";
     connection.tools = [];
-    try { await connection.client.close(); }
-    catch { try { await connection.transport.close(); } catch { /* already closed */ } }
+    try {
+      if (connection.transport instanceof StreamableHTTPClientTransport) {
+        await timeout(
+          connection.transport.terminateSession(),
+          Math.min(this.options.connectTimeoutMilliseconds, DEFAULT_MCP_HTTP_SESSION_TERMINATION_TIMEOUT_MILLISECONDS),
+          undefined,
+          "MCP HTTP session termination timed out.",
+        ).catch(() => undefined);
+      }
+    } finally {
+      try { await connection.client.close(); }
+      catch { try { await connection.transport.close(); } catch { /* already closed */ } }
+    }
+  }
+
+  private createTransport(config: McpServerConfig): StdioClientTransport | StreamableHTTPClientTransport {
+    if (config.transport === "http") {
+      return new StreamableHTTPClientTransport(new URL(config.url), {
+        fetch: async (input, init) => boundedHttpResponse(await fetch(input, { ...(init ?? {}), redirect: "error" }), DEFAULT_MAX_MCP_HTTP_RESPONSE_BYTES),
+        reconnectionOptions: {
+          initialReconnectionDelay: 100,
+          maxReconnectionDelay: 100,
+          reconnectionDelayGrowFactor: 1,
+          maxRetries: 0,
+        },
+      });
+    }
+    return new StdioClientTransport({
+      command: config.command,
+      args: config.args,
+      env: { ...getDefaultEnvironment(), ...config.env },
+      stderr: "pipe",
+      maxBufferSize: DEFAULT_MAX_MCP_TRANSPORT_BUFFER_BYTES,
+    });
   }
 
   private agentTool(connection: Connection, mappedName: string, serverToolName: string, description: string, inputSchema: Record<string, unknown>, operation: ToolOperation): AgentTool {
@@ -317,19 +450,26 @@ export class McpClientManager {
       execute: async (input: unknown, execution: ToolExecutionOptions = {}): Promise<ToolResult> => {
         if (!isArgumentsObject(input)) return { ok: false, output: "MCP tool arguments must be a JSON-serializable object." };
         if (connection.state !== "connected") return { ok: false, output: `MCP server ${connection.config.id} is disconnected.` };
+        const invocationStartedAt = Date.now();
         try {
           connection.callCount += 1;
-          const result = await timeout(connection.client.callTool({ name: serverToolName, arguments: structuredClone(input) }), this.options.toolTimeoutMilliseconds, execution.signal, `MCP tool call timed out after ${this.options.toolTimeoutMilliseconds}ms.`);
-          if (result.isError) connection.failureCount += 1;
-          return { ok: !result.isError, output: boundedOutput(JSON.stringify(result.content), this.options.maxOutputBytes) };
+          const result = await timeout(connection.client.callTool({ name: serverToolName, arguments: structuredClone(input) }, { signal: execution.signal }), this.options.toolTimeoutMilliseconds, execution.signal, `MCP tool call timed out after ${this.options.toolTimeoutMilliseconds}ms.`);
+          if (result.isError) {
+            connection.failureCount += 1;
+            connection.lastFailureCategory = "tool";
+          }
+          return { ok: !result.isError, output: boundedOutput(redactMcpText(JSON.stringify(result.content)), this.options.maxOutputBytes) };
         } catch (error: unknown) {
           const cancelled = execution.signal?.aborted || (error instanceof DOMException && error.name === "AbortError");
           const timedOut = error instanceof Error && error.message.startsWith("MCP tool call timed out");
+          connection.lastFailureCategory = failureCategory(error, "tool", execution.signal);
           if (cancelled || timedOut) await this.close(connection.config.id);
           if (cancelled) { connection.cancellationCount += 1; return { ok: false, output: "MCP tool call cancelled." }; }
           if (timedOut) { connection.failureCount += 1; return { ok: false, output: error.message }; }
           connection.failureCount += 1;
-          return { ok: false, output: boundedOutput(`MCP tool ${mappedName} failed: ${errorMessage(error)}`, this.options.maxOutputBytes) };
+          return { ok: false, output: boundedOutput(redactMcpText(`MCP tool ${mappedName} failed: ${errorMessage(error)}`), this.options.maxOutputBytes) };
+        } finally {
+          connection.lastInvocationDurationMilliseconds = Date.now() - invocationStartedAt;
         }
       },
     };

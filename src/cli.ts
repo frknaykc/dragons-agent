@@ -272,7 +272,7 @@ async function listSessions(store: SessionStore, write: (text: string) => void):
 function writeMcpList(manager: McpClientManager, write: (text: string) => void): void {
   const servers = manager.list();
   if (servers.length === 0) { write("No MCP servers are configured.\n"); return; }
-  for (const server of servers) write(`${server.id}  ${server.command}\n`);
+  for (const server of servers) write(`${server.id}  ${server.transport === "http" ? "http" : "stdio"}\n`);
 }
 
 function writeMcpStatus(manager: McpClientManager, write: (text: string) => void): void {
@@ -280,9 +280,14 @@ function writeMcpStatus(manager: McpClientManager, write: (text: string) => void
   if (servers.length === 0) { write("No MCP servers are configured.\n"); return; }
   for (const server of servers) {
     const metadata = [
+      server.transport,
       server.protocolVersion ? `MCP ${server.protocolVersion}` : undefined,
+      server.connectDurationMilliseconds !== undefined ? `connect ${server.connectDurationMilliseconds}ms` : undefined,
+      server.discoveryDurationMilliseconds !== undefined ? `discover ${server.discoveryDurationMilliseconds}ms` : undefined,
+      server.lastInvocationDurationMilliseconds !== undefined ? `last call ${server.lastInvocationDurationMilliseconds}ms` : undefined,
       server.callCount > 0 ? `${server.callCount} call${server.callCount === 1 ? "" : "s"}` : undefined,
       server.failureCount > 0 ? `${server.failureCount} failure${server.failureCount === 1 ? "" : "s"}` : undefined,
+      server.lastFailureCategory ? `last failure ${server.lastFailureCategory}` : undefined,
     ].filter(Boolean).join(", ");
     write(`${server.id}: ${server.state} (${server.toolCount} tool${server.toolCount === 1 ? "" : "s"})${metadata ? ` — ${metadata}` : ""}${server.lastError ? ` — ${server.lastError}` : ""}\n`);
   }

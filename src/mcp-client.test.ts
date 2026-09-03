@@ -17,12 +17,12 @@ import {
   DEFAULT_MAX_MCP_SCHEMA_BYTES,
   McpClientManager,
   parseMcpServerConfig,
-  type McpServerConfig,
+  type StdioMcpServerConfig,
 } from "./mcp-client.js";
 
 const mockServer = fileURLToPath(new URL("./mcp-mock-server.js", import.meta.url));
 
-function fixture(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
+function fixture(overrides: Partial<StdioMcpServerConfig> = {}): StdioMcpServerConfig {
   return {
     id: "fixture",
     command: process.execPath,
@@ -31,7 +31,7 @@ function fixture(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
   };
 }
 
-async function connected(overrides: Partial<McpServerConfig> = {}) {
+async function connected(overrides: Partial<StdioMcpServerConfig> = {}) {
   const manager = new McpClientManager([fixture(overrides)]);
   await manager.connect("fixture", []);
   return manager;
@@ -155,6 +155,7 @@ test("M25 config and CLI/slash lifecycle remain explicit and process-local", asy
   assert.equal(calls, 0);
   assert.match(output.join(""), /Connected MCP server fixture \(1 tool\)/);
   assert.match(output.join(""), /fixture: connected \(1 tool\)/);
+  assert.match(output.join(""), /fixture: connected .*stdio/);
   assert.match(output.join(""), /Disconnected MCP server fixture/);
 });
 
