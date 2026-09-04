@@ -1,6 +1,8 @@
 import type { PlanMutationSource, PlanTaskStatus } from "../plan.js";
+import { DEFAULT_PROVIDER_IDS, type ProviderId } from "../provider/registry.js";
 
-export type ProviderName = "openai-api" | "chatgpt";
+export type ProviderName = ProviderId;
+
 
 export type CliCommand =
   | { kind: "run"; provider: ProviderName; model?: string; prompt?: string }
@@ -38,21 +40,23 @@ export type CliCommand =
   | { kind: "mcp"; action: "connect"; id: string }
   | { kind: "mcp"; action: "disconnect"; id: string };
 
-export function providerFrom(value: string): ProviderName {
-  if (value === "openai-api" || value === "chatgpt") return value;
-  throw new Error("Unknown provider. Use openai-api or chatgpt.");
+export function providerFrom(value: string, providerIds: readonly ProviderId[] = DEFAULT_PROVIDER_IDS): ProviderName {
+  if (providerIds.includes(value)) return value;
+  throw new Error(`Unknown provider. Use ${providerIds.join(", ") || "a registered provider"}.`);
 }
 
-function parseRunCommand(arguments_: string[]): CliCommand {
-  let provider: ProviderName = "openai-api";
+function parseRunCommand(arguments_: string[], providerIds: readonly ProviderId[]): CliCommand {
+  const defaultProvider = providerIds.includes("openai-api") ? "openai-api" : providerIds[0];
+  if (!defaultProvider) throw new Error("No providers are registered.");
+  let provider: ProviderName = defaultProvider;
   let model: string | undefined;
   const prompt: string[] = [];
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
     if (argument === "--provider") {
       const value = arguments_[index + 1];
-      if (!value) throw new Error("--provider requires openai-api or chatgpt.");
-      provider = providerFrom(value);
+      if (!value) throw new Error(`--provider requires ${providerIds.join(", ") || "a registered provider"}.`);
+      provider = providerFrom(value, providerIds);
       index += 1;
       continue;
     }
@@ -129,7 +133,7 @@ function parsePlanCommand(arguments_: string[]): Extract<CliCommand, { kind: "pl
   throw new Error("Use dragons plan list|runnable|history --session <id>, plan add <title> <description> [--parent <id>] [--depends-on <id[,id...]>] --session <id>, plan update <id> [--title <text>] [--description <text>] [--parent <id|none>] [--depends-on <id[,id...]|none>] --session <id>, plan status <id> <TODO|IN_PROGRESS|DONE|BLOCKED> [--reason <text>] --session <id>, plan recover <id> <DEPENDENCY_COMPLETED|USER_INPUT|CONDITION_RESOLVED> <note> --session <id>, plan replan <id> <reason> <replacement-title> <replacement-description> [--parent <id>] [--depends-on <id[,id...]>] --session <id>, or plan remove <id> --session <id>.");
 }
 
-export function parseCliCommand(arguments_: string[]): CliCommand {
+export function parseCliCommand(arguments_: string[], providerIds: readonly ProviderId[] = DEFAULT_PROVIDER_IDS): CliCommand {
   const forwardedArguments = arguments_[0] === "--" ? arguments_.slice(1) : arguments_;
   if (forwardedArguments[0] === "plan") return parsePlanCommand(forwardedArguments);
   if (forwardedArguments[0] === "mcp") {
@@ -185,12 +189,12 @@ export function parseCliCommand(arguments_: string[]): CliCommand {
   }
   if (forwardedArguments[0] === "config") {
     if (forwardedArguments[1] === "show" && forwardedArguments.length === 2) return { kind: "config", action: "show" };
-    if (forwardedArguments[1] === "set-provider" && forwardedArguments[2] && forwardedArguments.length === 3) return { kind: "config", action: "set-provider", provider: providerFrom(forwardedArguments[2]) };
-    if (forwardedArguments[1] === "set-model" && forwardedArguments[2] && forwardedArguments[3]?.trim() && forwardedArguments.length === 4) return { kind: "config", action: "set-model", provider: providerFrom(forwardedArguments[2]), model: forwardedArguments[3].trim() };
+    if (forwardedArguments[1] === "set-provider" && forwardedArguments[2] && forwardedArguments.length === 3) return { kind: "config", action: "set-provider", provider: providerFrom(forwardedArguments[2], providerIds) };
+    if (forwardedArguments[1] === "set-model" && forwardedArguments[2] && forwardedArguments[3]?.trim() && forwardedArguments.length === 4) return { kind: "config", action: "set-model", provider: providerFrom(forwardedArguments[2], providerIds), model: forwardedArguments[3].trim() };
     if (forwardedArguments[1] === "reset" && (forwardedArguments[2] === "provider" || forwardedArguments[2] === "model") && forwardedArguments.length === 3) return { kind: "config", action: "reset", target: forwardedArguments[2] };
     throw new Error("Use dragons config show, set-provider <provider>, set-model <provider> <model>, or reset <provider|model>.");
   }
-  if (forwardedArguments[0] !== "auth") return parseRunCommand(forwardedArguments);
+  if (forwardedArguments[0] !== "auth") return parseRunCommand(forwardedArguments, providerIds);
   const action = forwardedArguments[1];
   if (action !== "login" && action !== "status" && action !== "logout") {
     throw new Error("Use dragons auth login --provider chatgpt, dragons auth status, or dragons auth logout --provider chatgpt.");

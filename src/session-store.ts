@@ -5,8 +5,9 @@ import { compactContextText } from "./context-budget.js";
 import { isSkillReference, type SkillReference } from "./skills.js";
 import { isDragonsPlan, type DragonsPlan } from "./plan.js";
 import { joinPlatformPath } from "./platform-path.js";
+import { DEFAULT_PROVIDER_IDS, type ProviderId } from "./provider/registry.js";
 
-export type SessionProvider = "openai-api" | "chatgpt";
+export type SessionProvider = ProviderId;
 
 export type SessionMessage = {
   role: "user" | "assistant";
@@ -45,6 +46,8 @@ export type DragonsSessionDirectoryOptions = {
 export type SessionStoreOptions = {
   now?: () => Date;
   createId?: () => string;
+  /** Session files fail closed unless their provider is registered for this process. */
+  providerIds?: readonly ProviderId[];
 };
 
 export type SessionStore = {
@@ -75,17 +78,8 @@ export function compactSessionMessages(messages: readonly SessionMessage[], maxC
 }
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const PROVIDERS = new Set<SessionProvider>(["openai-api", "chatgpt"]);
-const FORBIDDEN_PROVIDER_STATE_KEYS = new Set([
-  "access_token",
-  "accesstoken",
-  "refresh_token",
-  "refreshtoken",
-  "authorization",
-  "credentials",
-  "password",
-  "secret",
-]);
+const FORBIDDEN_PROVIDER_STATE_KEY = /(?:api[_-]?key|private[_-]?key|(?:access|refresh|id)?[_-]?token|authorization|credentials?|password|secret|cookie|bearer)/i;
+const CREDENTIAL_VALUE_PATTERN = /(?:\b(?:sk-[a-z0-9_-]{12,}|AIza[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_-]{12,}|github_pat_[a-z0-9_-]{12,}|eyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,})\b|-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----|\bbearer\s+[a-z0-9._~+\/-]{8,}|\b(?:api[_ -]?key|(?:access|refresh|id)?[_ -]?token|authorization|credentials?|password|secret|cookie)\s*(?:=|:)\s*["']?[a-z0-9._~+\/-]{8,}|[?&](?:api[_-]?key|(?:access|refresh|id)?[_-]?token|authorization|credentials?|password|secret|cookie)=[^&\s]{8,})/i;
 
 export function getDragonsSessionDirectory(options: DragonsSessionDirectoryOptions = {}): string {
   const platform = options.platform ?? process.platform;
@@ -131,10 +125,11 @@ async function acquireSessionLock(directory: string, id: string): Promise<() => 
 }
 
 function containsProviderCredentials(value: unknown): boolean {
+  if (typeof value === "string") return CREDENTIAL_VALUE_PATTERN.test(value);
   if (Array.isArray(value)) return value.some(containsProviderCredentials);
   if (!isRecord(value)) return false;
   return Object.entries(value).some(([key, nested]) => (
-    FORBIDDEN_PROVIDER_STATE_KEYS.has(key.toLowerCase()) || containsProviderCredentials(nested)
+    FORBIDDEN_PROVIDER_STATE_KEY.test(key) || containsProviderCredentials(nested)
   ));
 }
 
@@ -145,7 +140,7 @@ function isSessionMessage(value: unknown): value is SessionMessage {
     && typeof value.createdAt === "string";
 }
 
-function parseSession(value: unknown): DragonsSession | undefined {
+function parseSession(value: unknown, providers: ReadonlySet<SessionProvider>): DragonsSession | undefined {
   if (!isRecord(value)
     || value.version !== 1
     || typeof value.id !== "string"
@@ -153,14 +148,18 @@ function parseSession(value: unknown): DragonsSession | undefined {
     || typeof value.createdAt !== "string"
     || typeof value.updatedAt !== "string"
     || typeof value.workingDirectory !== "string"
-    || !PROVIDERS.has(value.provider as SessionProvider)
+    || !providers.has(value.provider as SessionProvider)
     || typeof value.model !== "string"
     || !Array.isArray(value.messages)
     || !value.messages.every(isSessionMessage)) return undefined;
 
   const continuation = value.continuation;
   if (continuation !== undefined) {
-    if (!isRecord(continuation) || typeof continuation.responseId !== "string") return undefined;
+    if (!isRecord(continuation)
+      || typeof continuation.responseId !== "string"
+      || !continuation.responseId
+      || continuation.responseId.length > 512
+      || containsProviderCredentials(continuation.responseId)) return undefined;
     if (continuation.providerState !== undefined && (!isRecord(continuation.providerState) || containsProviderCredentials(continuation.providerState))) {
       return undefined;
     }
@@ -189,6 +188,7 @@ async function writeSession(filePath: string, session: DragonsSession): Promise<
 export function createSessionStore(directory: string, options: SessionStoreOptions = {}): SessionStore {
   const now = options.now ?? (() => new Date());
   const createId = options.createId ?? randomUUID;
+  const providers = new Set<SessionProvider>(options.providerIds ?? DEFAULT_PROVIDER_IDS);
 
   return {
     async create(metadata): Promise<DragonsSession> {
@@ -203,7 +203,7 @@ export function createSessionStore(directory: string, options: SessionStoreOptio
         model: metadata.model,
         messages: [],
       };
-      if (!parseSession(session)) throw new Error("Unable to create a valid Dragons session.");
+      if (!parseSession(session, providers)) throw new Error("Unable to create a valid Dragons session.");
       await writeSession(sessionPath(directory, session.id), session);
       return session;
     },
@@ -216,14 +216,14 @@ export function createSessionStore(directory: string, options: SessionStoreOptio
         return undefined;
       }
       try {
-        return parseSession(JSON.parse(await readFile(filePath, "utf8")) as unknown);
+        return parseSession(JSON.parse(await readFile(filePath, "utf8")) as unknown, providers);
       } catch {
         return undefined;
       }
     },
 
     async save(session): Promise<void> {
-      if (!parseSession(session)) throw new Error("Refusing to save an invalid or credential-bearing Dragons session.");
+      if (!parseSession(session, providers)) throw new Error("Refusing to save an invalid or credential-bearing Dragons session.");
       await writeSession(sessionPath(directory, session.id), session);
     },
 
@@ -233,7 +233,7 @@ export function createSessionStore(directory: string, options: SessionStoreOptio
         const current = await this.load(id);
         if (!current) return undefined;
         const next = await operation(structuredClone(current));
-        if (next.id !== id || !parseSession(next)) throw new Error("Refusing to save an invalid or credential-bearing Dragons session.");
+        if (next.id !== id || !parseSession(next, providers)) throw new Error("Refusing to save an invalid or credential-bearing Dragons session.");
         await writeSession(sessionPath(directory, id), next);
         return structuredClone(next);
       } finally {

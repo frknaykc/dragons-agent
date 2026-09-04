@@ -16,8 +16,8 @@ import {
   createChatGPTAuthService,
   type ChatGPTAuthService,
 } from "./provider/codex-auth.js";
-import { createCodexAgentModel, DEFAULT_CODEX_MODEL } from "./provider/codex.js";
-import { createOpenAIAgentModel, DEFAULT_OPENAI_MODEL } from "./provider/openai.js";
+import { createBuiltInProviderRegistry } from "./provider/builtins.js";
+import type { ProviderRegistry } from "./provider/registry.js";
 import { createCodingTools, type AgentTool } from "./tools.js";
 import { discoverProjectContext } from "./project-context.js";
 import { createSubagentTool } from "./subagents.js";
@@ -32,7 +32,7 @@ import {
 import { McpClientManager } from "./mcp-client.js";
 import { RuntimeDiagnosticsService, formatRuntimeDiagnostics, type RuntimeDiagnosticsRun } from "./diagnostics.js";
 import { createTerminalRenderer, type TerminalRenderer } from "./terminal/renderer.js";
-import { loadDragonsConfig, saveDragonsConfig, type DragonsConfig } from "./config.js";
+import { loadDragonsConfig, parseDragonsConfig, saveDragonsConfig, type DragonsConfig } from "./config.js";
 import { DRAGONS_VERSION } from "./version.js";
 import {
   compactSessionMessages,
@@ -66,10 +66,15 @@ import { handleInteractiveSkillsCommand, runSkillsCommand, writeActiveSkillNotic
 export { parseCliCommand } from "./cli/commands.js";
 export type { ProviderName } from "./cli/commands.js";
 
+type ModelFactory = { create(provider: ProviderName, model?: string): AgentModel }["create"];
+
 export type CliDependencies = {
   workingDirectory?: string;
   model?: AgentModel;
-  modelFactory?: (provider: ProviderName, model?: string) => AgentModel;
+  /** Method-style callback retains compatibility with existing narrowed built-in-provider test doubles. */
+  modelFactory?: ModelFactory;
+  /** Registered adapters for this CLI process. Registry metadata never stores credentials or session state. */
+  providerRegistry?: ProviderRegistry;
   chatgptAuth?: Pick<ChatGPTAuthService, "login" | "status" | "logout"> & Partial<Pick<ChatGPTAuthService, "credentials">>;
   tools?: AgentTool[];
   input?: NodeJS.ReadableStream;
@@ -223,24 +228,28 @@ function terminalRenderer(
   return createTerminalRenderer({ write, isTTY, color, width });
 }
 
+function providerRegistryFor(dependencies: CliDependencies): ProviderRegistry {
+  return dependencies.providerRegistry ?? createBuiltInProviderRegistry({
+    ...(dependencies.chatgptAuth?.credentials ? { chatgptAuth: { credentials: dependencies.chatgptAuth.credentials } } : {}),
+  });
+}
+
 function defaultModel(
+  providers: ProviderRegistry,
   provider: ProviderName,
   model: string | undefined,
   write: (text: string) => void,
-  chatgptAuth?: Pick<ChatGPTAuthService, "credentials">,
 ): AgentModel {
-  if (provider === "openai-api") return createOpenAIAgentModel(model);
-  const auth = chatgptAuth ?? createChatGPTAuthService({ write });
-  return createCodexAgentModel({ credentials: auth.credentials, model });
+  return providers.createModel(provider, { model, write });
 }
 
 /** Child delegation intentionally never reuses the parent model instance or continuation. */
-function createFreshSubagentModel(dependencies: CliDependencies, provider: ProviderName, model: string | undefined, write: (text: string) => void): AgentModel {
+function createFreshSubagentModel(dependencies: CliDependencies, providers: ProviderRegistry, provider: ProviderName, model: string | undefined, write: (text: string) => void): AgentModel {
   return dependencies.modelFactory?.(provider, model) ?? defaultModel(
+    providers,
     provider,
     model,
     write,
-    dependencies.chatgptAuth?.credentials ? { credentials: dependencies.chatgptAuth.credentials } : undefined,
   );
 }
 
@@ -263,16 +272,16 @@ async function runAuthCommand(command: Extract<CliCommand, { kind: "auth" }>, de
   write(`ChatGPT Subscription (Experimental): signed in${status.expiresAt ? ` (expires ${status.expiresAt})` : ""}${status.storage ? `\nCredential storage: ${status.storage}` : ""}\n`);
 }
 
-function providerLabel(provider: ProviderName): string {
-  return provider === "chatgpt" ? "ChatGPT Subscription (Experimental)" : "OpenAI API";
+function providerLabel(providers: ProviderRegistry, provider: ProviderName): string {
+  return providers.get(provider).label;
 }
 
-function selectedModel(provider: ProviderName, model: string | undefined): string {
-  return model ?? (provider === "chatgpt" ? DEFAULT_CODEX_MODEL : DEFAULT_OPENAI_MODEL);
+function selectedModel(providers: ProviderRegistry, provider: ProviderName, model: string | undefined): string {
+  return model ?? providers.get(provider).defaultModel;
 }
 
-function sessionStoreFor(dependencies: CliDependencies): SessionStore {
-  return dependencies.sessionStore ?? createSessionStore(dependencies.sessionDirectory ?? getDragonsSessionDirectory());
+function sessionStoreFor(dependencies: CliDependencies, providers: ProviderRegistry): SessionStore {
+  return dependencies.sessionStore ?? createSessionStore(dependencies.sessionDirectory ?? getDragonsSessionDirectory(), { providerIds: providers.ids() });
 }
 
 function skillsDirectoryFor(dependencies: CliDependencies): string {
@@ -378,6 +387,7 @@ async function requireSessionWorkspace(workingDirectory: string): Promise<void> 
 async function runInteractiveConversation(
   command: Extract<CliCommand, { kind: "run" }>,
   dependencies: CliDependencies,
+  providers: ProviderRegistry,
   write: (text: string) => void,
   model: AgentModel | undefined,
   tools: AgentTool[],
@@ -404,7 +414,7 @@ async function runInteractiveConversation(
   let conversationResponseId = session.continuation?.responseId;
   let continuationState = session.continuation?.providerState;
   let activeProvider = command.provider;
-  let activeModelName = selectedModel(command.provider, command.model);
+  let activeModelName = selectedModel(providers, command.provider, command.model);
   let activeModelInput = command.model;
   let activeModel = model;
   let activeSkillReferences: SkillReference[] = session.skills ?? [];
@@ -425,7 +435,7 @@ async function runInteractiveConversation(
   });
   await persistentJobs.initialize();
   const persistentJobOptions = async (prompt: string) => ({
-    createModel: () => createFreshSubagentModel(dependencies, activeProvider, activeModelName, write),
+    createModel: () => createFreshSubagentModel(dependencies, providers, activeProvider, activeModelName, write),
     tools,
     projectContext: await discoverProjectContext(workingDirectory),
     skills: await createSkillsContext(skillsDirectory, activeSkillReferences, workingDirectory),
@@ -438,7 +448,7 @@ async function runInteractiveConversation(
   };
 
   renderer.renderStartup({
-    provider: providerLabel(activeProvider),
+    provider: providerLabel(providers, activeProvider),
     model: activeModelName,
     workingDirectory,
   });
@@ -519,7 +529,7 @@ async function runInteractiveConversation(
         // session must receive a fresh adapter before its serialized state is applied.
         activeModel = dependencies.modelFactory?.(activeProvider, activeModelName)
           ?? dependencies.model
-          ?? defaultModel(activeProvider, activeModelName, write);
+          ?? defaultModel(providers, activeProvider, activeModelName, write);
         await memoryStore.clearSuggestions();
         sessionApprovals.clear();
         write(`Resumed session: ${session.id}\n`);
@@ -596,7 +606,7 @@ async function runInteractiveConversation(
           const background = backgroundTasks.start({
             sessionId: session.id,
             prompt,
-            createModel: () => createFreshSubagentModel(dependencies, activeProvider, activeModelName, write),
+            createModel: () => createFreshSubagentModel(dependencies, providers, activeProvider, activeModelName, write),
             tools,
             workingDirectory,
             projectContext,
@@ -653,11 +663,11 @@ async function runInteractiveConversation(
         const nextModel = task.slice("/model ".length).trim();
         if (!nextModel) { write("Usage: /model <name>\n"); continue; }
         const nextConfig: DragonsConfig = { ...(dependencies.config ?? {}), version: 1, models: { ...(dependencies.config?.models ?? {}), [activeProvider]: nextModel } };
-        await saveDragonsConfig(nextConfig, dependencies.configPath);
+        await saveDragonsConfig(nextConfig, dependencies.configPath, providers.ids());
         backgroundTasks.cancelForSession(session.id);
         activeModelName = nextModel;
         activeModelInput = nextModel;
-        activeModel = dependencies.modelFactory?.(activeProvider, nextModel) ?? dependencies.model ?? defaultModel(activeProvider, nextModel, write);
+        activeModel = dependencies.modelFactory?.(activeProvider, nextModel) ?? dependencies.model ?? defaultModel(providers, activeProvider, nextModel, write);
         await memoryStore.clearSuggestions();
         session = await sessionStore.create({ workingDirectory, provider: activeProvider, model: activeModelName });
         activeSkillReferences = [];
@@ -668,22 +678,22 @@ async function runInteractiveConversation(
         continue;
       }
       if (task === "/provider") {
-        write(`Provider: ${activeProvider}\nUse /provider <openai-api|chatgpt> to start a new conversation with that provider.\n`);
+        write(`Provider: ${activeProvider}\nUse /provider <${providers.ids().join("|")}> to start a new conversation with that provider.\n`);
         continue;
       }
       if (task.startsWith("/provider ")) {
         let nextProvider: ProviderName;
-        try { nextProvider = providerFrom(task.slice("/provider ".length).trim()); }
+        try { nextProvider = providerFrom(task.slice("/provider ".length).trim(), providers.ids()); }
         catch (error: unknown) { write(`${error instanceof Error ? error.message : "Invalid provider."}\n`); continue; }
         const configuredModel = dependencies.config?.models?.[nextProvider] ?? dependencies.config?.model;
-        const nextModel = selectedModel(nextProvider, configuredModel);
+        const nextModel = selectedModel(providers, nextProvider, configuredModel);
         const nextConfig: DragonsConfig = { ...(dependencies.config ?? {}), version: 1, provider: nextProvider };
-        await saveDragonsConfig(nextConfig, dependencies.configPath);
+        await saveDragonsConfig(nextConfig, dependencies.configPath, providers.ids());
         backgroundTasks.cancelForSession(session.id);
         activeProvider = nextProvider;
         activeModelName = nextModel;
         activeModelInput = configuredModel;
-        activeModel = dependencies.modelFactory?.(activeProvider, nextModel) ?? dependencies.model ?? defaultModel(activeProvider, nextModel, write);
+        activeModel = dependencies.modelFactory?.(activeProvider, nextModel) ?? dependencies.model ?? defaultModel(providers, activeProvider, nextModel, write);
         await memoryStore.clearSuggestions();
         session = await sessionStore.create({ workingDirectory, provider: activeProvider, model: activeModelName });
         activeSkillReferences = [];
@@ -738,7 +748,7 @@ async function runInteractiveConversation(
         });
         const authorize = createAuthorizer(answers, (request) => renderer.renderApproval(request), controller.signal);
         const subagent = createSubagentTool({
-          createModel: () => createFreshSubagentModel(dependencies, activeProvider, activeModelName, write),
+          createModel: () => createFreshSubagentModel(dependencies, providers, activeProvider, activeModelName, write),
           tools: [...tools, suggestionTool],
           projectContext,
           skills,
@@ -748,7 +758,7 @@ async function runInteractiveConversation(
           authorizeNested: ({ name, task }) => authorize({ name, operation: "EXECUTE", arguments: task }),
         });
         const parallelSubagents = createParallelSubagentTool({
-          createModel: () => createFreshSubagentModel(dependencies, activeProvider, activeModelName, write),
+          createModel: () => createFreshSubagentModel(dependencies, providers, activeProvider, activeModelName, write),
           tools: [...tools, suggestionTool],
           projectContext,
           skills,
@@ -757,7 +767,7 @@ async function runInteractiveConversation(
         });
         const orchestrationTools = createPlanOrchestrationTools({
           resolveStore: () => createSessionPlanStore(sessionStore, session.id),
-          createModel: () => createFreshSubagentModel(dependencies, activeProvider, activeModelName, write),
+          createModel: () => createFreshSubagentModel(dependencies, providers, activeProvider, activeModelName, write),
           tools: [...tools, suggestionTool],
           projectContext,
           skills,
@@ -769,7 +779,7 @@ async function runInteractiveConversation(
         operations.set(subagent.name, subagent.operation);
         operations.set(parallelSubagents.name, parallelSubagents.operation);
         for (const tool of orchestrationTools) operations.set(tool.name, tool.operation);
-        activeModel ??= dependencies.modelFactory?.(activeProvider, activeModelInput) ?? dependencies.model ?? defaultModel(activeProvider, activeModelName, write);
+        activeModel ??= dependencies.modelFactory?.(activeProvider, activeModelInput) ?? dependencies.model ?? defaultModel(providers, activeProvider, activeModelName, write);
         const runDiagnostics = diagnostics.start({ sessionId: session.id, provider: activeProvider, model: activeModelName });
         const result = await runAgent({
           task,
@@ -843,22 +853,23 @@ export async function main(
   dependencies: CliDependencies = {},
 ): Promise<void> {
   const write = dependencies.write ?? ((text: string) => process.stdout.write(text));
+  const providers = providerRegistryFor(dependencies);
   if (arguments_.length === 1 && arguments_[0] === "--version") {
     write(`dragons ${DRAGONS_VERSION}\n`);
     return;
   }
   if (arguments_.length === 1 && (arguments_[0] === "--help" || arguments_[0] === "-h")) {
-    write("Usage: dragons [--provider openai-api|chatgpt] [--model <model>] [task]\n\nRun without a task for interactive mode. Commands: auth, config, session, skills, memory, plan, mcp. ChatGPT Subscription is experimental.\n");
+    write(`Usage: dragons [--provider ${providers.ids().join("|")}] [--model <model>] [task]\n\nRun without a task for interactive mode. Commands: auth, config, session, skills, memory, plan, mcp.\n`);
     return;
   }
-  let config = dependencies.config ?? {};
+  let config = dependencies.config ? parseDragonsConfig(dependencies.config, providers.ids()) : {};
   if (!dependencies.config) {
-    try { config = await loadDragonsConfig(dependencies.configPath); }
+    try { config = await loadDragonsConfig(dependencies.configPath, providers.ids()); }
     catch (error: unknown) {
       if (!(error instanceof Error) || !error.message.startsWith("Unable to determine a home directory")) throw error;
     }
   }
-  let parsedCommand = parseCliCommand(arguments_);
+  let parsedCommand = parseCliCommand(arguments_, providers.ids());
   if (parsedCommand.kind === "run") {
     const providerExplicit = arguments_.includes("--provider");
     const modelExplicit = arguments_.includes("--model");
@@ -905,7 +916,7 @@ export async function main(
     if (parsedCommand.action === "set-model") next.models = { ...next.models, [parsedCommand.provider]: parsedCommand.model };
     if (parsedCommand.action === "reset" && parsedCommand.target === "provider") delete next.provider;
     if (parsedCommand.action === "reset" && parsedCommand.target === "model") { delete next.model; delete next.models; }
-    await saveDragonsConfig(next, dependencies.configPath);
+    await saveDragonsConfig(next, dependencies.configPath, providers.ids());
     write("Dragons configuration updated.\n");
     return;
   }
@@ -914,7 +925,7 @@ export async function main(
     return;
   }
   if (parsedCommand.kind === "plan") {
-    await runPlanCommand(parsedCommand, sessionStoreFor(dependencies), write);
+    await runPlanCommand(parsedCommand, sessionStoreFor(dependencies, providers), write);
     return;
   }
   if (parsedCommand.kind === "memory") {
@@ -931,7 +942,7 @@ export async function main(
       command: parsedCommand,
       directory: skillsDirectoryFor(dependencies),
       workingDirectory: dependencies.workingDirectory ?? process.cwd(),
-      sessionStore: sessionStoreFor(dependencies),
+      sessionStore: sessionStoreFor(dependencies, providers),
       write,
     });
     return;
@@ -941,7 +952,7 @@ export async function main(
   let command: Extract<CliCommand, { kind: "run" }>;
   let resumedSession: DragonsSession | undefined;
   if (parsedCommand.kind === "session") {
-    sessions = sessionStoreFor(dependencies);
+    sessions = sessionStoreFor(dependencies, providers);
     if (parsedCommand.action === "list") {
       await listSessions(sessions, write);
       return;
@@ -974,22 +985,22 @@ export async function main(
     shellTimeoutMilliseconds: config.shellTimeoutMilliseconds,
   });
   if (!command.prompt) {
-    const store = sessions ?? sessionStoreFor(dependencies);
+    const store = sessions ?? sessionStoreFor(dependencies, providers);
     const session = resumedSession ?? await store.create({
       workingDirectory,
       provider: command.provider,
-      model: selectedModel(command.provider, command.model),
+      model: selectedModel(providers, command.provider, command.model),
     });
-    await runInteractiveConversation(command, { ...dependencies, config }, write, dependencies.model, tools, workingDirectory, skillsDirectoryFor(dependencies), memoryStoreFor(dependencies), store, session, Boolean(resumedSession), mcp, diagnostics);
+    await runInteractiveConversation(command, { ...dependencies, config }, providers, write, dependencies.model, tools, workingDirectory, skillsDirectoryFor(dependencies), memoryStoreFor(dependencies), store, session, Boolean(resumedSession), mcp, diagnostics);
     return;
   }
   const model = dependencies.model
     ?? dependencies.modelFactory?.(command.provider, command.model)
     ?? defaultModel(
+      providers,
       command.provider,
       command.model,
       write,
-      dependencies.chatgptAuth?.credentials ? { credentials: dependencies.chatgptAuth.credentials } : undefined,
     );
   if (command.provider === "chatgpt") write("ChatGPT Subscription (Experimental)\n");
   const input = dependencies.input ?? process.stdin;
@@ -1009,13 +1020,13 @@ export async function main(
       onSuggestion: (suggestion) => { write(formatMemorySuggestion(suggestion, false)); return true; },
     });
     const subagent = createSubagentTool({
-      createModel: () => createFreshSubagentModel(dependencies, command.provider, command.model, write),
+      createModel: () => createFreshSubagentModel(dependencies, providers, command.provider, command.model, write),
       tools: [...tools, suggestionTool],
       projectContext,
       memory,
     });
     const parallelSubagents = createParallelSubagentTool({
-      createModel: () => createFreshSubagentModel(dependencies, command.provider, command.model, write),
+      createModel: () => createFreshSubagentModel(dependencies, providers, command.provider, command.model, write),
       tools: [...tools, suggestionTool],
       projectContext,
       memory,
@@ -1024,7 +1035,7 @@ export async function main(
     operations.set(suggestionTool.name, suggestionTool.operation);
     operations.set(subagent.name, subagent.operation);
     operations.set(parallelSubagents.name, parallelSubagents.operation);
-    const runDiagnostics = diagnostics.start({ provider: command.provider, model: selectedModel(command.provider, command.model) });
+    const runDiagnostics = diagnostics.start({ provider: command.provider, model: selectedModel(providers, command.provider, command.model) });
     await runAgent({
       task: command.prompt,
       model,

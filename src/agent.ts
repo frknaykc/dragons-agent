@@ -20,6 +20,13 @@ export type ToolOutput = {
 
 export type SerializableConversationState = Record<string, unknown>;
 
+/** Optional normalized provider-reported usage; absent means the adapter did not expose it. */
+export type AgentUsage = {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+};
+
 export type AgentRequest = {
   task: string;
   projectContext?: ProjectContext;
@@ -48,6 +55,7 @@ export type AgentResponse = {
   text: string;
   textWasStreamed?: boolean;
   toolCalls: ToolCall[];
+  usage?: AgentUsage;
   continuationState?: SerializableConversationState;
 };
 
@@ -109,6 +117,7 @@ export type AgentRunResult = {
   finalText: string;
   turns: number;
   responseId: string;
+  usage?: AgentUsage;
   continuationState?: SerializableConversationState;
 };
 
@@ -127,6 +136,16 @@ function emit(options: AgentRunOptions, event: AgentEvent): void {
 
 function throwIfCancelled(options: AgentRunOptions): void {
   if (options.signal?.aborted) throw new AgentRunCancelledError();
+}
+
+function normalizedUsage(usage: AgentUsage | undefined): AgentUsage | undefined {
+  if (!usage) return undefined;
+  const normalized: AgentUsage = {};
+  for (const key of ["inputTokens", "outputTokens", "totalTokens"] as const) {
+    const value = usage[key];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) normalized[key] = value;
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 /** Parses provider ToolCall arguments before any local tool receives them. */
@@ -227,6 +246,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
   let continuationState = options.continuationState;
   let toolOutputs: ToolOutput[] = [];
   let toolCallCount = 0;
+  let usage: AgentUsage | undefined;
   const completedToolCallIds = new Set<string>();
   const sessionApprovals = options.sessionApprovals ?? new Set<string>();
   const contextBudgetChars = options.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS;
@@ -269,6 +289,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       throwIfCancelled(options);
 
       previousResponseId = response.responseId;
+      usage = normalizedUsage(response.usage);
       if (response.continuationState !== undefined) continuationState = response.continuationState;
 
       if (response.text && !response.textWasStreamed) {
@@ -282,6 +303,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
           finalText: response.text,
           turns,
           responseId: response.responseId,
+          ...(usage === undefined ? {} : { usage }),
           continuationState,
         };
       }
