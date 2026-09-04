@@ -1,4 +1,4 @@
-import { createMemoryContext, createProjectMemoryScope } from "../memory.js";
+import { createMemoryContext, createProjectMemoryScope, retrieveRelevantMemories } from "../memory.js";
 import type { MemoryScope, MemoryStore } from "../memory.js";
 import type { CliCommand } from "./commands.js";
 
@@ -22,13 +22,13 @@ export async function listMemories(store: MemoryStore, write: (text: string) => 
   for (const memory of memories) write(`${memory.id}  ${memory.createdAt}  ${memory.scope.kind}\n${memory.body}\n`);
 }
 
-export async function memoryContextFor(store: MemoryStore, workingDirectory: string) {
+export async function memoryContextFor(store: MemoryStore, workingDirectory: string, task: string) {
   const projectScope = await createProjectMemoryScope(workingDirectory);
   const [userMemories, projectMemories] = await Promise.all([
     store.list({ kind: "USER" }),
     store.list(projectScope),
   ]);
-  return createMemoryContext([...userMemories, ...projectMemories]);
+  return createMemoryContext(retrieveRelevantMemories([...userMemories, ...projectMemories], task, projectScope));
 }
 
 export async function runMemoryCommand(input: {

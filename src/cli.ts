@@ -472,7 +472,7 @@ async function runInteractiveConversation(
         const prompt = task.slice("/tasks start ".length).trim();
         try {
           const skills = await createSkillsContext(skillsDirectory, activeSkillReferences, workingDirectory);
-          const memory = await memoryContextFor(memoryStore, workingDirectory);
+          const memory = await memoryContextFor(memoryStore, workingDirectory, prompt);
           const projectContext = await discoverProjectContext(workingDirectory);
           const plan = { version: 1 as const, tasks: await createSessionPlanStore(sessionStore, session.id).list() };
           const background = backgroundTasks.start({
@@ -609,7 +609,7 @@ async function runInteractiveConversation(
       activeController = controller;
       try {
         const skills = await createSkillsContext(skillsDirectory, activeSkillReferences, workingDirectory);
-        const memory = await memoryContextFor(memoryStore, workingDirectory);
+        const memory = await memoryContextFor(memoryStore, workingDirectory, task);
         const projectContext = await discoverProjectContext(workingDirectory);
         // The parent receives one immutable current-session plan snapshot; mutations remain AgentTool calls behind M10.
         const plan = { version: 1 as const, tasks: await createSessionPlanStore(sessionStore, session.id).list() };
@@ -857,7 +857,7 @@ export async function main(
   process.once("SIGINT", cancelRun);
   try {
     const memoryStore = memoryStoreFor(dependencies);
-    const memory = await memoryContextFor(memoryStore, workingDirectory);
+    const memory = await memoryContextFor(memoryStore, workingDirectory, command.prompt);
     const projectContext = await discoverProjectContext(workingDirectory);
     const suggestionTool = createMemorySuggestionTool({
       store: memoryStore,

@@ -68,7 +68,7 @@ test("M30 interactive advanced workflow keeps plan, MCP, subagent, and backgroun
       yield "/skills activate review-skill\n";
       yield "/memory add Persist only this advisory preference.\n";
       yield "/plan add Local plan --description Local plan description\n";
-      yield "Run the advanced workflow.\n";
+      yield "Run the advanced advisory preference workflow.\n";
       yield "yes\n";
       yield "yes\n";
       yield "yes\n";
@@ -81,7 +81,7 @@ test("M30 interactive advanced workflow keeps plan, MCP, subagent, and backgroun
       modelsCreated += 1;
       return {
         async respond(request) {
-          if (request.task === "Run the advanced workflow.") {
+          if (request.task === "Run the advanced advisory preference workflow.") {
             parentRequests.push(request);
             if (request.toolOutputs.length === 0) {
               assert.match(request.projectContext?.instructions?.content ?? "", /inside the workspace/);
