@@ -34,10 +34,14 @@ export type DragonsMemory = {
   body: string;
   createdAt: string;
   scope: MemoryScope;
+  provenance?: "MANUAL" | "ACCEPTED_SUGGESTION";
+  expiresAt?: string;
 };
 
 type MemoryEvent =
-  | { type: "add"; id: string; body: string; createdAt: string; scope: MemoryScope }
+  | { type: "add"; id: string; body: string; createdAt: string; scope: MemoryScope; provenance?: DragonsMemory["provenance"] }
+  | { type: "update"; id: string; body: string; createdAt: string; scope: MemoryScope; provenance?: DragonsMemory["provenance"] }
+  | { type: "expire"; id: string; expiresAt: string; createdAt: string; scope: MemoryScope }
   | { type: "delete"; id: string; createdAt: string; scope: MemoryScope };
 
 type MemoryStorage = {
@@ -100,6 +104,9 @@ export type MemoryStore = {
   list(scope?: MemoryScope): Promise<DragonsMemory[]>;
   get(id: string, scope?: MemoryScope): Promise<DragonsMemory | undefined>;
   delete(id: string, scope?: MemoryScope): Promise<boolean>;
+  update(id: string, input: { body: string }, scope?: MemoryScope): Promise<DragonsMemory | undefined>;
+  expire(id: string, expiresAt: string, scope?: MemoryScope): Promise<boolean>;
+  cleanup(scope?: MemoryScope): Promise<{ removed: number }>;
 };
 
 export type MemoryRetrievalOptions = {
@@ -166,6 +173,7 @@ export function retrieveRelevantMemories(
       && typeof memory.body === "string"
       && validTimestamp(memory.createdAt)
       && isMemoryScope(memory.scope)
+      && isUnexpired(memory, Date.now())
       && (memory.scope.kind === "USER" || sameScope(memory.scope, currentProjectScope)))
     .map((memory) => ({ memory, score: [...retrievalTokens(memory.body)].reduce((total, token) => total + (taskTokens.has(token) ? 1 : 0), 0) }))
     .filter(({ score }) => score > 0)
@@ -209,10 +217,37 @@ function validTimestamp(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+function validExpirationTimestamp(value: unknown): value is string {
+  return validTimestamp(value) && Number.isFinite(Date.parse(value));
+}
+
+function normalizedExpirationTimestamp(value: unknown): string | undefined {
+  return validExpirationTimestamp(value) ? new Date(value).toISOString() : undefined;
+}
+
+function isUnexpired(memory: DragonsMemory, timestamp: number): boolean {
+  return memory.expiresAt === undefined || Date.parse(memory.expiresAt) > timestamp;
+}
+
 function parseEvent(value: unknown, maxBodyCharacters: number): MemoryEvent | undefined {
   if (!isRecord(value) || typeof value.type !== "string" || typeof value.id !== "string" || !isSafeMemoryId(value.id) || !validTimestamp(value.createdAt) || !isMemoryScope(value.scope)) return undefined;
   if (value.type === "add" && validBody(value.body, maxBodyCharacters) && !containsLikelySecret(value.body)) {
-    return { type: "add", id: value.id, body: value.body, createdAt: value.createdAt, scope: value.scope };
+    if (value.provenance !== undefined && value.provenance !== "MANUAL" && value.provenance !== "ACCEPTED_SUGGESTION") return undefined;
+    return {
+      type: "add",
+      id: value.id,
+      body: value.body,
+      createdAt: value.createdAt,
+      scope: value.scope,
+      ...(value.provenance === undefined ? {} : { provenance: value.provenance }),
+    };
+  }
+  if (value.type === "update" && validBody(value.body, maxBodyCharacters) && !containsLikelySecret(value.body)) {
+    if (value.provenance !== undefined && value.provenance !== "MANUAL" && value.provenance !== "ACCEPTED_SUGGESTION") return undefined;
+    return { type: "update", id: value.id, body: value.body, createdAt: value.createdAt, scope: value.scope, ...(value.provenance === undefined ? {} : { provenance: value.provenance }) };
+  }
+  if (value.type === "expire" && validExpirationTimestamp(value.expiresAt)) {
+    return { type: "expire", id: value.id, expiresAt: value.expiresAt, createdAt: value.createdAt, scope: value.scope };
   }
   if (value.type === "delete" && value.body === undefined) return { type: "delete", id: value.id, createdAt: value.createdAt, scope: value.scope };
   return undefined;
@@ -231,7 +266,7 @@ function parseStorage(value: unknown, maxBodyCharacters: number): MemoryStorage 
     } else {
       const scope = active.get(event.id);
       if (!scope || !sameScope(scope, event.scope)) return undefined;
-      active.delete(event.id);
+      if (event.type === "delete") active.delete(event.id);
     }
     events.push(event);
   }
@@ -276,8 +311,23 @@ async function writeStorage(directory: string, storage: MemoryStorage): Promise<
 function activeMemories(storage: MemoryStorage, scope?: MemoryScope): DragonsMemory[] {
   const active = new Map<string, DragonsMemory>();
   for (const event of storage.events) {
-    if (event.type === "add") active.set(event.id, { id: event.id, body: event.body, createdAt: event.createdAt, scope: event.scope });
-    else active.delete(event.id);
+    if (event.type === "add") {
+      active.set(event.id, {
+        id: event.id,
+        body: event.body,
+        createdAt: event.createdAt,
+        scope: event.scope,
+        ...(event.provenance === undefined ? {} : { provenance: event.provenance }),
+      });
+    } else if (event.type === "update") {
+      const memory = active.get(event.id);
+      if (memory) active.set(event.id, { ...memory, body: event.body, ...(event.provenance === undefined ? {} : { provenance: event.provenance }) });
+    } else if (event.type === "expire") {
+      const memory = active.get(event.id);
+      if (memory) active.set(event.id, { ...memory, expiresAt: event.expiresAt });
+    } else {
+      active.delete(event.id);
+    }
   }
   return [...active.values()]
     .filter((memory) => !scope || sameScope(memory.scope, scope))
@@ -312,7 +362,7 @@ export function createMemoryStore(directory: string, options: MemoryStoreOptions
       const id = createId();
       if (!isSafeMemoryId(id)) throw new Error("Unable to create a valid Dragons memory ID.");
       if (storage.events.some((event) => event.type === "add" && event.id === id)) throw new Error("Unable to create a unique Dragons memory ID.");
-      const memory: DragonsMemory = { id, body: memoryInput.body, createdAt: now().toISOString(), scope: memoryInput.scope };
+      const memory: DragonsMemory = { id, body: memoryInput.body, createdAt: now().toISOString(), scope: memoryInput.scope, provenance: "MANUAL" };
       await writeStorage(directory, { ...storage, events: [...storage.events, { type: "add", ...memory }] });
       return memory;
     },
@@ -350,7 +400,16 @@ export function createMemoryStore(directory: string, options: MemoryStoreOptions
       if (!isSafeMemoryId(id)) return undefined;
       const suggestion = pendingSuggestions.get(id);
       if (!suggestion) return undefined;
-      const memory = await this.add({ body: suggestion.body, scope: suggestion.scope });
+      await ensureMemoryDirectory(directory);
+      const storage = await readStorage(directory, maxBodyCharacters);
+      if (activeMemories(storage).length >= maxRecords) throw new Error(`Memory record limit of ${maxRecords} reached.`);
+      const memoryId = createId();
+      if (!isSafeMemoryId(memoryId) || storage.events.some((event) => event.type === "add" && event.id === memoryId)) throw new Error("Unable to create a unique Dragons memory ID.");
+      const memory: DragonsMemory = { id: memoryId, body: suggestion.body, createdAt: now().toISOString(), scope: suggestion.scope, provenance: "ACCEPTED_SUGGESTION" };
+      await writeStorage(directory, {
+        ...storage,
+        events: [...storage.events, { type: "add", ...memory }],
+      });
       pendingSuggestions.delete(id);
       return memory;
     },
@@ -368,7 +427,9 @@ export function createMemoryStore(directory: string, options: MemoryStoreOptions
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
         throw error;
       }
-      return activeMemories(await readStorage(directory, maxBodyCharacters), scope);
+      const timestamp = now().getTime();
+      return activeMemories(await readStorage(directory, maxBodyCharacters), scope)
+        .filter((memory) => isUnexpired(memory, timestamp));
     },
 
     async get(id, scope): Promise<DragonsMemory | undefined> {
@@ -387,6 +448,57 @@ export function createMemoryStore(directory: string, options: MemoryStoreOptions
         events: [...storage.events, { type: "delete", id, createdAt: now().toISOString(), scope: memory.scope }],
       });
       return true;
+    },
+
+    async update(id, input, scope): Promise<DragonsMemory | undefined> {
+      if (!isSafeMemoryId(id)) return undefined;
+      if (!validBody(input.body, maxBodyCharacters)) throw new Error(`Memory body must be non-empty and no longer than ${maxBodyCharacters} characters.`);
+      if (containsLikelySecret(input.body)) throw new Error("Memory body appears to contain a secret and was not saved.");
+      await ensureMemoryDirectory(directory);
+      const storage = await readStorage(directory, maxBodyCharacters);
+      const memory = activeMemories(storage, scope).find((candidate) => candidate.id === id);
+      if (!memory) return undefined;
+      await writeStorage(directory, {
+        ...storage,
+        events: [...storage.events, { type: "update", id, body: input.body, createdAt: now().toISOString(), scope: memory.scope }],
+      });
+      return { ...memory, body: input.body, scope: { ...memory.scope } as MemoryScope };
+    },
+
+    async expire(id, expiresAt, scope): Promise<boolean> {
+      const normalizedExpiresAt = normalizedExpirationTimestamp(expiresAt);
+      if (!isSafeMemoryId(id) || !normalizedExpiresAt) return false;
+      await ensureMemoryDirectory(directory);
+      const storage = await readStorage(directory, maxBodyCharacters);
+      const memory = activeMemories(storage, scope).find((candidate) => candidate.id === id);
+      if (!memory) return false;
+      await writeStorage(directory, {
+        ...storage,
+        events: [...storage.events, { type: "expire", id, expiresAt: normalizedExpiresAt, createdAt: now().toISOString(), scope: memory.scope }],
+      });
+      return true;
+    },
+
+    async cleanup(scope): Promise<{ removed: number }> {
+      try {
+        const entry = await lstat(directory);
+        if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error("Dragons memory directory must be a real directory, not a symlink.");
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return { removed: 0 };
+        throw error;
+      }
+      const storage = await readStorage(directory, maxBodyCharacters);
+      const timestamp = now().getTime();
+      const expired = activeMemories(storage, scope).filter((memory) => !isUnexpired(memory, timestamp));
+      if (expired.length === 0) return { removed: 0 };
+      await writeStorage(directory, {
+        ...storage,
+        events: [
+          ...storage.events,
+          ...expired.map((memory) => ({ type: "delete" as const, id: memory.id, createdAt: now().toISOString(), scope: memory.scope })),
+        ],
+      });
+      return { removed: expired.length };
     },
   };
 }
@@ -471,7 +583,11 @@ export function createMemoryContext(memories: readonly DragonsMemory[], maximumC
     throw new Error(`Memory context budget must be at least ${MEMORY_CONTEXT_PREFIX.length + 96} characters.`);
   }
   const eligible = [...memories]
-    .filter((memory) => isSafeMemoryId(memory.id) && typeof memory.body === "string" && validTimestamp(memory.createdAt) && isMemoryScope(memory.scope))
+    .filter((memory) => isSafeMemoryId(memory.id)
+      && typeof memory.body === "string"
+      && validTimestamp(memory.createdAt)
+      && isMemoryScope(memory.scope)
+      && isUnexpired(memory, Date.now()))
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
   const ordered = eligible.slice(0, DEFAULT_MAX_ACTIVE_MEMORY_RECORDS);
   const selected: DragonsMemory[] = [];

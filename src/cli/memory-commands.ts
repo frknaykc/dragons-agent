@@ -58,6 +58,21 @@ export async function runMemoryCommand(input: {
     input.write(formatMemorySuggestion(suggestion, false));
     return;
   }
+  if (input.command.action === "update") {
+    const memory = await input.store.update(input.command.id, { body: input.command.body }, scope);
+    input.write(memory ? `Updated ${input.command.scope} memory: ${memory.id}\n` : `Memory was not found: ${input.command.id}\n`);
+    return;
+  }
+  if (input.command.action === "expire") {
+    const expired = await input.store.expire(input.command.id, input.command.expiresAt, scope);
+    input.write(expired ? `Expired ${input.command.scope} memory: ${input.command.id}\n` : `Memory was not found: ${input.command.id}\n`);
+    return;
+  }
+  if (input.command.action === "cleanup") {
+    const result = await input.store.cleanup(scope);
+    input.write(`Cleaned up ${result.removed} expired ${input.command.scope} memories.\n`);
+    return;
+  }
   if (await input.store.delete(input.command.id, scope)) input.write(`Deleted ${input.command.scope} memory: ${input.command.id}\n`);
   else input.write(`Memory was not found: ${input.command.id}\n`);
 }
@@ -135,6 +150,36 @@ export async function handleInteractiveMemoryCommand(input: {
       if (await store.delete(id ?? "", await memoryScopeFor(workingDirectory, scope))) write(`Deleted ${scope} memory: ${id}\n`);
       else write(`Memory was not found: ${id ?? ""}\n`);
     } catch (error: unknown) { write(`${error instanceof Error ? error.message : "Unable to delete memory."}\n`); }
+    return true;
+  }
+  if (task.startsWith("/memory update ")) {
+    const [id, scopeName, ...rest] = task.slice("/memory update ".length).trim().split(/\s+/);
+    const scoped = scopeName === "user" || scopeName === "project";
+    const scope = scopeName === "project" ? "project" : "user";
+    const body = (scoped ? rest : [scopeName, ...rest]).join(" ").trim();
+    try {
+      const memory = await store.update(id ?? "", { body }, await memoryScopeFor(workingDirectory, scope));
+      write(memory ? `Updated ${scope} memory: ${id}\n` : `Memory was not found: ${id ?? ""}\n`);
+    } catch (error: unknown) { write(`${error instanceof Error ? error.message : "Unable to update memory."}\n`); }
+    return true;
+  }
+  if (task.startsWith("/memory expire ")) {
+    const [id, expiresAt, scopeName] = task.slice("/memory expire ".length).trim().split(/\s+/, 3);
+    const scope = scopeName === "project" ? "project" : "user";
+    if (!expiresAt || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(expiresAt) || !Number.isFinite(Date.parse(expiresAt))) {
+      write("Memory expiration must be a valid ISO-8601 timestamp.\n");
+      return true;
+    }
+    try {
+      const expired = await store.expire(id ?? "", expiresAt ?? "", await memoryScopeFor(workingDirectory, scope));
+      write(expired ? `Expired ${scope} memory: ${id}\n` : `Memory was not found: ${id ?? ""}\n`);
+    } catch (error: unknown) { write(`${error instanceof Error ? error.message : "Unable to expire memory."}\n`); }
+    return true;
+  }
+  if (task === "/memory cleanup" || task === "/memory cleanup user" || task === "/memory cleanup project") {
+    const scope = task.endsWith(" project") ? "project" : "user";
+    try { const result = await store.cleanup(await memoryScopeFor(workingDirectory, scope)); write(`Cleaned up ${result.removed} expired ${scope} memories.\n`); }
+    catch (error: unknown) { write(`${error instanceof Error ? error.message : "Unable to clean up memories."}\n`); }
     return true;
   }
   return false;

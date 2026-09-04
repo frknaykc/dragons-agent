@@ -21,6 +21,9 @@ export type CliCommand =
   | { kind: "memory"; action: "add"; body: string; scope: "user" | "project" }
   | { kind: "memory"; action: "suggest"; body: string; scope: "user" | "project" }
   | { kind: "memory"; action: "delete"; id: string; scope: "user" | "project" }
+  | { kind: "memory"; action: "update"; id: string; body: string; scope: "user" | "project" }
+  | { kind: "memory"; action: "expire"; id: string; expiresAt: string; scope: "user" | "project" }
+  | { kind: "memory"; action: "cleanup"; scope: "user" | "project" }
   | { kind: "plan"; action: "list"; sessionId: string }
   | { kind: "plan"; action: "add"; sessionId: string; title: string; description: string; parentId?: string }
   | { kind: "plan"; action: "update"; sessionId: string; id: string; title?: string; description?: string; parentId?: string | null }
@@ -127,7 +130,17 @@ export function parseCliCommand(arguments_: string[]): CliCommand {
       if (body) return { kind: "memory", action: "suggest", body, scope: explicitScope };
     }
     if (forwardedArguments[1] === "delete" && forwardedArguments[2] && (forwardedArguments.length === 3 || (forwardedArguments.length === 4 && (forwardedArguments[3] === "user" || forwardedArguments[3] === "project")))) return { kind: "memory", action: "delete", id: forwardedArguments[2], scope: forwardedArguments[3] === "project" ? "project" : "user" };
-    throw new Error("Use dragons memory list [user|project], dragons memory show <id> [user|project], dragons memory add [user|project] <body>, dragons memory suggest [user|project] <body>, or dragons memory delete <id> [user|project].");
+    if (forwardedArguments[1] === "update" && forwardedArguments[2] && forwardedArguments.length >= 4) {
+      const explicitScope = forwardedArguments[3] === "user" || forwardedArguments[3] === "project" ? forwardedArguments[3] : "user";
+      const body = forwardedArguments.slice(explicitScope === "user" && forwardedArguments[3] !== "user" ? 3 : 4).join(" ").trim();
+      if (body) return { kind: "memory", action: "update", id: forwardedArguments[2], body, scope: explicitScope };
+    }
+    if (forwardedArguments[1] === "expire" && forwardedArguments[2] && forwardedArguments[3] && (forwardedArguments.length === 4 || (forwardedArguments.length === 5 && (forwardedArguments[4] === "user" || forwardedArguments[4] === "project")))) {
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(forwardedArguments[3]) || !Number.isFinite(Date.parse(forwardedArguments[3]))) throw new Error("Memory expiration must be a valid ISO-8601 timestamp.");
+      return { kind: "memory", action: "expire", id: forwardedArguments[2], expiresAt: forwardedArguments[3], scope: forwardedArguments[4] === "project" ? "project" : "user" };
+    }
+    if (forwardedArguments[1] === "cleanup" && (forwardedArguments.length === 2 || (forwardedArguments.length === 3 && (forwardedArguments[2] === "user" || forwardedArguments[2] === "project")))) return { kind: "memory", action: "cleanup", scope };
+    throw new Error("Use dragons memory list [user|project], show <id> [user|project], add [user|project] <body>, suggest [user|project] <body>, update <id> [user|project] <body>, expire <id> <ISO-8601> [user|project], cleanup [user|project], or delete <id> [user|project].");
   }
   if (forwardedArguments[0] === "skills") {
     if (forwardedArguments[1] === "list" && forwardedArguments.length === 2) return { kind: "skills", action: "list" };
