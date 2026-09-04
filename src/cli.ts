@@ -21,6 +21,7 @@ import { createOpenAIAgentModel, DEFAULT_OPENAI_MODEL } from "./provider/openai.
 import { createCodingTools, type AgentTool } from "./tools.js";
 import { discoverProjectContext } from "./project-context.js";
 import { createSubagentTool } from "./subagents.js";
+import { createParallelSubagentTool } from "./parallel-subagents.js";
 import { BackgroundTaskManager, type BackgroundTask } from "./background-tasks.js";
 import {
   PersistentBackgroundJobManager,
@@ -737,9 +738,18 @@ async function runInteractiveConversation(
           maxDepth: 2,
           authorizeNested: ({ name, task }) => authorize({ name, operation: "EXECUTE", arguments: task }),
         });
-        const runTools = [...tools, suggestionTool, subagent];
+        const parallelSubagents = createParallelSubagentTool({
+          createModel: () => createFreshSubagentModel(dependencies, activeProvider, activeModelName, write),
+          tools: [...tools, suggestionTool],
+          projectContext,
+          skills,
+          memory,
+          getPlan: async () => ({ version: 1, tasks: await createSessionPlanStore(sessionStore, session.id).list() }),
+        });
+        const runTools = [...tools, suggestionTool, subagent, parallelSubagents];
         operations.set(suggestionTool.name, suggestionTool.operation);
         operations.set(subagent.name, subagent.operation);
+        operations.set(parallelSubagents.name, parallelSubagents.operation);
         activeModel ??= dependencies.modelFactory?.(activeProvider, activeModelInput) ?? dependencies.model ?? defaultModel(activeProvider, activeModelName, write);
         const runDiagnostics = diagnostics.start({ sessionId: session.id, provider: activeProvider, model: activeModelName });
         const result = await runAgent({
@@ -981,9 +991,16 @@ export async function main(
       projectContext,
       memory,
     });
-    const runTools = [...tools, suggestionTool, subagent];
+    const parallelSubagents = createParallelSubagentTool({
+      createModel: () => createFreshSubagentModel(dependencies, command.provider, command.model, write),
+      tools: [...tools, suggestionTool],
+      projectContext,
+      memory,
+    });
+    const runTools = [...tools, suggestionTool, subagent, parallelSubagents];
     operations.set(suggestionTool.name, suggestionTool.operation);
     operations.set(subagent.name, subagent.operation);
+    operations.set(parallelSubagents.name, parallelSubagents.operation);
     const runDiagnostics = diagnostics.start({ provider: command.provider, model: selectedModel(command.provider, command.model) });
     await runAgent({
       task: command.prompt,

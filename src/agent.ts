@@ -85,6 +85,8 @@ export type AgentRunOptions = {
   conversationResponseId?: string;
   continuationState?: SerializableConversationState;
   maxTurns?: number;
+  /** Optional hard cap on provider-requested tool calls for this run. */
+  maxToolCalls?: number;
   contextBudgetChars?: number;
   /** Runtime-only interactive approval state. It must never be persisted. */
   sessionApprovals?: Set<string>;
@@ -216,12 +218,15 @@ async function executeToolCall(
 
 export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult> {
   const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
+  const maxToolCalls = options.maxToolCalls;
+  if (maxToolCalls !== undefined && (!Number.isSafeInteger(maxToolCalls) || maxToolCalls < 1)) throw new Error("Agent maxToolCalls must be a positive integer.");
   const tools = new Map(options.tools.map((tool) => [tool.name, tool]));
   if (tools.size !== options.tools.length) throw new Error("Duplicate tool name in active tool registry.");
   let projectContext: ProjectContext | undefined;
   let previousResponseId: string | undefined;
   let continuationState = options.continuationState;
   let toolOutputs: ToolOutput[] = [];
+  let toolCallCount = 0;
   const completedToolCallIds = new Set<string>();
   const sessionApprovals = options.sessionApprovals ?? new Set<string>();
   const contextBudgetChars = options.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS;
@@ -281,6 +286,10 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         };
       }
 
+      if (maxToolCalls !== undefined && toolCallCount + response.toolCalls.length > maxToolCalls) {
+        throw new Error(`Agent reached the maximum of ${maxToolCalls} tool calls.`);
+      }
+
       toolOutputs = [];
       for (const toolCall of response.toolCalls) {
         throwIfCancelled(options);
@@ -289,6 +298,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
           continue;
         }
         completedToolCallIds.add(toolCall.callId);
+        toolCallCount += 1;
         toolOutputs.push(await executeToolCall(toolCall, tools, options, sessionApprovals, changeTracker));
         throwIfCancelled(options);
       }
