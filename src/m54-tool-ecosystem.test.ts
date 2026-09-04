@@ -34,3 +34,15 @@ test("M54 redacts server-controlled credential-shaped metadata before management
     assert.match(managementOutput, /\[REDACTED\]/);
   } finally { await manager.closeAll(); }
 });
+
+test("M54 clears disconnected server capability metadata after an unexpected transport close", async () => {
+  const manager = new McpClientManager([{ id: "fixture", command: process.execPath, args: [fixture, "exit-on-call"] }]);
+  try {
+    const [tool] = await manager.connect("fixture");
+    await tool!.execute({ nested: { query: "close" } });
+    const connections = (manager as unknown as { connections: Map<string, { capabilityMetadata: unknown[]; tools: unknown[] }> }).connections;
+    const connection = connections.get("fixture");
+    assert.deepEqual(connection?.capabilityMetadata, []);
+    assert.deepEqual(connection?.tools, []);
+  } finally { await manager.closeAll(); }
+});

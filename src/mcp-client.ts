@@ -484,7 +484,13 @@ export class McpClientManager {
     const transport = this.createTransport(config, sensitiveValues);
     const connection: Connection = { config, client, transport, sensitiveValues, tools: [], capabilityMetadata: [], state: "disconnected", capabilities: { tools: false }, callCount: 0, failureCount: 0, cancellationCount: 0 };
     transport.onerror = () => { connection.lastError = "MCP transport error."; };
-    transport.onclose = () => { connection.state = "disconnected"; };
+    transport.onclose = () => {
+      connection.state = "disconnected";
+      connection.tools = [];
+      connection.capabilityMetadata = [];
+      connection.capabilities = { tools: false };
+      connection.sensitiveValues.clear();
+    };
     this.connections.set(id, connection);
     let phase: "connection" | "discovery" = "connection";
     try {
