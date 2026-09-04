@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { runAgent, type AgentModel } from "./agent.js";
 import { main, parseCliCommand } from "./cli.js";
+import { parseInteractivePlanCommand } from "./cli/plan-commands.js";
 import {
   createPlanTools,
   createSessionPlanStore,
@@ -74,7 +75,9 @@ test("M27 plan tools use Dragons authorization and classify every mutation as WR
     const plans = createSessionPlanStore(sessions, session.id, { createId: identifiers });
     const tools = createPlanTools(() => plans);
     assert.equal(tools.find(({ name }) => name === "plan_list")?.operation, "READ");
-    for (const name of ["plan_add", "plan_update", "plan_set_status", "plan_remove"]) {
+    assert.equal(tools.find(({ name }) => name === "plan_runnable")?.operation, "READ");
+    assert.equal(tools.find(({ name }) => name === "plan_history")?.operation, "READ");
+    for (const name of ["plan_add", "plan_update", "plan_set_status", "plan_recover", "plan_replan", "plan_remove"]) {
       assert.equal(tools.find((tool) => tool.name === name)?.operation, "WRITE");
     }
     let turn = 0;
@@ -106,6 +109,14 @@ test("M27 CLI and local slash plan commands stay local and persist only in the a
     const { sessions } = deterministicStore(sessionDirectory);
     const session = await sessions.create({ workingDirectory: workspace, provider: "openai-api", model: "gpt-test" });
     assert.deepEqual(parseCliCommand(["plan", "list", "--session", session.id]), { kind: "plan", action: "list", sessionId: session.id });
+    assert.deepEqual(parseCliCommand(["plan", "runnable", "--session", session.id]), { kind: "plan", action: "runnable", sessionId: session.id });
+    assert.deepEqual(parseCliCommand(["plan", "recover", CHILD_ID, "USER_INPUT", "fixture-resolved", "--session", session.id]), { kind: "plan", action: "recover", sessionId: session.id, id: CHILD_ID, source: "USER_INPUT", recoveryNote: "fixture-resolved" });
+    assert.deepEqual(parseCliCommand(["plan", "add", "Dependent", "Waits", "--depends-on", ROOT_ID, "--session", session.id]), { kind: "plan", action: "add", sessionId: session.id, title: "Dependent", description: "Waits", dependsOn: [ROOT_ID] });
+    assert.deepEqual(parseCliCommand(["plan", "update", CHILD_ID, "--depends-on", `${ROOT_ID},${THIRD_ID}`, "--session", session.id]), { kind: "plan", action: "update", sessionId: session.id, id: CHILD_ID, dependsOn: [ROOT_ID, THIRD_ID] });
+    assert.deepEqual(parseInteractivePlanCommand(`/plan update ${CHILD_ID} --depends-on ${ROOT_ID},${THIRD_ID}`, session.id), { kind: "plan", action: "update", sessionId: session.id, id: CHILD_ID, dependsOn: [ROOT_ID, THIRD_ID] });
+    assert.deepEqual(parseInteractivePlanCommand(`/plan update ${CHILD_ID} --depends-on none`, session.id), { kind: "plan", action: "update", sessionId: session.id, id: CHILD_ID, dependsOn: null });
+    assert.deepEqual(parseCliCommand(["plan", "replan", CHILD_ID, "blocked", "Replacement", "Do work", "--depends-on", ROOT_ID, "--session", session.id]), { kind: "plan", action: "replan", sessionId: session.id, id: CHILD_ID, reason: "blocked", replacement: { title: "Replacement", description: "Do work", dependsOn: [ROOT_ID] } });
+    assert.deepEqual(parseInteractivePlanCommand(`/plan replan ${CHILD_ID} --reason blocked --title Replacement --description Do work --depends-on ${ROOT_ID}`, session.id), { kind: "plan", action: "replan", sessionId: session.id, id: CHILD_ID, reason: "blocked", replacement: { title: "Replacement", description: "Do work", dependsOn: [ROOT_ID] } });
     await main(["plan", "add", "CLI task", "CLI description", "--session", session.id], { sessionDirectory, write: () => undefined });
     const output: string[] = [];
     let modelCalls = 0;

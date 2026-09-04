@@ -1,4 +1,4 @@
-import type { PlanTaskStatus } from "../plan.js";
+import type { PlanMutationSource, PlanTaskStatus } from "../plan.js";
 
 export type ProviderName = "openai-api" | "chatgpt";
 
@@ -25,9 +25,12 @@ export type CliCommand =
   | { kind: "memory"; action: "expire"; id: string; expiresAt: string; scope: "user" | "project" }
   | { kind: "memory"; action: "cleanup"; scope: "user" | "project" }
   | { kind: "plan"; action: "list"; sessionId: string }
-  | { kind: "plan"; action: "add"; sessionId: string; title: string; description: string; parentId?: string }
-  | { kind: "plan"; action: "update"; sessionId: string; id: string; title?: string; description?: string; parentId?: string | null }
+  | { kind: "plan"; action: "runnable" | "history"; sessionId: string }
+  | { kind: "plan"; action: "add"; sessionId: string; title: string; description: string; parentId?: string; dependsOn?: string[] }
+  | { kind: "plan"; action: "update"; sessionId: string; id: string; title?: string; description?: string; parentId?: string | null; dependsOn?: string[] | null }
   | { kind: "plan"; action: "status"; sessionId: string; id: string; status: PlanTaskStatus; blockedReason?: string }
+  | { kind: "plan"; action: "recover"; sessionId: string; id: string; recoveryNote: string; source: Exclude<PlanMutationSource, "PLAN_REVISION"> }
+  | { kind: "plan"; action: "replan"; sessionId: string; id: string; reason: string; replacement: { title: string; description: string; parentId?: string; dependsOn?: string[] } }
   | { kind: "plan"; action: "remove"; sessionId: string; id: string }
   | { kind: "mcp"; action: "list" }
   | { kind: "mcp"; action: "status" }
@@ -74,25 +77,34 @@ function parsePlanCommand(arguments_: string[]): Extract<CliCommand, { kind: "pl
   const sessionId = arguments_[sessionIndex + 1]!;
   const action = arguments_[1];
   const values = arguments_.slice(2, sessionIndex);
-  if (action === "list" && values.length === 0) return { kind: "plan", action, sessionId };
+  if ((action === "list" || action === "runnable" || action === "history") && values.length === 0) return { kind: "plan", action, sessionId };
   if (action === "add") {
     const parentIndex = values.indexOf("--parent");
-    const core = parentIndex < 0 ? values : values.slice(0, parentIndex);
+    const dependenciesIndex = values.indexOf("--depends-on");
+    const firstFlag = [parentIndex, dependenciesIndex].filter((index) => index >= 0).sort((left, right) => left - right)[0] ?? -1;
+    const core = firstFlag < 0 ? values : values.slice(0, firstFlag);
     const parentId = parentIndex < 0 ? undefined : values[parentIndex + 1];
-    if (core.length === 2 && (parentIndex < 0 || (parentIndex === 2 && values.length === 4 && parentId))) {
-      return { kind: "plan", action, sessionId, title: core[0]!, description: core[1]!, ...(parentId === undefined ? {} : { parentId }) };
+    const dependencyList = dependenciesIndex < 0 ? undefined : values[dependenciesIndex + 1]?.split(",").filter(Boolean);
+    const expectedLength = 2 + (parentIndex < 0 ? 0 : 2) + (dependenciesIndex < 0 ? 0 : 2);
+    if (core.length === 2 && values.length === expectedLength && (parentIndex < 0 || parentId) && (dependenciesIndex < 0 || dependencyList?.length)) {
+      return { kind: "plan", action, sessionId, title: core[0]!, description: core[1]!, ...(parentId === undefined ? {} : { parentId }), ...(dependencyList === undefined ? {} : { dependsOn: dependencyList }) };
     }
   }
   if (action === "update" && values[0]) {
     const id = values[0];
-    const updates: { title?: string; description?: string; parentId?: string | null } = {};
+    const updates: { title?: string; description?: string; parentId?: string | null; dependsOn?: string[] | null } = {};
     for (let index = 1; index < values.length; index += 2) {
       const flag = values[index];
       const value = values[index + 1];
-      if (!value || (flag !== "--title" && flag !== "--description" && flag !== "--parent")) throw new Error("Use --title <text>, --description <text>, and/or --parent <id|none>.");
+      if (!value || (flag !== "--title" && flag !== "--description" && flag !== "--parent" && flag !== "--depends-on")) throw new Error("Use --title <text>, --description <text>, --parent <id|none>, and/or --depends-on <id[,id... ]|none>.");
       if (flag === "--title") updates.title = value;
       if (flag === "--description") updates.description = value;
       if (flag === "--parent") updates.parentId = value === "none" ? null : value;
+      if (flag === "--depends-on") {
+        const dependsOn = value === "none" ? null : value.split(",").filter(Boolean);
+        if (dependsOn !== null && dependsOn.length === 0) throw new Error("--depends-on requires one or more task IDs, or none.");
+        updates.dependsOn = dependsOn;
+      }
     }
     if (values.length > 1 && Object.keys(updates).length > 0) return { kind: "plan", action, sessionId, id, ...updates };
   }
@@ -102,8 +114,19 @@ function parsePlanCommand(arguments_: string[]): Extract<CliCommand, { kind: "pl
       return { kind: "plan", action, sessionId, id: values[0], status, ...(values[3] === undefined ? {} : { blockedReason: values[3] }) };
     }
   }
+  if (action === "recover" && values[0] && values[1] && values[2] && values.length === 3 && (values[1] === "DEPENDENCY_COMPLETED" || values[1] === "USER_INPUT" || values[1] === "CONDITION_RESOLVED")) return { kind: "plan", action, sessionId, id: values[0], source: values[1], recoveryNote: values[2] };
+  if (action === "replan") {
+    const parentIndex = values.indexOf("--parent");
+    const dependenciesIndex = values.indexOf("--depends-on");
+    const firstFlag = [parentIndex, dependenciesIndex].filter((index) => index >= 0).sort((left, right) => left - right)[0] ?? -1;
+    const core = firstFlag < 0 ? values : values.slice(0, firstFlag);
+    const parentId = parentIndex < 0 ? undefined : values[parentIndex + 1];
+    const dependsOn = dependenciesIndex < 0 ? undefined : values[dependenciesIndex + 1]?.split(",").filter(Boolean);
+    const expectedLength = 4 + (parentIndex < 0 ? 0 : 2) + (dependenciesIndex < 0 ? 0 : 2);
+    if (core.length === 4 && values.length === expectedLength && (parentIndex < 0 || parentId) && (dependenciesIndex < 0 || dependsOn?.length)) return { kind: "plan", action, sessionId, id: core[0]!, reason: core[1]!, replacement: { title: core[2]!, description: core[3]!, ...(parentId === undefined ? {} : { parentId }), ...(dependsOn === undefined ? {} : { dependsOn }) } };
+  }
   if (action === "remove" && values.length === 1) return { kind: "plan", action, sessionId, id: values[0]! };
-  throw new Error("Use dragons plan list --session <id>, plan add <title> <description> [--parent <id>] --session <id>, plan update <id> [--title <text>] [--description <text>] [--parent <id|none>] --session <id>, plan status <id> <TODO|IN_PROGRESS|DONE|BLOCKED> [--reason <text>] --session <id>, or plan remove <id> --session <id>.");
+  throw new Error("Use dragons plan list|runnable|history --session <id>, plan add <title> <description> [--parent <id>] [--depends-on <id[,id...]>] --session <id>, plan update <id> [--title <text>] [--description <text>] [--parent <id|none>] [--depends-on <id[,id...]|none>] --session <id>, plan status <id> <TODO|IN_PROGRESS|DONE|BLOCKED> [--reason <text>] --session <id>, plan recover <id> <DEPENDENCY_COMPLETED|USER_INPUT|CONDITION_RESOLVED> <note> --session <id>, plan replan <id> <reason> <replacement-title> <replacement-description> [--parent <id>] [--depends-on <id[,id...]>] --session <id>, or plan remove <id> --session <id>.");
 }
 
 export function parseCliCommand(arguments_: string[]): CliCommand {
