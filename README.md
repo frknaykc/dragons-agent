@@ -100,7 +100,7 @@ The built-in defaults are `gpt-4.1-mini` for OpenAI Platform API and `gpt-5.6-te
 - Explicit READ, WRITE, and EXECUTE permissions
 - Persistent sessions and bounded context handling
 - Explicit local Skills and local user/project Memory
-- Bounded plans, one-level subagents, and read-only process-local background tasks
+- Bounded plans, one-level subagents, read-only process-local tasks, and explicitly created persistent read-only jobs
 - Official-SDK, explicitly activated **stdio** and Streamable HTTP MCP connections
 - Local runtime diagnostics
 
@@ -150,7 +150,7 @@ Memory is explicit, local, and user- or project-scoped. Dragons does not automat
 
 ## Planning, subagents, and background tasks
 
-Plans are bounded, explicit session-local tasks. Subagents are one-level only and receive a restricted read-only tool snapshot; they cannot recursively create teams. Background tasks are read-only and process-local: their state and continuation do not survive process exit.
+Plans are bounded, explicit session-local tasks. Subagents are one-level only and receive a restricted read-only tool snapshot; they cannot recursively create teams. `/tasks` remains read-only and process-local: its state and continuation do not survive process exit. `/jobs start <task>` creates a separate read-only persistent job; `/jobs`, `/jobs show <id>`, `/jobs cancel <id>`, `/jobs resume <id>`, and `/jobs cleanup` provide bounded management. Jobs enforce a bounded active count, duration, turns, output, and durable storage. Only bounded lifecycle metadata and redacted result summaries are durable; runtime handles, approvals, credentials, and tool registries are never stored. After a process exit, active persistent jobs reconcile once to `interrupted` and require explicit manual resume—Dragons never blindly retries them.
 
 ## Coding intelligence
 

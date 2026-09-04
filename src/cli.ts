@@ -22,8 +22,14 @@ import { createCodingTools, type AgentTool } from "./tools.js";
 import { discoverProjectContext } from "./project-context.js";
 import { createSubagentTool } from "./subagents.js";
 import { BackgroundTaskManager, type BackgroundTask } from "./background-tasks.js";
+import {
+  PersistentBackgroundJobManager,
+  createPersistentBackgroundJobStore,
+  getDragonsPersistentBackgroundJobsDirectory,
+  type PersistentBackgroundJob,
+} from "./persistent-background-jobs.js";
 import { McpClientManager } from "./mcp-client.js";
-import { RuntimeDiagnosticsService, formatRuntimeDiagnostics } from "./diagnostics.js";
+import { RuntimeDiagnosticsService, formatRuntimeDiagnostics, type RuntimeDiagnosticsRun } from "./diagnostics.js";
 import { createTerminalRenderer, type TerminalRenderer } from "./terminal/renderer.js";
 import { loadDragonsConfig, saveDragonsConfig, type DragonsConfig } from "./config.js";
 import { DRAGONS_VERSION } from "./version.js";
@@ -80,6 +86,8 @@ export type CliDependencies = {
   skillsDirectory?: string;
   /** Dragons-owned memory root. It is never inferred from the project workspace. */
   memoryDirectory?: string;
+  /** App-owned durable M60 job state root; runtime handles and approvals are never stored here. */
+  backgroundJobsDirectory?: string;
   /** Process-local MCP connections; dependency injection exists for deterministic tests only. */
   mcpManager?: McpClientManager;
   /** Process-local bounded diagnostics; never saved into Dragons session JSON. */
@@ -175,6 +183,26 @@ function formatBackgroundTaskList(tasks: readonly BackgroundTask[]): string {
   return tasks.map((task) => `${task.id}  [${task.state}]  ${task.prompt}`).join("\n");
 }
 
+function formatPersistentBackgroundJob(job: PersistentBackgroundJob): string {
+  const lines = [
+    `${job.id}  [${job.state}]  ${job.createdAt}`,
+    `Prompt: ${job.prompt}`,
+    `Policy: ${job.executionPolicy}`,
+    `Attempts: ${job.executionAttempts}`,
+  ];
+  if (job.startedAt) lines.push(`Started: ${job.startedAt}`);
+  if (job.completedAt) lines.push(`Completed: ${job.completedAt}`);
+  if (job.transcript) lines.push(`Transcript:\n${job.transcript}`);
+  if (job.report) lines.push(`Report:\n${job.report}`);
+  if (job.error) lines.push(`Error:\n${job.error}`);
+  return lines.join("\n");
+}
+
+function formatPersistentBackgroundJobList(jobs: readonly PersistentBackgroundJob[]): string {
+  if (jobs.length === 0) return "No persistent background jobs for this session.";
+  return jobs.map((job) => `${job.id}  [${job.state}]  ${job.prompt}`).join("\n");
+}
+
 function terminalRenderer(
   dependencies: CliDependencies,
   input: NodeJS.ReadableStream,
@@ -251,6 +279,16 @@ function skillsDirectoryFor(dependencies: CliDependencies): string {
 
 function memoryStoreFor(dependencies: CliDependencies): MemoryStore {
   return createMemoryStore(dependencies.memoryDirectory ?? getDragonsMemoryDirectory());
+}
+
+function persistentBackgroundJobsFor(
+  dependencies: CliDependencies,
+  onJobStarted?: (job: PersistentBackgroundJob) => RuntimeDiagnosticsRun | undefined,
+): PersistentBackgroundJobManager {
+  return new PersistentBackgroundJobManager({
+    store: createPersistentBackgroundJobStore(dependencies.backgroundJobsDirectory ?? getDragonsPersistentBackgroundJobsDirectory()),
+    onJobStarted,
+  });
 }
 
 function sessionPreview(session: DragonsSession): string | undefined {
@@ -378,6 +416,20 @@ async function runInteractiveConversation(
       return record;
     },
   });
+  const persistentJobs = persistentBackgroundJobsFor(dependencies, (job) => {
+    const record = diagnostics.start({ sessionId: job.sessionId, provider: activeProvider, model: activeModelName });
+    record.recordBackgroundTaskStarted();
+    return record;
+  });
+  await persistentJobs.initialize();
+  const persistentJobOptions = async (prompt: string) => ({
+    createModel: () => createFreshSubagentModel(dependencies, activeProvider, activeModelName, write),
+    tools,
+    projectContext: await discoverProjectContext(workingDirectory),
+    skills: await createSkillsContext(skillsDirectory, activeSkillReferences, workingDirectory),
+    memory: await memoryContextFor(memoryStore, workingDirectory, prompt),
+    plan: { version: 1 as const, tasks: await createSessionPlanStore(sessionStore, session.id).list() },
+  });
   const cancel = (): void => {
     if (activeController) activeController.abort();
     else lines.close();
@@ -406,7 +458,7 @@ async function runInteractiveConversation(
         return;
       }
       if (task === "/help") {
-        write("Slash commands: /help, /status, /diagnostics, /new, /sessions, /resume <id>, /model, /provider, /tasks start <prompt>|show <id>|cancel <id>, /tasks, /skills, /skills list|show|activate|deactivate, /memory list|add|delete, /plan [list|add|update|status|remove], /mcp list|connect|connect-all|status|disconnect, /context, /clear, /exit\n");
+        write("Slash commands: /help, /status, /diagnostics, /new, /sessions, /resume <id>, /model, /provider, /tasks start <prompt>|show <id>|cancel <id>, /tasks, /jobs start <prompt>|show <id>|cancel <id>|resume <id>|cleanup, /jobs, /skills, /skills list|show|activate|deactivate, /memory list|add|delete, /plan [list|add|update|status|remove], /mcp list|connect|connect-all|status|disconnect, /context, /clear, /exit\n");
         continue;
       }
       if (task === "/status" || task === "/session") {
@@ -462,6 +514,62 @@ async function runInteractiveConversation(
         sessionApprovals.clear();
         write(`Resumed session: ${session.id}\n`);
         await writeActiveSkillNotices(skillsDirectory, activeSkillReferences, write, workingDirectory);
+        continue;
+      }
+      if (task === "/jobs") {
+        write(`${formatPersistentBackgroundJobList(persistentJobs.list(session.id))}\n`);
+        continue;
+      }
+      if (task.startsWith("/jobs start ")) {
+        const prompt = task.slice("/jobs start ".length).trim();
+        try {
+          const job = await persistentJobs.start({
+            sessionId: session.id,
+            workingDirectory,
+            prompt,
+            ...await persistentJobOptions(prompt),
+          });
+          write(`Persistent background job started: ${job.id}\n`);
+        } catch (error: unknown) {
+          write(`${error instanceof Error ? error.message : "Unable to start persistent background job."}\n`);
+        }
+        continue;
+      }
+      if (task.startsWith("/jobs show ")) {
+        const id = task.slice("/jobs show ".length).trim();
+        const job = persistentJobs.show(id, session.id);
+        if (!job || job.sessionId !== session.id || job.workingDirectory !== workingDirectory) write(`Persistent background job was not found: ${id}\n`);
+        else write(`${formatPersistentBackgroundJob(job)}\n`);
+        continue;
+      }
+      if (task.startsWith("/jobs cancel ")) {
+        const id = task.slice("/jobs cancel ".length).trim();
+        const job = persistentJobs.show(id, session.id);
+        if (!job || job.sessionId !== session.id || job.workingDirectory !== workingDirectory) write(`Persistent background job was not found: ${id}\n`);
+        else if (await persistentJobs.cancel(id, session.id)) write(`Persistent background job cancelled: ${id}\n`);
+        else write(`Persistent background job is already ${job.state}: ${id}\n`);
+        continue;
+      }
+      if (task.startsWith("/jobs resume ")) {
+        const id = task.slice("/jobs resume ".length).trim();
+        const job = persistentJobs.show(id, session.id);
+        if (!job || job.sessionId !== session.id || job.workingDirectory !== workingDirectory) write(`Persistent background job was not found: ${id}\n`);
+        else {
+          try {
+            await persistentJobs.resume(id, await persistentJobOptions(job.prompt), session.id);
+            write(`Persistent background job resumed: ${id}\n`);
+          } catch (error: unknown) {
+            write(`${error instanceof Error ? error.message : "Unable to resume persistent background job."}\n`);
+          }
+        }
+        continue;
+      }
+      if (task === "/jobs cleanup") {
+        write(`Cleaned persistent background jobs: ${await persistentJobs.cleanup({ sessionId: session.id })}\n`);
+        continue;
+      }
+      if (task === "/jobs start" || task === "/jobs show" || task === "/jobs cancel" || task === "/jobs resume" || task.startsWith("/jobs")) {
+        write("Use /jobs, /jobs start <prompt>, /jobs show <id>, /jobs cancel <id>, /jobs resume <id>, or /jobs cleanup. Persistent jobs are read-only and never automatically retried after restart.\n");
         continue;
       }
       if (task === "/tasks") {
