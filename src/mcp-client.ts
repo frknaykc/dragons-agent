@@ -78,6 +78,9 @@ export type McpServerStatus = {
   authentication: "none" | "bearer";
   state: "disconnected" | "connected";
   toolCount: number;
+  resourceCount: number;
+  promptCount: number;
+  toolNames: string[];
   /** Safe negotiated MCP metadata only; no server payloads or transport details. */
   protocolVersion?: string;
   capabilities: { tools: boolean };
@@ -91,12 +94,18 @@ export type McpServerStatus = {
   lastError?: string;
 };
 
+export type McpCapability =
+  | { serverId: string; transport: McpTransport; state: "connected"; type: "tool"; originalName: string; name: string; operation: ToolOperation }
+  | { serverId: string; transport: McpTransport; state: "connected"; type: "resource"; originalName: string; name: string; uri: string; mimeType?: string }
+  | { serverId: string; transport: McpTransport; state: "connected"; type: "prompt"; originalName: string; name: string; description?: string };
+
 type Connection = {
   config: McpServerConfig;
   client: Client;
   transport: StdioClientTransport | StreamableHTTPClientTransport;
   sensitiveValues: Set<string>;
   tools: AgentTool[];
+  capabilityMetadata: McpCapability[];
   state: "connected" | "disconnected";
   protocolVersion?: string;
   capabilities: { tools: boolean };
@@ -296,10 +305,15 @@ function normalizeConfig(value: McpServerConfig): McpServerConfig {
 
 /** Produces a stable, provider-safe namespace without trusting arbitrary server tool names. */
 function mappedToolName(serverId: string, toolName: string): string {
-  const direct = `mcp__${serverId}__${toolName}`;
-  if (!serverId.includes("__") && !toolName.includes("__") && PROVIDER_TOOL_NAME_PATTERN.test(direct)) return direct;
+  const candidate = `mcp__${serverId}__${toolName}`;
+  if (!serverId.includes("__") && !toolName.includes("__") && PROVIDER_TOOL_NAME_PATTERN.test(candidate) && redactMcpText(toolName) === toolName && redactMcpText(candidate) === candidate) return candidate;
   const digest = createHash("sha256").update(`${serverId}\0${toolName}`, "utf8").digest("hex").slice(0, 24);
   return `mcp__${digest}`;
+}
+
+function mappedCapabilityName(serverId: string, type: "resource" | "prompt", originalName: string): string {
+  const digest = createHash("sha256").update(`${serverId}\0${type}\0${originalName}`, "utf8").digest("hex").slice(0, 24);
+  return `mcp__${type}__${digest}`;
 }
 
 /** Parse one config entry; config values are app-owned and never include secret transport credentials. */
@@ -354,6 +368,9 @@ export class McpClientManager {
     const connection = this.connections.get(id);
     return connection?.state === "connected" ? [...connection.tools] : [];
   }
+  capabilities(): McpCapability[] {
+    return [...this.connections.values()].filter((connection) => connection.state === "connected").flatMap((connection) => structuredClone(connection.capabilityMetadata));
+  }
   status(): McpServerStatus[] {
     return this.list().map((config) => {
       const connection = this.connections.get(config.id);
@@ -363,6 +380,9 @@ export class McpClientManager {
         authentication: config.transport === "http" && config.auth ? "bearer" : "none",
         state: connection?.state ?? "disconnected",
         toolCount: connection?.state === "connected" ? connection.tools.length : 0,
+        resourceCount: connection?.state === "connected" ? connection.capabilityMetadata.filter((capability) => capability.type === "resource").length : 0,
+        promptCount: connection?.state === "connected" ? connection.capabilityMetadata.filter((capability) => capability.type === "prompt").length : 0,
+        toolNames: connection?.state === "connected" ? connection.capabilityMetadata.filter((capability) => capability.type === "tool").map((capability) => capability.name) : [],
         capabilities: connection?.capabilities ?? { tools: false },
         callCount: connection?.callCount ?? 0,
         failureCount: connection?.failureCount ?? 0,
@@ -462,7 +482,7 @@ export class McpClientManager {
     const client = new Client({ name: "dragons-agent", version: "0.1.0" });
     const sensitiveValues = new Set<string>();
     const transport = this.createTransport(config, sensitiveValues);
-    const connection: Connection = { config, client, transport, sensitiveValues, tools: [], state: "disconnected", capabilities: { tools: false }, callCount: 0, failureCount: 0, cancellationCount: 0 };
+    const connection: Connection = { config, client, transport, sensitiveValues, tools: [], capabilityMetadata: [], state: "disconnected", capabilities: { tools: false }, callCount: 0, failureCount: 0, cancellationCount: 0 };
     transport.onerror = () => { connection.lastError = "MCP transport error."; };
     transport.onclose = () => { connection.state = "disconnected"; };
     this.connections.set(id, connection);
@@ -504,6 +524,29 @@ export class McpClientManager {
         return this.agentTool(connection, name, tool.name, tool.description ?? "MCP tool", inputSchema, config.operation ?? "EXECUTE");
       });
       connection.tools = tools;
+      const resources = capabilities?.resources
+        ? await timeout(client.listResources(), this.options.connectTimeoutMilliseconds, signal, `MCP server ${id} resource discovery timed out.`)
+        : { resources: [] };
+      const prompts = capabilities?.prompts
+        ? await timeout(client.listPrompts(), this.options.connectTimeoutMilliseconds, signal, `MCP server ${id} prompt discovery timed out.`)
+        : { prompts: [] };
+      if (resources.resources.length > this.options.maxTools) throw new Error(`MCP server ${id} exposes more than ${this.options.maxTools} resources.`);
+      if (prompts.prompts.length > this.options.maxTools) throw new Error(`MCP server ${id} exposes more than ${this.options.maxTools} prompts.`);
+      for (const resource of resources.resources) {
+        if (!resource.uri || Buffer.byteLength(resource.uri, "utf8") > MAX_MCP_SERVER_TOOL_NAME_BYTES || Buffer.byteLength(resource.name, "utf8") > MAX_MCP_SERVER_TOOL_NAME_BYTES || (resource.mimeType && Buffer.byteLength(resource.mimeType, "utf8") > MAX_MCP_SERVER_TOOL_NAME_BYTES)) {
+          throw new Error(`MCP server ${id} returned oversized resource metadata.`);
+        }
+      }
+      for (const prompt of prompts.prompts) {
+        if (!prompt.name || Buffer.byteLength(prompt.name, "utf8") > MAX_MCP_SERVER_TOOL_NAME_BYTES || (prompt.description && Buffer.byteLength(prompt.description, "utf8") > MAX_MCP_SERVER_TOOL_DESCRIPTION_BYTES)) {
+          throw new Error(`MCP server ${id} returned oversized prompt metadata.`);
+        }
+      }
+      connection.capabilityMetadata = [
+        ...listed.tools.map((tool): McpCapability => ({ serverId: id, transport: transportOf(config), state: "connected", type: "tool", originalName: redactMcpText(tool.name, sensitiveValues), name: mappedToolName(id, tool.name), operation: config.operation ?? "EXECUTE" })),
+        ...resources.resources.map((resource): McpCapability => ({ serverId: id, transport: transportOf(config), state: "connected", type: "resource", originalName: redactMcpText(resource.name, sensitiveValues), name: mappedCapabilityName(id, "resource", resource.uri), uri: redactMcpText(resource.uri, sensitiveValues), ...(resource.mimeType ? { mimeType: redactMcpText(resource.mimeType, sensitiveValues) } : {}) })),
+        ...prompts.prompts.map((prompt): McpCapability => ({ serverId: id, transport: transportOf(config), state: "connected", type: "prompt", originalName: redactMcpText(prompt.name, sensitiveValues), name: mappedCapabilityName(id, "prompt", prompt.name), ...(prompt.description ? { description: redactMcpText(prompt.description, sensitiveValues) } : {}) })),
+      ];
       connection.state = "connected";
       return tools;
     } catch (error: unknown) {
@@ -578,6 +621,7 @@ export class McpClientManager {
     if (!connection) return;
     connection.state = "disconnected";
     connection.tools = [];
+    connection.capabilityMetadata = [];
     try {
       if (connection.transport instanceof StreamableHTTPClientTransport) {
         await timeout(

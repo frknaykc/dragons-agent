@@ -290,7 +290,10 @@ function writeMcpStatus(manager: McpClientManager, write: (text: string) => void
       server.failureCount > 0 ? `${server.failureCount} failure${server.failureCount === 1 ? "" : "s"}` : undefined,
       server.lastFailureCategory ? `last failure ${server.lastFailureCategory}` : undefined,
     ].filter(Boolean).join(", ");
-    write(`${server.id}: ${server.state} (${server.toolCount} tool${server.toolCount === 1 ? "" : "s"})${metadata ? ` — ${metadata}` : ""}${server.lastError ? ` — ${server.lastError}` : ""}\n`);
+    const counts = `${server.toolCount} tool${server.toolCount === 1 ? "" : "s"}`;
+    const inventory = `${server.resourceCount} resource${server.resourceCount === 1 ? "" : "s"}, ${server.promptCount} prompt${server.promptCount === 1 ? "" : "s"}`;
+    const names = server.toolNames.length > 0 ? ` — tools ${server.toolNames.join(", ")}` : "";
+    write(`${server.id}: ${server.state} (${counts}) — ${inventory}${names}${metadata ? ` — ${metadata}` : ""}${server.lastError ? ` — ${server.lastError}` : ""}\n`);
   }
 }
 
