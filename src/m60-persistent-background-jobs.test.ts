@@ -37,7 +37,7 @@ test("M60 persists terminal read-only jobs across reload without persisting runt
     const reloaded = new PersistentBackgroundJobManager({ store });
     await reloaded.initialize();
     const job = reloaded.show(JOB_ID)!;
-    assert.deepEqual(job, { version: 1, id: JOB_ID, sessionId: SESSION_ID, workingDirectory: directory, prompt: "Inspect safely.", executionPolicy: "READ_ONLY_MANUAL_RESUME", provenance: "INTERACTIVE_COMMAND", state: "completed", createdAt: job.createdAt, updatedAt: job.updatedAt, startedAt: job.startedAt, completedAt: job.completedAt, executionAttempts: 1, transcript: "bounded report", report: "bounded report" });
+    assert.deepEqual(job, { version: 1, id: JOB_ID, sessionId: SESSION_ID, workingDirectory: directory, prompt: "Inspect safely.", executionPolicy: "READ_ONLY_MANUAL_RESUME", provenance: "INTERACTIVE_COMMAND", state: "completed", createdAt: job.createdAt, updatedAt: job.updatedAt, startedAt: job.startedAt, completedAt: job.completedAt, revision: job.revision, executionAttempts: 1, transcript: "bounded report", report: "bounded report" });
     assert.doesNotMatch(await (await import("node:fs/promises")).readFile(join(directory, `${JOB_ID}.json`), "utf8"), /controller|promise|createModel|toolOutputs/i);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
@@ -46,7 +46,7 @@ test("M60 reconciles abandoned queued/running jobs once as interrupted and never
   const directory = await mkdtemp(join(tmpdir(), "dragons-m60-reconcile-"));
   let modelsCreated = 0;
   try {
-    await writeFile(join(directory, `${JOB_ID}.json`), JSON.stringify({ version: 1, id: JOB_ID, sessionId: SESSION_ID, workingDirectory: directory, prompt: "Prior process task.", executionPolicy: "READ_ONLY_MANUAL_RESUME", provenance: "INTERACTIVE_COMMAND", state: "running", createdAt: "2026-09-04T00:00:00.000Z", updatedAt: "2026-09-04T00:00:01.000Z", startedAt: "2026-09-04T00:00:01.000Z", executionAttempts: 1, transcript: "partial" }));
+    await writeFile(join(directory, `${JOB_ID}.json`), JSON.stringify({ version: 1, id: JOB_ID, sessionId: SESSION_ID, workingDirectory: directory, prompt: "Prior process task.", executionPolicy: "READ_ONLY_MANUAL_RESUME", provenance: "INTERACTIVE_COMMAND", state: "running", createdAt: "2026-09-04T00:00:00.000Z", updatedAt: "2026-09-04T00:00:01.000Z", startedAt: "2026-09-04T00:00:01.000Z", revision: 0, executionAttempts: 1, transcript: "partial" }));
     const manager = new PersistentBackgroundJobManager({ store: createPersistentBackgroundJobStore(directory), now: () => new Date("2026-09-04T01:00:00.000Z") });
     assert.equal((await manager.initialize()).reconciled, 1);
     assert.equal(manager.show(JOB_ID)?.state, "interrupted");
@@ -110,7 +110,7 @@ test("M60 fails closed for symlinked storage roots and job files", async () => {
   try {
     await symlink(outside, linkedRoot);
     await assert.rejects(createPersistentBackgroundJobStore(linkedRoot).list(), /real directory, not a symlink/i);
-    await writeFile(join(outside, "job.json"), JSON.stringify({ version: 1, id: JOB_ID, sessionId: SESSION_ID, workingDirectory: outside, prompt: "External job.", executionPolicy: "READ_ONLY_MANUAL_RESUME", provenance: "INTERACTIVE_COMMAND", state: "completed", createdAt: "2026-09-04T00:00:00.000Z", updatedAt: "2026-09-04T00:00:00.000Z", completedAt: "2026-09-04T00:00:00.000Z", executionAttempts: 1, transcript: "" }));
+    await writeFile(join(outside, "job.json"), JSON.stringify({ version: 1, id: JOB_ID, sessionId: SESSION_ID, workingDirectory: outside, prompt: "External job.", executionPolicy: "READ_ONLY_MANUAL_RESUME", provenance: "INTERACTIVE_COMMAND", state: "completed", createdAt: "2026-09-04T00:00:00.000Z", updatedAt: "2026-09-04T00:00:00.000Z", completedAt: "2026-09-04T00:00:00.000Z", revision: 0, executionAttempts: 1, transcript: "" }));
     const jobs = join(root, "jobs");
     await (await import("node:fs/promises")).mkdir(jobs);
     await symlink(join(outside, "job.json"), join(jobs, `${JOB_ID}.json`));

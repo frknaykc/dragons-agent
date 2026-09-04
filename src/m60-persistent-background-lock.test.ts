@@ -33,7 +33,7 @@ test("M60 uses a durable exclusive claim so two reloaded managers cannot resume 
   const pending = new Promise<void>((resolve) => { release = resolve; });
   try {
     await writeFile(join(directory, `${JOB_ID}.json`), JSON.stringify({
-      version: 1, id: JOB_ID, sessionId: SESSION_ID, workingDirectory: directory, prompt: "Read only.", executionPolicy: "READ_ONLY_MANUAL_RESUME", provenance: "INTERACTIVE_COMMAND", state: "interrupted", createdAt: "2026-09-04T00:00:00.000Z", updatedAt: "2026-09-04T00:00:00.000Z", completedAt: "2026-09-04T00:00:00.000Z", executionAttempts: 1, transcript: "", error: "prior exit",
+      version: 1, id: JOB_ID, sessionId: SESSION_ID, workingDirectory: directory, prompt: "Read only.", executionPolicy: "READ_ONLY_MANUAL_RESUME", provenance: "INTERACTIVE_COMMAND", state: "interrupted", createdAt: "2026-09-04T00:00:00.000Z", updatedAt: "2026-09-04T00:00:00.000Z", completedAt: "2026-09-04T00:00:00.000Z", revision: 0, executionAttempts: 1, transcript: "", error: "prior exit",
     }));
     const first = new PersistentBackgroundJobManager({ store: createPersistentBackgroundJobStore(directory) });
     const second = new PersistentBackgroundJobManager({ store: createPersistentBackgroundJobStore(directory) });
