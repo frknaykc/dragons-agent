@@ -2,6 +2,7 @@ import {
   AgentRunCancelledError,
   runAgent,
   type AgentModel,
+  type ToolAuthorizationDecision,
 } from "./agent.js";
 import type { MemoryContext } from "./memory.js";
 import type { DragonsPlan } from "./plan.js";
@@ -29,6 +30,10 @@ export type CreateSubagentToolOptions = {
   maxTurns?: number;
   maxTaskCharacters?: number;
   maxReportCharacters?: number;
+  /** Maximum child depth including the first delegated child; defaults to one. */
+  maxDepth?: number;
+  /** Explicit approval seam for each nested delegation; absent means nesting is unavailable. */
+  authorizeNested?: (request: { name: string; task: string; depth: number }) => ToolAuthorizationDecision | Promise<ToolAuthorizationDecision>;
   signal?: AbortSignal;
 };
 
@@ -66,14 +71,18 @@ export function createSubagentTool(options: CreateSubagentToolOptions): AgentToo
   const maxTurns = options.maxTurns ?? DEFAULT_MAX_SUBAGENT_TURNS;
   const maxTaskCharacters = options.maxTaskCharacters ?? DEFAULT_MAX_SUBAGENT_TASK_CHARS;
   const maxReportCharacters = options.maxReportCharacters ?? DEFAULT_MAX_SUBAGENT_REPORT_CHARS;
+  const maxDepth = options.maxDepth ?? 1;
   if (!Number.isSafeInteger(maxTurns) || maxTurns < 1 || maxTurns > DEFAULT_MAX_SUBAGENT_TURNS) throw new Error(`Subagent maxTurns must be an integer from 1 to ${DEFAULT_MAX_SUBAGENT_TURNS}.`);
   if (!Number.isSafeInteger(maxTaskCharacters) || maxTaskCharacters < 1) throw new Error("Subagent task character limit must be a positive integer.");
   if (!Number.isSafeInteger(maxReportCharacters) || maxReportCharacters < 1) throw new Error("Subagent report character limit must be a positive integer.");
+  if (!Number.isSafeInteger(maxDepth) || maxDepth < 1 || maxDepth > 2) throw new Error("Subagent maximum depth must be an integer from 1 to 2.");
 
-  return {
+  const createAtDepth = (depth: number): AgentTool => ({
     name: SUBAGENT_TOOL_NAME,
     operation: "EXECUTE",
-    description: "Delegate a bounded advisory investigation to one fresh, read-only in-process subagent. The subagent cannot modify files, run shell commands, or delegate further.",
+    description: depth < maxDepth && options.authorizeNested
+      ? "Delegate a bounded advisory investigation to one fresh, read-only in-process subagent. One explicitly authorized nested advisory delegation is available."
+      : "Delegate a bounded advisory investigation to one fresh, read-only in-process subagent. The subagent cannot modify files, run shell commands, or delegate further.",
     inputSchema: {
       type: "object",
       properties: { task: { type: "string", description: "The focused investigation to delegate." } },
@@ -86,6 +95,7 @@ export function createSubagentTool(options: CreateSubagentToolOptions): AgentToo
       const signal = executionOptions?.signal ?? options.signal;
       // The plan is passed as a static advisory snapshot, never as a live plan tool.
       const childTools = options.tools.filter((tool) => tool.operation === "READ" && tool.name !== SUBAGENT_TOOL_NAME && !tool.name.startsWith("plan_"));
+      if (depth < maxDepth && options.authorizeNested) childTools.push(createAtDepth(depth + 1));
       try {
         const plan = options.getPlan ? await options.getPlan() : options.plan;
         const result = await runAgent({
@@ -98,6 +108,9 @@ export function createSubagentTool(options: CreateSubagentToolOptions): AgentToo
           plan: cloneSnapshot(plan),
           maxTurns,
           signal,
+          authorize: options.authorizeNested
+            ? async (request) => request.name === SUBAGENT_TOOL_NAME && await options.authorizeNested!({ name: request.name, task: request.arguments, depth })
+            : undefined,
         });
         return { ok: true, output: boundedText(`Subagent report:\n${result.finalText}`, maxReportCharacters, "subagent report") };
       } catch (error: unknown) {
@@ -105,5 +118,7 @@ export function createSubagentTool(options: CreateSubagentToolOptions): AgentToo
         return toolFailure(error, maxReportCharacters);
       }
     },
-  };
+  });
+
+  return createAtDepth(1);
 }

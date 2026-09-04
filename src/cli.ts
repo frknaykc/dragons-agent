@@ -726,6 +726,7 @@ async function runInteractiveConversation(
           workingDirectory,
           onSuggestion: (suggestion) => { write(formatMemorySuggestion(suggestion, true)); return true; },
         });
+        const authorize = createAuthorizer(answers, (request) => renderer.renderApproval(request), controller.signal);
         const subagent = createSubagentTool({
           createModel: () => createFreshSubagentModel(dependencies, activeProvider, activeModelName, write),
           tools: [...tools, suggestionTool],
@@ -733,6 +734,8 @@ async function runInteractiveConversation(
           skills,
           memory,
           getPlan: async () => ({ version: 1, tasks: await createSessionPlanStore(sessionStore, session.id).list() }),
+          maxDepth: 2,
+          authorizeNested: ({ name, task }) => authorize({ name, operation: "EXECUTE", arguments: task }),
         });
         const runTools = [...tools, suggestionTool, subagent];
         operations.set(suggestionTool.name, suggestionTool.operation);
@@ -751,7 +754,7 @@ async function runInteractiveConversation(
           conversationResponseId,
           continuationState,
           sessionApprovals,
-          authorize: createAuthorizer(answers, (request) => renderer.renderApproval(request), controller.signal),
+          authorize,
           onEvent: (event) => renderEvent(event, renderer, operations),
           maxTurns: dependencies.config?.maxTurns,
           contextBudgetChars: dependencies.config?.contextBudgetChars,

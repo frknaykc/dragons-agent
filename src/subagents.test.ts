@@ -73,6 +73,38 @@ test("M28 forwards a bounded child report with fresh model and advisory snapshot
   assert.deepEqual(request.plan, { version: 1, tasks: [{ id: PLAN_ID, title: "Review", description: "Inspect only.", status: "TODO" }] });
 });
 
+test("M62 permits one explicitly authorized nested read-only subagent and bounds further nesting", async () => {
+  const childRequests: AgentRequest[] = [];
+  let createdModels = 0;
+  const tool = createSubagentTool({
+    maxDepth: 2,
+    authorizeNested: () => true,
+    createModel: () => {
+      createdModels += 1;
+      const level = createdModels;
+      return {
+        async respond(request) {
+          childRequests.push(request);
+          if (level === 1 && request.toolOutputs.length === 0) return { responseId: "child", text: "", toolCalls: [{ callId: "grandchild", name: "delegate_subagent", arguments: '{"task":"Inspect a narrower question."}' }] };
+          if (level === 1) {
+            assert.deepEqual(request.toolOutputs, [{ callId: "grandchild", output: "Subagent report:\nNarrow evidence." }]);
+            return { responseId: "child-final", text: "Parent evidence.", toolCalls: [] };
+          }
+          assert.deepEqual(request.tools.map((candidate) => candidate.name), ["read_file"]);
+          return { responseId: "grandchild", text: "Narrow evidence.", toolCalls: [] };
+        },
+      };
+    },
+    tools: [readTool()],
+  });
+
+  const result = await tool.execute({ task: "Inspect the broad question." });
+
+  assert.deepEqual(result, { ok: true, output: "Subagent report:\nParent evidence." });
+  assert.equal(createdModels, 2);
+  assert.deepEqual(childRequests[0]?.tools.map((candidate) => candidate.name), ["read_file", "delegate_subagent"]);
+});
+
 test("M28 supplies only READ tools and blocks nested, write, and shell calls structurally", async () => {
   const executions = { value: 0 };
   const childRequests: AgentRequest[] = [];
@@ -238,6 +270,41 @@ test("M28 refreshes the child model factory after interactive model and provider
       { provider: "chatgpt", model: "gpt-5.6-terra" },
       { provider: "chatgpt", model: "gpt-5.6-terra" },
     ]);
+  } finally {
+    await Promise.all([rm(sessionDirectory, { recursive: true, force: true }), rm(workspace, { recursive: true, force: true })]);
+  }
+});
+
+test("M62 interactive nesting asks for a separate nested approval and never exposes a third level", async () => {
+  const sessionDirectory = await mkdtemp(join(tmpdir(), "dragons-m62-sessions-"));
+  const workspace = await mkdtemp(join(tmpdir(), "dragons-m62-workspace-"));
+  let models = 0;
+  try {
+    await main([], {
+      workingDirectory: workspace,
+      sessionDirectory,
+      input: Readable.from(["Investigate hierarchy.\n", "yes\n", "yes\n", "/exit\n"]),
+      write: () => undefined,
+      tools: [readTool()],
+      modelFactory: () => {
+        models += 1;
+        return {
+          async respond(request) {
+            if (request.task === "Grandchild question.") {
+              assert.deepEqual(request.tools.map((tool) => tool.name), ["read_file"]);
+              return { responseId: "grandchild", text: "Narrow evidence.", toolCalls: [] };
+            }
+            if (request.task === "Child question.") {
+              if (request.toolOutputs.length === 0) return { responseId: "child", text: "", toolCalls: [{ callId: "nested", name: "delegate_subagent", arguments: '{"task":"Grandchild question."}' }] };
+              return { responseId: "child-final", text: "Child evidence.", toolCalls: [] };
+            }
+            if (request.toolOutputs.length === 0) return { responseId: "parent", text: "", toolCalls: [{ callId: "child", name: "delegate_subagent", arguments: '{"task":"Child question."}' }] };
+            return { responseId: "parent-final", text: "Parent received evidence.", toolCalls: [] };
+          },
+        };
+      },
+    });
+    assert.equal(models, 3);
   } finally {
     await Promise.all([rm(sessionDirectory, { recursive: true, force: true }), rm(workspace, { recursive: true, force: true })]);
   }
