@@ -620,16 +620,21 @@ export class PersistentBackgroundJobManager {
   async cancel(id: string, sessionId?: string): Promise<boolean> {
     const job = this.jobs.get(id);
     if (!job || (sessionId !== undefined && job.sessionId !== sessionId)) return false;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
       const current = await this.store.load(id);
-      if (!current || current.sessionId !== job.sessionId || TERMINAL_JOB_STATES.has(current.state)) return false;
+      if (!current) {
+        if (attempt === 9) return false;
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+        continue;
+      }
+      if (current.sessionId !== job.sessionId || TERMINAL_JOB_STATES.has(current.state)) return false;
       Object.assign(job, current);
       try {
         await this.transition(job, { state: "cancelled", completedAt: this.now().toISOString() });
         this.runtimes.get(id)?.controller.abort();
         return true;
       } catch {
-        if (attempt === 4) return false;
+        if (attempt === 9) return false;
         await new Promise<void>((resolve) => setTimeout(resolve, 10));
       }
     }

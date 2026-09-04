@@ -162,8 +162,8 @@ test("M47 stays on the existing WRITE authorization boundary", async () => {
 test("M48 recommends only bounded local conventions without running a shell", async () => {
   const directory = await workspace();
   try {
+    await mkdir(join(directory, "src"));
     await Promise.all([
-      mkdir(join(directory, "src")),
       writeFile(join(directory, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n"),
       writeFile(join(directory, "package.json"), JSON.stringify({ scripts: { test: "node --test", typecheck: "tsc --noEmit", build: "tsc" } })),
       writeFile(join(directory, "src", "auth.ts"), "export const auth = true;\n"),
