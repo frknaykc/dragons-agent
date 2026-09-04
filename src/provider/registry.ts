@@ -1,7 +1,7 @@
 import type { AgentModel } from "../agent.js";
 
 export type ProviderId = string;
-export const DEFAULT_PROVIDER_IDS = ["openai-api", "chatgpt"] as const;
+export const DEFAULT_PROVIDER_IDS = ["openai-api", "chatgpt", "anthropic"] as const;
 
 export type ProviderCredentialRequirement = "api-key" | "oauth" | "none";
 

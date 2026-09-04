@@ -15,6 +15,7 @@ export type ProviderDiagnosticKind = Exclude<ProviderCompatibilityKind, "cancell
 const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI Platform",
   chatgpt: "ChatGPT Subscription",
+  anthropic: "Anthropic",
 };
 
 export class ProviderCompatibilityError extends Error {
@@ -36,7 +37,9 @@ function providerLabel(provider: string): string {
 export function providerCompatibilityMessage(provider: string, kind: ProviderCompatibilityKind, status?: number): string {
   const label = providerLabel(provider);
   const suffix = status === undefined ? "" : ` (HTTP ${status})`;
-  if (kind === "authentication") return `${label} authentication failed. Run dragons auth login --provider chatgpt or verify the configured API key.${suffix}`;
+  if (kind === "authentication") return provider === "chatgpt"
+    ? `${label} authentication failed. Run dragons auth login --provider chatgpt or verify the configured API key.${suffix}`
+    : `${label} authentication failed. Verify the configured API key.${suffix}`;
   if (kind === "entitlement") return `${label} account or workspace is not entitled to this request. Review the selected account and model.${suffix}`;
   if (kind === "model_unavailable") return `${label} model is unavailable or not entitled. Select a supported configured model and try again.${suffix}`;
   if (kind === "rate_limit") return `${label} rate limit reached. Wait before retrying.${suffix}`;

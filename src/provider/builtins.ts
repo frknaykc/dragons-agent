@@ -1,6 +1,7 @@
 import { createChatGPTAuthService, type ChatGPTAuthService } from "./codex-auth.js";
 import { createCodexAgentModel, DEFAULT_CODEX_MODEL } from "./codex.js";
 import { createOpenAIAgentModel, DEFAULT_OPENAI_MODEL } from "./openai.js";
+import { createAnthropicAgentModel, DEFAULT_ANTHROPIC_MODEL } from "./anthropic.js";
 import { createProviderRegistry, type ProviderRegistry } from "./registry.js";
 
 export type BuiltInProviderRegistryOptions = {
@@ -38,6 +39,19 @@ export function createBuiltInProviderRegistry(options: BuiltInProviderRegistryOp
         credentials: options.chatgptAuth?.credentials ?? createChatGPTAuthService({ write }).credentials,
         model: model ?? DEFAULT_CODEX_MODEL,
       }),
+    },
+    {
+      id: "anthropic",
+      label: "Anthropic",
+      defaultModel: DEFAULT_ANTHROPIC_MODEL,
+      credentialRequirement: "api-key",
+      capabilities: {
+        streaming: true,
+        toolCalls: true,
+        toolResultContinuation: true,
+        usageMetadata: true,
+      },
+      createModel: ({ model }) => createAnthropicAgentModel({ model: model ?? DEFAULT_ANTHROPIC_MODEL }),
     },
   ]);
 }
