@@ -544,6 +544,7 @@ export function createSessionPlanStore(sessionStore: PlanSessionStore, sessionId
       const plan = currentPlan(session);
       const current = plan.tasks.find((task) => task.id === id);
       if (!current) throw new Error("Plan task was not found.");
+      if (current.claimToken !== undefined && status !== "IN_PROGRESS") throw new Error("An active plan claim can change state only through its claim owner.");
       if (current.status === "BLOCKED" && current.dependsOn?.length && status !== "BLOCKED") throw new Error("Blocked dependency-aware plan tasks require explicit recovery.");
       const updated: DragonsPlanTask = { ...current, status, ...(status === "BLOCKED" ? { blockedReason } : {}) };
       if (status !== "BLOCKED") delete updated.blockedReason;

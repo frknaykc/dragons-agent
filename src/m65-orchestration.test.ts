@@ -236,29 +236,26 @@ test("M65 does not let a completed worker overwrite an intervening authoritative
   const executor: OrchestrationExecutor = { async local(step: DragonsPlanTask) { await started; return success(step.id, "LOCAL"); } };
   const run = createPlanOrchestrator({ store, executor }).execute([{ taskId: task.id }]);
   await new Promise<void>((resolve) => setImmediate(resolve));
-  await store.setStatus(task.id, "BLOCKED", "Operator intervention.");
+  const claimed = await store.get(task.id);
+  await store.blockClaim(task.id, claimed!.claimToken!, "Operator intervention.");
   release!();
   const [result] = await run;
   assert.equal(result?.status, "FAILED");
   assert.equal((await store.get(task.id))?.status, "BLOCKED");
 });
 
-test("M65 fences a completed worker after its task is re-claimed", async () => {
+test("M65 prevents an active claim from leaving IN_PROGRESS through plan status updates", async () => {
   const { store } = planStore();
   const task = await store.add({ title: "Shared", description: "Only the active claim may complete." });
   const [first] = await store.claimRunnable([task.id]);
   assert.ok(first?.claimToken);
-  await store.setStatus(task.id, "TODO");
-  const [second] = await store.claimRunnable([task.id]);
-  assert.ok(second?.claimToken);
-  assert.notEqual(second?.claimToken, first?.claimToken);
-  assert.equal(await store.completeClaim(task.id, first!.claimToken!), undefined);
-  assert.equal((await store.get(task.id))?.status, "IN_PROGRESS");
-  assert.equal((await store.get(task.id))?.claimToken, second?.claimToken);
-  assert.equal((await store.completeClaim(task.id, second!.claimToken!))?.status, "DONE");
+  await assert.rejects(() => store.setStatus(task.id, "TODO"), /only through its claim owner/);
+  await assert.rejects(() => store.setStatus(task.id, "BLOCKED", "Manual rollback."), /only through its claim owner/);
+  assert.equal((await store.get(task.id))?.claimToken, first?.claimToken);
+  assert.equal((await store.completeClaim(task.id, first!.claimToken!))?.status, "DONE");
 });
 
-test("M65 cannot block a newer claim when an old worker finishes", async () => {
+test("M65 rejects status rollback before another root run can re-dispatch active work", async () => {
   const { store } = planStore();
   const task = await store.add({ title: "Shared", description: "Old workers cannot block re-claimed work." });
   let release: (() => void) | undefined;
@@ -266,13 +263,12 @@ test("M65 cannot block a newer claim when an old worker finishes", async () => {
   const executor: OrchestrationExecutor = { async local(step: DragonsPlanTask) { await started; return success(step.id, "LOCAL"); } };
   const run = createPlanOrchestrator({ store, executor }).execute([{ taskId: task.id }]);
   await new Promise<void>((resolve) => setImmediate(resolve));
-  await store.setStatus(task.id, "TODO");
-  const [replacement] = await store.claimRunnable([task.id]);
+  await assert.rejects(() => store.setStatus(task.id, "BLOCKED", "Manual rollback."), /only through its claim owner/);
+  await assert.rejects(() => store.setStatus(task.id, "TODO"), /only through its claim owner/);
   release!();
   const [result] = await run;
-  assert.equal(result?.status, "FAILED");
-  assert.equal((await store.get(task.id))?.status, "IN_PROGRESS");
-  assert.equal((await store.get(task.id))?.claimToken, replacement?.claimToken);
+  assert.equal(result?.status, "COMPLETED");
+  assert.equal((await store.get(task.id))?.status, "DONE");
 });
 
 test("M65 uses the durable session claim seam so separate file-backed stores cannot claim a task twice", async () => {
