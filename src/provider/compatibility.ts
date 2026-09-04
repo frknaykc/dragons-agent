@@ -16,6 +16,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI Platform",
   chatgpt: "ChatGPT Subscription",
   anthropic: "Anthropic",
+  gemini: "Google Gemini",
 };
 
 export class ProviderCompatibilityError extends Error {
