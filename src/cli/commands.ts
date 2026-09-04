@@ -19,6 +19,7 @@ export type CliCommand =
   | { kind: "memory"; action: "list"; scope: "user" | "project" }
   | { kind: "memory"; action: "show"; id: string; scope: "user" | "project" }
   | { kind: "memory"; action: "add"; body: string; scope: "user" | "project" }
+  | { kind: "memory"; action: "suggest"; body: string; scope: "user" | "project" }
   | { kind: "memory"; action: "delete"; id: string; scope: "user" | "project" }
   | { kind: "plan"; action: "list"; sessionId: string }
   | { kind: "plan"; action: "add"; sessionId: string; title: string; description: string; parentId?: string }
@@ -120,8 +121,13 @@ export function parseCliCommand(arguments_: string[]): CliCommand {
       const body = forwardedArguments.slice(explicitScope === "user" && forwardedArguments[2] !== "user" ? 2 : 3).join(" ").trim();
       if (body) return { kind: "memory", action: "add", body, scope: explicitScope };
     }
+    if (forwardedArguments[1] === "suggest" && forwardedArguments.length >= 3) {
+      const explicitScope = forwardedArguments[2] === "user" || forwardedArguments[2] === "project" ? forwardedArguments[2] : "user";
+      const body = forwardedArguments.slice(explicitScope === "user" && forwardedArguments[2] !== "user" ? 2 : 3).join(" ").trim();
+      if (body) return { kind: "memory", action: "suggest", body, scope: explicitScope };
+    }
     if (forwardedArguments[1] === "delete" && forwardedArguments[2] && (forwardedArguments.length === 3 || (forwardedArguments.length === 4 && (forwardedArguments[3] === "user" || forwardedArguments[3] === "project")))) return { kind: "memory", action: "delete", id: forwardedArguments[2], scope: forwardedArguments[3] === "project" ? "project" : "user" };
-    throw new Error("Use dragons memory list [user|project], dragons memory show <id> [user|project], dragons memory add [user|project] <body>, or dragons memory delete <id> [user|project].");
+    throw new Error("Use dragons memory list [user|project], dragons memory show <id> [user|project], dragons memory add [user|project] <body>, dragons memory suggest [user|project] <body>, or dragons memory delete <id> [user|project].");
   }
   if (forwardedArguments[0] === "skills") {
     if (forwardedArguments[1] === "list" && forwardedArguments.length === 2) return { kind: "skills", action: "list" };

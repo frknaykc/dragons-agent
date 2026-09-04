@@ -42,6 +42,7 @@ import {
 } from "./skills.js";
 import {
   createMemoryStore,
+  createMemorySuggestionTool,
   getDragonsMemoryDirectory,
   type MemoryStore,
 } from "./memory.js";
@@ -50,7 +51,7 @@ import {
   createSessionPlanStore,
 } from "./plan.js";
 import { parseCliCommand, providerFrom, type CliCommand, type ProviderName } from "./cli/commands.js";
-import { handleInteractiveMemoryCommand, memoryContextFor, runMemoryCommand } from "./cli/memory-commands.js";
+import { formatMemorySuggestion, handleInteractiveMemoryCommand, memoryContextFor, runMemoryCommand } from "./cli/memory-commands.js";
 import { handleInteractivePlanCommand, runPlanCommand } from "./cli/plan-commands.js";
 import { handleInteractiveSkillsCommand, runSkillsCommand, writeActiveSkillNotices } from "./cli/skills-commands.js";
 
@@ -422,6 +423,7 @@ async function runInteractiveConversation(
       }
       if (task === "/new") {
         backgroundTasks.cancelForSession(session.id);
+        await memoryStore.clearSuggestions();
         session = await sessionStore.create({ workingDirectory, provider: activeProvider, model: activeModelName });
         activeSkillReferences = [];
         conversationResponseId = undefined;
@@ -456,6 +458,7 @@ async function runInteractiveConversation(
         activeModel = dependencies.modelFactory?.(activeProvider, activeModelName)
           ?? dependencies.model
           ?? defaultModel(activeProvider, activeModelName, write);
+        await memoryStore.clearSuggestions();
         sessionApprovals.clear();
         write(`Resumed session: ${session.id}\n`);
         await writeActiveSkillNotices(skillsDirectory, activeSkillReferences, write, workingDirectory);
@@ -537,6 +540,7 @@ async function runInteractiveConversation(
         activeModelName = nextModel;
         activeModelInput = nextModel;
         activeModel = dependencies.modelFactory?.(activeProvider, nextModel) ?? dependencies.model ?? defaultModel(activeProvider, nextModel, write);
+        await memoryStore.clearSuggestions();
         session = await sessionStore.create({ workingDirectory, provider: activeProvider, model: activeModelName });
         activeSkillReferences = [];
         conversationResponseId = undefined;
@@ -562,6 +566,7 @@ async function runInteractiveConversation(
         activeModelName = nextModel;
         activeModelInput = configuredModel;
         activeModel = dependencies.modelFactory?.(activeProvider, nextModel) ?? dependencies.model ?? defaultModel(activeProvider, nextModel, write);
+        await memoryStore.clearSuggestions();
         session = await sessionStore.create({ workingDirectory, provider: activeProvider, model: activeModelName });
         activeSkillReferences = [];
         conversationResponseId = undefined;
@@ -608,15 +613,21 @@ async function runInteractiveConversation(
         const projectContext = await discoverProjectContext(workingDirectory);
         // The parent receives one immutable current-session plan snapshot; mutations remain AgentTool calls behind M10.
         const plan = { version: 1 as const, tasks: await createSessionPlanStore(sessionStore, session.id).list() };
+        const suggestionTool = createMemorySuggestionTool({
+          store: memoryStore,
+          workingDirectory,
+          onSuggestion: (suggestion) => { write(formatMemorySuggestion(suggestion, true)); return true; },
+        });
         const subagent = createSubagentTool({
           createModel: () => createFreshSubagentModel(dependencies, activeProvider, activeModelName, write),
-          tools,
+          tools: [...tools, suggestionTool],
           projectContext,
           skills,
           memory,
           getPlan: async () => ({ version: 1, tasks: await createSessionPlanStore(sessionStore, session.id).list() }),
         });
-        const runTools = [...tools, subagent];
+        const runTools = [...tools, suggestionTool, subagent];
+        operations.set(suggestionTool.name, suggestionTool.operation);
         operations.set(subagent.name, subagent.operation);
         activeModel ??= dependencies.modelFactory?.(activeProvider, activeModelInput) ?? dependencies.model ?? defaultModel(activeProvider, activeModelName, write);
         const runDiagnostics = diagnostics.start({ sessionId: session.id, provider: activeProvider, model: activeModelName });
@@ -845,15 +856,22 @@ export async function main(
   const cancelRun = (): void => controller.abort();
   process.once("SIGINT", cancelRun);
   try {
-    const memory = await memoryContextFor(memoryStoreFor(dependencies), workingDirectory);
+    const memoryStore = memoryStoreFor(dependencies);
+    const memory = await memoryContextFor(memoryStore, workingDirectory);
     const projectContext = await discoverProjectContext(workingDirectory);
+    const suggestionTool = createMemorySuggestionTool({
+      store: memoryStore,
+      workingDirectory,
+      onSuggestion: (suggestion) => { write(formatMemorySuggestion(suggestion, false)); return true; },
+    });
     const subagent = createSubagentTool({
       createModel: () => createFreshSubagentModel(dependencies, command.provider, command.model, write),
-      tools,
+      tools: [...tools, suggestionTool],
       projectContext,
       memory,
     });
-    const runTools = [...tools, subagent];
+    const runTools = [...tools, suggestionTool, subagent];
+    operations.set(suggestionTool.name, suggestionTool.operation);
     operations.set(subagent.name, subagent.operation);
     const runDiagnostics = diagnostics.start({ provider: command.provider, model: selectedModel(command.provider, command.model) });
     await runAgent({

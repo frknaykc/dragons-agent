@@ -89,7 +89,7 @@ test("M30 interactive advanced workflow keeps plan, MCP, subagent, and backgroun
               assert.match(request.memory?.memories[0]?.body ?? "", /Persist only this advisory preference/);
               assert.equal(request.plan?.tasks.length, 1);
               assert.equal(request.plan?.tasks[0]?.title, "Local plan");
-              assert.deepEqual(request.tools.map((tool) => tool.name), ["read_fixture", "mcp__fixture__inspect", "plan_list", "plan_add", "plan_update", "plan_set_status", "plan_remove", "delegate_subagent"]);
+              assert.deepEqual(request.tools.map((tool) => tool.name), ["read_fixture", "mcp__fixture__inspect", "plan_list", "plan_add", "plan_update", "plan_set_status", "plan_remove", "suggest_memory", "delegate_subagent"]);
               assert.equal(request.tools.some((tool) => tool.name.includes("background") || tool.name === "start_background_task"), false);
               return {
                 responseId: "parent-tools",
@@ -112,7 +112,7 @@ test("M30 interactive advanced workflow keeps plan, MCP, subagent, and backgroun
             assert.equal(request.continuationState, undefined);
             assert.equal(request.conversationResponseId, undefined);
             assert.equal(request.previousResponseId, undefined);
-            assert.deepEqual(request.tools.map(({ name, operation }) => ({ name, operation })), [{ name: "read_fixture", operation: "READ" }]);
+            assert.deepEqual(request.tools.map(({ name, operation }) => ({ name, operation })), [{ name: "read_fixture", operation: "READ" }, { name: "suggest_memory", operation: "READ" }]);
             assert.equal(request.plan?.tasks.length, 2);
             return { responseId: "child", text: "Child advisory report.", toolCalls: [] };
           }

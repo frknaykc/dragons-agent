@@ -3,12 +3,16 @@ import { chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } 
 import { join } from "node:path";
 
 import { joinPlatformPath } from "./platform-path.js";
+import type { AgentTool } from "./tools.js";
 
 export const MEMORY_STORAGE_VERSION = 1;
 export const DEFAULT_MAX_MEMORY_BODY_CHARS = 4_000;
 export const DEFAULT_MAX_MEMORY_CONTEXT_CHARS = 12_000;
 export const DEFAULT_MAX_MEMORY_RECORDS = 100;
 export const DEFAULT_MAX_ACTIVE_MEMORY_RECORDS = 24;
+export const DEFAULT_MAX_PENDING_MEMORY_SUGGESTIONS = 16;
+export const DEFAULT_MAX_MEMORY_SUGGESTION_BODY_CHARS = 1_000;
+export const DEFAULT_MAX_MEMORY_SUGGESTION_REASON_CHARS = 280;
 
 const MEMORY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WORKSPACE_ID_PATTERN = /^[a-f0-9]{64}$/;
@@ -51,8 +55,10 @@ export type MemoryDirectoryOptions = {
 export type MemoryStoreOptions = {
   now?: () => Date;
   createId?: () => string;
+  createSuggestionId?: () => string;
   maxBodyCharacters?: number;
   maxRecords?: number;
+  maxPendingSuggestions?: number;
 };
 
 export type MemoryInput = {
@@ -60,8 +66,31 @@ export type MemoryInput = {
   scope: MemoryScope;
 };
 
+/** Process-local candidate only. Suggestions are deliberately never persisted. */
+export type PendingMemorySuggestion = MemoryInput & {
+  id: string;
+  createdAt: string;
+  reason?: string;
+};
+
+export type MemorySuggestionInput = MemoryInput & {
+  reason?: string;
+};
+
+export type MemorySuggestionToolOptions = {
+  store: MemoryStore;
+  workingDirectory: string;
+  /** Called only after an in-process candidate is created; callers choose safe user presentation. */
+  onSuggestion?: (suggestion: PendingMemorySuggestion) => boolean | Promise<boolean>;
+};
+
 export type MemoryStore = {
   add(input: MemoryInput | string): Promise<DragonsMemory>;
+  suggest(input: MemorySuggestionInput): Promise<PendingMemorySuggestion>;
+  listSuggestions(): Promise<PendingMemorySuggestion[]>;
+  clearSuggestions(): Promise<void>;
+  acceptSuggestion(id: string): Promise<DragonsMemory | undefined>;
+  rejectSuggestion(id: string): Promise<boolean>;
   list(scope?: MemoryScope): Promise<DragonsMemory[]>;
   get(id: string, scope?: MemoryScope): Promise<DragonsMemory | undefined>;
   delete(id: string, scope?: MemoryScope): Promise<boolean>;
@@ -108,8 +137,21 @@ function validBody(value: unknown, maxBodyCharacters: number): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.length <= maxBodyCharacters;
 }
 
+function validSuggestionReason(value: unknown): value is string | undefined {
+  return value === undefined || (typeof value === "string"
+    && value.trim().length > 0
+    && value.length <= DEFAULT_MAX_MEMORY_SUGGESTION_REASON_CHARS
+    && !/(?:^|\n)\s*(?:```|~~~)/.test(value)
+    && !containsLikelySecret(value));
+}
+
+function validSuggestionBody(value: unknown, maxBodyCharacters: number): value is string {
+  return validBody(value, Math.min(maxBodyCharacters, DEFAULT_MAX_MEMORY_SUGGESTION_BODY_CHARS))
+    && !/(?:^|\n)\s*(?:```|~~~)/.test(value);
+}
+
 function containsLikelySecret(body: string): boolean {
-  return /\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*\S+/i.test(body)
+  return /(?:^|[^A-Za-z0-9_])[A-Za-z0-9_]*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)[A-Za-z0-9_]*\s*[:=]\s*\S+/i.test(body)
     || /\b(?:sk|rk)-[A-Za-z0-9_-]{16,}\b/.test(body)
     || /\bBearer\s+[A-Za-z0-9._~-]{16,}\b/i.test(body);
 }
@@ -200,10 +242,14 @@ function normalizedInput(input: MemoryInput | string): MemoryInput {
 export function createMemoryStore(directory: string, options: MemoryStoreOptions = {}): MemoryStore {
   const now = options.now ?? (() => new Date());
   const createId = options.createId ?? randomUUID;
+  const createSuggestionId = options.createSuggestionId ?? randomUUID;
   const maxBodyCharacters = options.maxBodyCharacters ?? DEFAULT_MAX_MEMORY_BODY_CHARS;
   const maxRecords = options.maxRecords ?? DEFAULT_MAX_MEMORY_RECORDS;
+  const maxPendingSuggestions = options.maxPendingSuggestions ?? DEFAULT_MAX_PENDING_MEMORY_SUGGESTIONS;
   if (!Number.isSafeInteger(maxBodyCharacters) || maxBodyCharacters < 1) throw new Error("Memory body limit must be a positive integer.");
   if (!Number.isSafeInteger(maxRecords) || maxRecords < 1) throw new Error("Memory record limit must be a positive integer.");
+  if (!Number.isSafeInteger(maxPendingSuggestions) || maxPendingSuggestions < 1) throw new Error("Pending memory suggestion limit must be a positive integer.");
+  const pendingSuggestions = new Map<string, PendingMemorySuggestion>();
 
   return {
     async add(input): Promise<DragonsMemory> {
@@ -220,6 +266,49 @@ export function createMemoryStore(directory: string, options: MemoryStoreOptions
       const memory: DragonsMemory = { id, body: memoryInput.body, createdAt: now().toISOString(), scope: memoryInput.scope };
       await writeStorage(directory, { ...storage, events: [...storage.events, { type: "add", ...memory }] });
       return memory;
+    },
+
+    async suggest(input): Promise<PendingMemorySuggestion> {
+      if (!validSuggestionBody(input.body, maxBodyCharacters)) throw new Error(`Memory suggestion body must be non-empty, no longer than ${Math.min(maxBodyCharacters, DEFAULT_MAX_MEMORY_SUGGESTION_BODY_CHARS)} characters, and cannot contain code blocks.`);
+      if (containsLikelySecret(input.body)) throw new Error("Memory suggestion appears to contain a secret and was not saved.");
+      if (!isMemoryScope(input.scope)) throw new Error("Memory suggestion scope is invalid.");
+      if (!validSuggestionReason(input.reason)) throw new Error(`Memory suggestion reason must be non-empty, no longer than ${DEFAULT_MAX_MEMORY_SUGGESTION_REASON_CHARS} characters, and cannot contain secrets or code blocks.`);
+      if (pendingSuggestions.size >= maxPendingSuggestions) throw new Error(`Pending memory suggestion limit of ${maxPendingSuggestions} reached.`);
+      const id = createSuggestionId();
+      if (!isSafeMemoryId(id) || pendingSuggestions.has(id)) throw new Error("Unable to create a unique pending Dragons memory suggestion ID.");
+      const suggestion: PendingMemorySuggestion = {
+        id,
+        body: input.body,
+        scope: { ...input.scope } as MemoryScope,
+        createdAt: now().toISOString(),
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+      };
+      pendingSuggestions.set(id, suggestion);
+      return { ...suggestion, scope: { ...suggestion.scope } as MemoryScope };
+    },
+
+    async listSuggestions(): Promise<PendingMemorySuggestion[]> {
+      return [...pendingSuggestions.values()]
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+        .map((suggestion) => ({ ...suggestion, scope: { ...suggestion.scope } as MemoryScope }));
+    },
+
+    async clearSuggestions(): Promise<void> {
+      pendingSuggestions.clear();
+    },
+
+    async acceptSuggestion(id): Promise<DragonsMemory | undefined> {
+      if (!isSafeMemoryId(id)) return undefined;
+      const suggestion = pendingSuggestions.get(id);
+      if (!suggestion) return undefined;
+      const memory = await this.add({ body: suggestion.body, scope: suggestion.scope });
+      pendingSuggestions.delete(id);
+      return memory;
+    },
+
+    async rejectSuggestion(id): Promise<boolean> {
+      if (!isSafeMemoryId(id)) return false;
+      return pendingSuggestions.delete(id);
     },
 
     async list(scope): Promise<DragonsMemory[]> {
@@ -249,6 +338,60 @@ export function createMemoryStore(directory: string, options: MemoryStoreOptions
         events: [...storage.events, { type: "delete", id, createdAt: now().toISOString(), scope: memory.scope }],
       });
       return true;
+    },
+  };
+}
+
+/**
+ * Creates a read-only candidate tool. It may surface a proposal, but cannot persist
+ * a memory; only the interactive accept command calls MemoryStore.acceptSuggestion.
+ */
+export function createMemorySuggestionTool(options: MemorySuggestionToolOptions): AgentTool {
+  return {
+    name: "suggest_memory",
+    operation: "READ",
+    description: "Propose one bounded user or current-project memory for explicit user review. This never saves memory; the user must accept or reject it interactively.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        body: { type: "string", description: "The concise proposed durable memory. Do not include secrets, credentials, transcripts, or one-time task state." },
+        scope: { type: "string", description: "Either user or project." },
+        reason: { type: "string", description: "Optional short explanation of why the information may be useful later." },
+      },
+      required: ["body", "scope"],
+      additionalProperties: false,
+    },
+    async execute(input) {
+      if (!isRecord(input)
+        || Object.keys(input).some((key) => key !== "body" && key !== "scope" && key !== "reason")
+        || typeof input.body !== "string"
+        || (input.scope !== "user" && input.scope !== "project")
+        || (input.reason !== undefined && typeof input.reason !== "string")) {
+        return { ok: false, output: "Expected a memory suggestion with body, scope (user or project), and an optional reason." };
+      }
+      if (!options.onSuggestion) return { ok: false, output: "Memory suggestions require an interactive display and cannot be created in this context." };
+      let suggestion: PendingMemorySuggestion | undefined;
+      try {
+        const scope = input.scope === "project" ? await createProjectMemoryScope(options.workingDirectory) : { kind: "USER" as const };
+        suggestion = await options.store.suggest({
+          body: input.body,
+          scope,
+          ...(input.reason === undefined ? {} : { reason: input.reason }),
+        });
+        const displayed = await options.onSuggestion(suggestion);
+        if (displayed !== true) throw new Error("Memory suggestion could not be displayed and was not retained.");
+        return {
+          ok: true,
+          output: `Pending ${suggestion.scope.kind.toLowerCase()} memory suggestion ${suggestion.id} was displayed to the user. It has not been saved; wait for explicit acceptance or rejection.`,
+        };
+      } catch (error: unknown) {
+        if (suggestion) {
+          try { await options.store.rejectSuggestion(suggestion.id); }
+          catch { /* Presentation failed; do not retain an invisible candidate. */ }
+        }
+        const message = error instanceof Error ? error.message : "Unable to create a memory suggestion.";
+        return { ok: false, output: message };
+      }
     },
   };
 }
