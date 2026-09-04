@@ -8,7 +8,7 @@ import test from "node:test";
 import { AgentRunCancelledError, runAgent } from "./agent.js";
 import { main } from "./cli.js";
 import { createPlanOrchestrationTools, createPlanOrchestrator, executePlanQueue, type OrchestrationExecutor, type OrchestrationResult } from "./orchestration.js";
-import { createSessionPlanStore, type DragonsPlanTask } from "./plan.js";
+import { createSessionPlanStore, isDragonsPlan, type DragonsPlanTask } from "./plan.js";
 import { createSessionStore } from "./session-store.js";
 import type { AgentTool } from "./tools.js";
 
@@ -253,6 +253,30 @@ test("M65 prevents an active claim from leaving IN_PROGRESS through plan status 
   await assert.rejects(() => store.setStatus(task.id, "BLOCKED", "Manual rollback."), /only through its claim owner/);
   assert.equal((await store.get(task.id))?.claimToken, first?.claimToken);
   assert.equal((await store.completeClaim(task.id, first!.claimToken!))?.status, "DONE");
+});
+
+test("M65 rejects persisted claim tokens outside an active claim", () => {
+  for (const [status, blockedReason] of [["TODO"], ["DONE"], ["BLOCKED", "Manual rollback."]] as const) {
+    assert.equal(isDragonsPlan({
+      version: 1,
+      tasks: [{ id: IDS[0], title: "Shared", description: "Claim ownership is active-only.", status, claimToken: IDS[1], ...(blockedReason === undefined ? {} : { blockedReason }) }],
+    }), false);
+  }
+});
+
+test("M65 rejects a replayed inactive claim before a durable session can be re-dispatched", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dragons-m65-invalid-claim-"));
+  try {
+    const sessions = createSessionStore(directory);
+    const session = await sessions.create({ workingDirectory: directory, provider: "openai-api", model: "test" });
+    await writeFile(join(directory, `${session.id}.json`), JSON.stringify({
+      ...session,
+      plan: { version: 1, tasks: [{ id: IDS[0], title: "Shared", description: "Must not be re-dispatched.", status: "TODO", claimToken: IDS[1] }] },
+    }));
+    assert.equal(await createSessionStore(directory).load(session.id), undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("M65 rejects status rollback before another root run can re-dispatch active work", async () => {

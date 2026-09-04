@@ -246,7 +246,7 @@ export function isDragonsPlan(value: unknown, options: SessionPlanStoreOptions =
       || !validOptionalParent(candidate.parentId)
       || !validOptionalDependencies(candidate.dependsOn)
       || !isTaskStatus(candidate.status)
-      || (candidate.claimToken !== undefined && !validTaskId(candidate.claimToken))
+      || (candidate.claimToken !== undefined && (!validTaskId(candidate.claimToken) || candidate.status !== "IN_PROGRESS"))
       || !validOptionalBlockedReason(candidate.blockedReason, limits.maxBlockedReasonCharacters)) return false;
     if ((candidate.status === "BLOCKED") !== (candidate.blockedReason !== undefined)) return false;
     ids.add(candidate.id);
