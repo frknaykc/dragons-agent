@@ -6,6 +6,7 @@ import { joinPlatformPath } from "./platform-path.js";
 
 export const DEFAULT_MAX_SKILL_BODY_CHARS = 12_000;
 export const DEFAULT_MAX_ACTIVE_SKILLS_CHARS = 48_000;
+export const DEFAULT_MAX_ACTIVE_SKILL_REFERENCES = 128;
 export const DEFAULT_MAX_PROJECT_SKILLS = 32;
 export const DEFAULT_MAX_PROJECT_SKILL_ENTRIES = 128;
 export const DEFAULT_MAX_PROJECT_SKILL_FILE_BYTES = 16_384;
@@ -292,7 +293,9 @@ export async function createSkillsContext(directory: string, active: readonly Sk
   const skills: ActiveSkill[] = [];
   const notices: string[] = [];
   let used = 0;
-  const ordered = normalizedReferences(active);
+  const normalized = normalizedReferences(active);
+  const ordered = normalized.slice(0, DEFAULT_MAX_ACTIVE_SKILL_REFERENCES);
+  if (normalized.length > ordered.length) notices.push(`Active skill selection truncated; omitted ${normalized.length - ordered.length} skill(s) at the reference cap.`);
   for (let index = 0; index < ordered.length; index += 1) {
     const reference = ordered[index]!;
     const scope = reference.scope ?? "USER";
@@ -353,5 +356,5 @@ export function formatSkillsForInstructions(context: SkillsContext | undefined):
     ...context.notices.map((notice) => `[${notice}]`),
     ...context.skills.map(renderedSkill),
   ];
-  return sections.join("\n\n");
+  return truncateWithMarker(sections.join("\n\n"), DEFAULT_MAX_ACTIVE_SKILLS_CHARS, "active skills context");
 }

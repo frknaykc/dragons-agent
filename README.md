@@ -122,7 +122,7 @@ Interactive runs create persistent local sessions. Use `/sessions` and `/resume 
 
 ## Skills
 
-Skills are explicit, local advisory instructions stored in Dragons-owned local storage. A project can also provide explicitly selected Skills at `.dragons/skills/<skill-id>/SKILL.md`; discovery is direct-only, deterministic, bounded, and rejects symlinks or paths outside the workspace. Project Skills retain `PROJECT` provenance and remain advisory: they cannot override authorization, workspace boundaries, or system/provider policy. Use `dragons skills list`, `dragons skills show <id> project`, and `dragons skills activate|deactivate <id> project --session <id>` (or `/skills activate|deactivate project <id>` interactively). Dragons does not provide a Skills marketplace.
+Skills are explicit, local advisory instructions stored in Dragons-owned local storage. A project can also provide explicitly selected Skills at `.dragons/skills/<skill-id>/SKILL.md`; discovery is direct-only, deterministic, bounded, and rejects symlinks or paths outside the workspace. Project Skills retain `PROJECT` provenance and remain advisory: they cannot override authorization, workspace boundaries, or system/provider policy. Multiple selected Skills compose in explicit activation order, with each bounded, labeled by `USER` or `PROJECT`, and retained across session resume; a same-name user and project Skill remain distinct (`USER:<id>` and `PROJECT:<id>`). Use `dragons skills list`, `dragons skills show <id> project`, and `dragons skills activate|deactivate <id> project --session <id>` (or `/skills activate|deactivate project <id>` interactively). Dragons does not provide a Skills marketplace.
 
 ## MCP
 

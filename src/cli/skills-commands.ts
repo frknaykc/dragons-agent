@@ -67,7 +67,9 @@ export async function handleInteractiveSkillsCommand(input: {
 }): Promise<InteractiveSkillsResult> {
   const { task, directory, workingDirectory, activeSkillReferences, session, sessionStore, write } = input;
   if (task === "/skills") {
-    write(activeSkillReferences.length === 0 ? "No active skills.\n" : `Active skills: ${activeSkillReferences.map((reference) => reference.id).join(", ")}\n`);
+    const counts = new Map<string, number>();
+    for (const reference of activeSkillReferences) counts.set(reference.id, (counts.get(reference.id) ?? 0) + 1);
+    write(activeSkillReferences.length === 0 ? "No active skills.\n" : `Active skills: ${activeSkillReferences.map((reference) => (counts.get(reference.id) ?? 0) > 1 ? `${reference.scope ?? "USER"}:${reference.id}` : reference.id).join(", ")}\n`);
     return { handled: true };
   }
   if (task === "/skills list") {
