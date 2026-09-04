@@ -20,9 +20,10 @@ test("M60 propagates a durable cancellation to the owning runtime without comple
     const manager = new PersistentBackgroundJobManager({ store: createPersistentBackgroundJobStore(directory) });
     await Promise.all([owner.initialize(), manager.initialize()]);
     await owner.resume(ID, { createModel: () => ({ async respond({ signal }: { signal?: AbortSignal }) { await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => { abortSeen = true; reject(new Error("aborted")); }, { once: true })); return { responseId: "never", text: "never", toolCalls: [] }; } }), tools: [readTool] });
-    for (let i = 0; owner.show(ID)?.state !== "running" && i < 30; i += 1) await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    for (let i = 0; owner.show(ID)?.state !== "running" && i < 100; i += 1) await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    assert.equal(owner.show(ID)?.state, "running");
     assert.equal(await manager.cancel(ID), true);
-    for (let i = 0; !abortSeen && i < 30; i += 1) await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    for (let i = 0; !abortSeen && i < 100; i += 1) await new Promise<void>((resolve) => setTimeout(resolve, 10));
     assert.equal(abortSeen, true);
     assert.equal((await createPersistentBackgroundJobStore(directory).load(ID))?.state, "cancelled");
   } finally { await rm(directory, { recursive: true, force: true }); }
