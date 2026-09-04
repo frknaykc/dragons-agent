@@ -3,6 +3,7 @@ import { createCodexAgentModel, DEFAULT_CODEX_MODEL } from "./codex.js";
 import { createOpenAIAgentModel, DEFAULT_OPENAI_MODEL } from "./openai.js";
 import { createAnthropicAgentModel, DEFAULT_ANTHROPIC_MODEL } from "./anthropic.js";
 import { createGeminiAgentModel, DEFAULT_GEMINI_MODEL } from "./gemini.js";
+import { createOpenRouterAgentModel, DEFAULT_OPENROUTER_MODEL } from "./openrouter.js";
 import { createProviderRegistry, type ProviderRegistry } from "./registry.js";
 
 export type BuiltInProviderRegistryOptions = {
@@ -66,6 +67,19 @@ export function createBuiltInProviderRegistry(options: BuiltInProviderRegistryOp
         usageMetadata: true,
       },
       createModel: ({ model }) => createGeminiAgentModel({ model: model ?? DEFAULT_GEMINI_MODEL }),
+    },
+    {
+      id: "openrouter",
+      label: "OpenRouter",
+      defaultModel: DEFAULT_OPENROUTER_MODEL,
+      credentialRequirement: "api-key",
+      capabilities: {
+        streaming: true,
+        toolCalls: true,
+        toolResultContinuation: true,
+        usageMetadata: true,
+      },
+      createModel: ({ model }) => createOpenRouterAgentModel({ model: model ?? DEFAULT_OPENROUTER_MODEL }),
     },
   ]);
 }

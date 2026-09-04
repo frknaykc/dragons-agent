@@ -1,6 +1,6 @@
 export type RunStatus = "success" | "failed" | "cancelled";
 export type CancellationState = "not_cancelled" | "cancelled";
-export type ProviderDiagnosticKind = "authentication" | "entitlement" | "model_unavailable" | "rate_limit" | "transient" | "malformed_response" | "protocol_drift" | "first_party_identity";
+export type ProviderDiagnosticKind = "authentication" | "entitlement" | "model_unavailable" | "rate_limit" | "transient" | "malformed_response" | "protocol_drift" | "tool_unsupported" | "first_party_identity";
 
 export type RuntimeToolCallDiagnostic = {
   /** Safe tool identifier only; never arguments or result content. */

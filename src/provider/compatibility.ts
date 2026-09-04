@@ -6,6 +6,7 @@ export type ProviderCompatibilityKind =
   | "transient"
   | "malformed_response"
   | "protocol_drift"
+  | "tool_unsupported"
   | "first_party_identity"
   | "cancelled"
   | "invalid_request";
@@ -17,6 +18,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   chatgpt: "ChatGPT Subscription",
   anthropic: "Anthropic",
   gemini: "Google Gemini",
+  openrouter: "OpenRouter",
 };
 
 export class ProviderCompatibilityError extends Error {
@@ -47,6 +49,7 @@ export function providerCompatibilityMessage(provider: string, kind: ProviderCom
   if (kind === "transient") return `${label} service is temporarily unavailable. Try again later.${suffix}`;
   if (kind === "malformed_response") return `${label} returned a malformed response. No tool was executed.`;
   if (kind === "protocol_drift") return `${label} response is incompatible with this Dragons adapter. No tool was executed.`;
+  if (kind === "tool_unsupported") return `${label} selected model does not support tool calls. Select a tool-capable model and try again.${suffix}`;
   if (kind === "first_party_identity") return `${label} requires a first-party client identity that Dragons will not impersonate.${suffix}`;
   if (kind === "cancelled") return `${label} request was cancelled.`;
   return `${label} rejected the request. Review the request and configured model.${suffix}`;
