@@ -14,14 +14,17 @@ const readTool: AgentTool = { name: "read_fixture", operation: "READ", descripti
 test("M60 propagates a durable cancellation to the owning runtime without completion overwrite", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dragons-m60-cancel-"));
   let abortSeen = false;
+  let responding: (() => void) | undefined;
+  const responseStarted = new Promise<void>((resolve) => { responding = resolve; });
   try {
     await writeFile(join(directory, `${ID}.json`), JSON.stringify({ version: 1, id: ID, sessionId: SESSION, workingDirectory: directory, prompt: "Read only.", executionPolicy: "READ_ONLY_MANUAL_RESUME", provenance: "INTERACTIVE_COMMAND", state: "interrupted", createdAt: "2026-09-04T00:00:00.000Z", updatedAt: "2026-09-04T00:00:00.000Z", completedAt: "2026-09-04T00:00:00.000Z", revision: 0, executionAttempts: 1, transcript: "", error: "prior exit" }));
     const owner = new PersistentBackgroundJobManager({ store: createPersistentBackgroundJobStore(directory) });
     const manager = new PersistentBackgroundJobManager({ store: createPersistentBackgroundJobStore(directory) });
     await Promise.all([owner.initialize(), manager.initialize()]);
-    await owner.resume(ID, { createModel: () => ({ async respond({ signal }: { signal?: AbortSignal }) { await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => { abortSeen = true; reject(new Error("aborted")); }, { once: true })); return { responseId: "never", text: "never", toolCalls: [] }; } }), tools: [readTool] });
+    await owner.resume(ID, { createModel: () => ({ async respond({ signal }: { signal?: AbortSignal }) { responding?.(); if (signal?.aborted) { abortSeen = true; throw new Error("aborted"); } await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => { abortSeen = true; reject(new Error("aborted")); }, { once: true })); return { responseId: "never", text: "never", toolCalls: [] }; } }), tools: [readTool] });
     for (let i = 0; owner.show(ID)?.state !== "running" && i < 100; i += 1) await new Promise<void>((resolve) => setTimeout(resolve, 10));
     assert.equal(owner.show(ID)?.state, "running");
+    await responseStarted;
     assert.equal(await manager.cancel(ID), true);
     for (let i = 0; !abortSeen && i < 100; i += 1) await new Promise<void>((resolve) => setTimeout(resolve, 10));
     assert.equal(abortSeen, true);

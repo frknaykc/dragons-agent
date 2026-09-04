@@ -495,6 +495,11 @@ export class PersistentBackgroundJobManager {
           startedAt: this.now().toISOString(),
           executionAttempts: job.executionAttempts + 1,
         });
+        if (controller.signal.aborted) {
+          const latest = await this.store.load(job.id);
+          if (latest?.state === "cancelled") Object.assign(job, latest);
+          return;
+        }
         try {
           const result = await runAgent({
             task: job.prompt,
