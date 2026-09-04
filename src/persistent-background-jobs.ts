@@ -29,6 +29,7 @@ const SENSITIVE_TOKEN_PATTERN = /\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{20,}|ghp_[A-Za-
 const BEARER_PATTERN = /(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi;
 
 export type PersistentBackgroundJobState = "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+export type PersistentBackgroundExecutionPolicy = "READ_ONLY_MANUAL_RESUME" | "EFFECTFUL_REAUTH_REQUIRED";
 
 /** Minimal durable record. It intentionally excludes models, tools, controllers, approvals, and provider continuation. */
 export type PersistentBackgroundJob = {
@@ -37,7 +38,7 @@ export type PersistentBackgroundJob = {
   sessionId: string;
   workingDirectory: string;
   prompt: string;
-  executionPolicy: "READ_ONLY_MANUAL_RESUME";
+  executionPolicy: PersistentBackgroundExecutionPolicy;
   provenance: "INTERACTIVE_COMMAND";
   state: PersistentBackgroundJobState;
   createdAt: string;
@@ -154,7 +155,7 @@ function isPersistentBackgroundJob(value: unknown, maxPromptCharacters = DEFAULT
     || !validText(value.workingDirectory, 4_096)
     || !validText(value.prompt, maxPromptCharacters)
     || redactPersistentText(value.prompt) !== value.prompt
-    || value.executionPolicy !== "READ_ONLY_MANUAL_RESUME"
+    || (value.executionPolicy !== "READ_ONLY_MANUAL_RESUME" && value.executionPolicy !== "EFFECTFUL_REAUTH_REQUIRED")
     || value.provenance !== "INTERACTIVE_COMMAND"
     || typeof state !== "string" || !JOB_STATES.has(state as PersistentBackgroundJobState)
     || !validTimestamp(value.createdAt)
@@ -434,7 +435,7 @@ export class PersistentBackgroundJobManager {
   }
 
   async initialize(): Promise<{ loaded: number; reconciled: number }> {
-    const loaded = await this.store.list();
+    const loaded = (await this.store.list()).filter((job) => job.executionPolicy === "READ_ONLY_MANUAL_RESUME");
     this.jobs.clear();
     for (const job of loaded) this.jobs.set(job.id, cloneJob(job));
     let reconciled = 0;
