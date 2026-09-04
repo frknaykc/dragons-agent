@@ -22,7 +22,8 @@ const readTool: AgentTool = {
 
 async function nextTurn(): Promise<void> { await new Promise<void>((resolve) => setTimeout(resolve, 5)); }
 async function waitForState(manager: PersistentBackgroundJobManager, id: string, state: string): Promise<void> {
-  for (let attempt = 0; attempt < 30; attempt += 1) { if (manager.show(id)?.state === state) return; await nextTurn(); }
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) { if (manager.show(id)?.state === state) return; await nextTurn(); }
   assert.fail(`Persistent job ${id} did not reach ${state}.`);
 }
 
