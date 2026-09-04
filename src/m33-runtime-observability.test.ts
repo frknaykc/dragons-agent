@@ -70,6 +70,7 @@ test("M33 records a provider-neutral successful run with safe tool timing fields
     mcpCallCount: 0,
     subagentCount: 0,
     backgroundTaskCount: 0,
+    orchestrationCount: 0,
     status: "success",
   });
   assert.doesNotMatch(JSON.stringify(summary), /never-store-this|credential|secret-output/i);
@@ -118,12 +119,13 @@ test("M33 counts provider retry callbacks and tool classifications without provi
           toolCalls: [
             { callId: "mcp", name: "mcp__fixture__read", arguments: "{}" },
             { callId: "subagent", name: "delegate_subagent", arguments: "{}" },
+            { callId: "orchestration", name: "orchestrate_runnable", arguments: "{}" },
           ],
         };
         return { responseId: "last", text: "done", toolCalls: [] };
       },
     },
-    tools: [tool("mcp__fixture__read", () => ({ ok: true, output: "mcp evidence" })), tool("delegate_subagent", () => ({ ok: true, output: "subagent evidence" }))],
+    tools: [tool("mcp__fixture__read", () => ({ ok: true, output: "mcp evidence" })), tool("delegate_subagent", () => ({ ok: true, output: "subagent evidence" })), tool("orchestrate_runnable", () => ({ ok: true, output: "orchestration evidence" }))],
     diagnostics: record,
   });
 
@@ -131,6 +133,7 @@ test("M33 counts provider retry callbacks and tool classifications without provi
   assert.equal(summary.providerRetryCount, 2);
   assert.equal(summary.mcpCallCount, 1);
   assert.equal(summary.subagentCount, 1);
+  assert.equal(summary.orchestrationCount, 1);
 });
 
 test("M33 tracks shell timeout through lifecycle metadata without retaining shell output", async () => {

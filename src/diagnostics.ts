@@ -29,6 +29,8 @@ export type RuntimeDiagnosticsSummary = {
   mcpCallCount: number;
   subagentCount: number;
   backgroundTaskCount: number;
+  /** Top-level bounded plan orchestration calls; no task IDs, arguments, or output. */
+  orchestrationCount: number;
   status: RunStatus;
 };
 
@@ -99,6 +101,7 @@ export class RuntimeDiagnosticsRun {
       mcpCallCount: 0,
       subagentCount: 0,
       backgroundTaskCount: 0,
+      orchestrationCount: 0,
     };
   }
 
@@ -116,6 +119,7 @@ export class RuntimeDiagnosticsRun {
     this.summary.toolCallCount += 1;
     if (name.startsWith("mcp__")) this.summary.mcpCallCount += 1;
     if (name === "delegate_subagent") this.summary.subagentCount += 1;
+    if (name === "orchestrate_runnable") this.summary.orchestrationCount += 1;
     this.toolStarts.set(id, { ...(safeName ? { name: safeName } : {}), startedMonotonic: this.monotonicNow() });
     return id;
   }
@@ -188,6 +192,6 @@ export function formatRuntimeDiagnostics(summary: RuntimeDiagnosticsSummary | un
   return [
     `Run ${summary.runId} [${summary.status}]${identity ? ` ${identity}` : ""}`,
     `duration ${summary.durationMilliseconds}ms · turns ${summary.modelTurnCount} · tools ${summary.toolCallCount} (${tools}) · retries ${summary.providerRetryCount} · timeouts ${summary.timeoutCount}${providerDiagnostics ? ` · provider ${providerDiagnostics}` : ""}`,
-    `MCP ${summary.mcpCallCount} · subagents ${summary.subagentCount} · background ${summary.backgroundTaskCount} · cancellation ${summary.cancellationState}${summary.sessionId ? ` · session ${summary.sessionId}` : ""}`,
+    `MCP ${summary.mcpCallCount} · subagents ${summary.subagentCount} · orchestration ${summary.orchestrationCount} · background ${summary.backgroundTaskCount} · cancellation ${summary.cancellationState}${summary.sessionId ? ` · session ${summary.sessionId}` : ""}`,
   ].join("\n");
 }

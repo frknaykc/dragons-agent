@@ -23,6 +23,7 @@ export type DragonsPlanTask = {
   dependsOn?: string[];
   status: PlanTaskStatus;
   blockedReason?: string;
+  claimToken?: string;
 };
 
 export type DragonsPlan = {
@@ -67,6 +68,12 @@ export type PlanTaskUpdate = {
 export type PlanStore = {
   list(): Promise<DragonsPlanTask[]>;
   get(id: string): Promise<DragonsPlanTask | undefined>;
+  /** Atomically claim current runnable work before dispatching an executor. */
+  claimRunnable(ids: readonly string[]): Promise<DragonsPlanTask[]>;
+  /** Atomically complete a task only while its orchestration claim remains active. */
+  completeClaim(id: string, claimToken: string): Promise<DragonsPlanTask | undefined>;
+  /** Atomically block a task only while its orchestration claim remains active. */
+  blockClaim(id: string, claimToken: string, blockedReason: string): Promise<DragonsPlanTask | undefined>;
   add(input: PlanTaskInput): Promise<DragonsPlanTask>;
   update(id: string, input: PlanTaskUpdate): Promise<DragonsPlanTask>;
   setStatus(id: string, status: PlanTaskStatus, blockedReason?: string): Promise<DragonsPlanTask>;
@@ -96,7 +103,26 @@ type PlanSession = {
 type PlanSessionStore = {
   load(id: string): Promise<PlanSession | undefined>;
   save(session: PlanSession): Promise<void>;
+  /** Optional durable session-store mutation seam for cross-process plan claims. */
+  mutate?(id: string, operation: (session: PlanSession) => PlanSession | Promise<PlanSession>): Promise<PlanSession | undefined>;
 };
+
+/** Process-local serialization prevents concurrent root runs from dispatching the same session task twice. */
+const planMutationQueues = new WeakMap<PlanSessionStore, Map<string, Promise<void>>>();
+
+function serializePlanMutation<T>(sessionStore: PlanSessionStore, sessionId: string, operation: () => Promise<T>): Promise<T> {
+  let queues = planMutationQueues.get(sessionStore);
+  if (!queues) {
+    queues = new Map();
+    planMutationQueues.set(sessionStore, queues);
+  }
+  const previous = queues.get(sessionId) ?? Promise.resolve();
+  const result = previous.catch(() => undefined).then(operation);
+  const tail = result.then(() => undefined, () => undefined);
+  queues.set(sessionId, tail);
+  void tail.finally(() => { if (queues!.get(sessionId) === tail) queues!.delete(sessionId); });
+  return result;
+}
 
 type PlanLimits = Required<Pick<SessionPlanStoreOptions, "maxTasks" | "maxTitleCharacters" | "maxDescriptionCharacters" | "maxBlockedReasonCharacters" | "maxReplans" | "maxHistory">>;
 
@@ -220,6 +246,7 @@ export function isDragonsPlan(value: unknown, options: SessionPlanStoreOptions =
       || !validOptionalParent(candidate.parentId)
       || !validOptionalDependencies(candidate.dependsOn)
       || !isTaskStatus(candidate.status)
+      || (candidate.claimToken !== undefined && !validTaskId(candidate.claimToken))
       || !validOptionalBlockedReason(candidate.blockedReason, limits.maxBlockedReasonCharacters)) return false;
     if ((candidate.status === "BLOCKED") !== (candidate.blockedReason !== undefined)) return false;
     ids.add(candidate.id);
@@ -357,9 +384,10 @@ export function createSessionPlanStore(sessionStore: PlanSessionStore, sessionId
   const limits = planLimits(options);
   const now = options.now ?? (() => new Date());
   const createId = options.createId ?? randomUUID;
+  let activeMutationSession: PlanSession | undefined;
 
   const load = async (): Promise<PlanSession> => {
-    const session = await sessionStore.load(sessionId);
+    const session = activeMutationSession ?? await sessionStore.load(sessionId);
     if (!session) throw new Error(`Active plan session was not found: ${sessionId}`);
     if (session.plan !== undefined && !isDragonsPlan(session.plan, limits)) throw new Error("Saved Dragons plan is invalid.");
     return session;
@@ -369,7 +397,12 @@ export function createSessionPlanStore(sessionStore: PlanSessionStore, sessionId
     : { version: 1, tasks: session.plan.tasks.map(cloneTask), ...(session.plan.history === undefined ? {} : { history: session.plan.history.map(cloneHistoryEvent) }) };
   const save = async (session: PlanSession, plan: DragonsPlan): Promise<void> => {
     if (!isDragonsPlan(plan, limits)) throw new Error("Refusing to save an invalid Dragons plan.");
-    await sessionStore.save({ ...session, updatedAt: now().toISOString(), plan });
+    const next = { ...session, updatedAt: now().toISOString(), plan };
+    if (activeMutationSession !== undefined) {
+      activeMutationSession = next;
+      return;
+    }
+    await sessionStore.save(next);
   };
   const assertTaskId = (id: string): void => {
     if (!validTaskId(id)) throw new Error("Plan task ID is invalid.");
@@ -389,14 +422,78 @@ export function createSessionPlanStore(sessionStore: PlanSessionStore, sessionId
     if (history.length > limits.maxHistory) throw new Error(`Plan history limit of ${limits.maxHistory} reached.`);
     return history;
   };
+  const claim = (session: PlanSession, ids: readonly string[]): { session: PlanSession; tasks: DragonsPlanTask[] } => {
+    if (session.plan !== undefined && !isDragonsPlan(session.plan, limits)) throw new Error("Saved Dragons plan is invalid.");
+    const plan = currentPlan(session);
+    const byId = new Map(plan.tasks.map((task) => [task.id, task]));
+    const selected = ids.map((id) => byId.get(id));
+    if (selected.some((task) => !task || task.status !== "TODO" || !dependenciesAreComplete(plan, task))) {
+      throw new Error("Plan step is not runnable.");
+    }
+    const claimed = new Set(ids);
+    const tasks = plan.tasks.map((task) => claimed.has(task.id) ? { ...task, status: "IN_PROGRESS" as const, claimToken: randomUUID() } : task);
+    const nextPlan: DragonsPlan = { version: 1, tasks, ...(plan.history === undefined ? {} : { history: plan.history }) };
+    if (!isDragonsPlan(nextPlan, limits)) throw new Error("Refusing to save an invalid Dragons plan.");
+    return {
+      session: { ...session, updatedAt: now().toISOString(), plan: nextPlan },
+      tasks: ids.map((id) => cloneTask(tasks.find((task) => task.id === id)!)),
+    };
+  };
 
-  return {
+  const store: PlanStore = {
     async list(): Promise<DragonsPlanTask[]> {
       return orderedTasks(currentPlan(await load()).tasks);
     },
     async get(id): Promise<DragonsPlanTask | undefined> {
       if (!validTaskId(id)) return undefined;
       return (await this.list()).find((task) => task.id === id);
+    },
+    async claimRunnable(ids): Promise<DragonsPlanTask[]> {
+      if (!Array.isArray(ids) || ids.length === 0 || ids.length > limits.maxTasks || ids.some((id) => !validTaskId(id)) || new Set(ids).size !== ids.length) {
+        throw new Error("Runnable plan claim IDs are invalid.");
+      }
+      if (sessionStore.mutate) {
+        let claimed: DragonsPlanTask[] | undefined;
+        const session = await sessionStore.mutate(sessionId, (current) => {
+          const next = claim(current, ids);
+          claimed = next.tasks;
+          return next.session;
+        });
+        if (!session || !claimed) throw new Error(`Active plan session was not found: ${sessionId}`);
+        return claimed;
+      }
+      return await serializePlanMutation(sessionStore, sessionId, async () => {
+        const next = claim(await load(), ids);
+        await save(next.session, next.session.plan!);
+        return next.tasks;
+      });
+    },
+    async completeClaim(id, claimToken): Promise<DragonsPlanTask | undefined> {
+      assertTaskId(id);
+      if (!validTaskId(claimToken)) throw new Error("Plan claim token is invalid.");
+      const session = await load();
+      const plan = currentPlan(session);
+      const current = plan.tasks.find((task) => task.id === id);
+      if (!current || current.status !== "IN_PROGRESS" || current.claimToken !== claimToken) return undefined;
+      const updated: DragonsPlanTask = { ...current, status: "DONE" };
+      delete updated.claimToken;
+      const tasks = plan.tasks.map((task) => task.id === id ? updated : task);
+      if (!taskStatusesRespectDependencies(tasks)) throw new Error("Plan task dependencies are not complete.");
+      await save(session, { version: 1, tasks, ...(plan.history === undefined ? {} : { history: plan.history }) });
+      return cloneTask(updated);
+    },
+    async blockClaim(id, claimToken, blockedReason): Promise<DragonsPlanTask | undefined> {
+      assertTaskId(id);
+      if (!validTaskId(claimToken)) throw new Error("Plan claim token is invalid.");
+      if (!validText(blockedReason, limits.maxBlockedReasonCharacters)) throw new Error(`Blocked reason is required for BLOCKED status and must be no longer than ${limits.maxBlockedReasonCharacters} characters.`);
+      const session = await load();
+      const plan = currentPlan(session);
+      const current = plan.tasks.find((task) => task.id === id);
+      if (!current || current.status !== "IN_PROGRESS" || current.claimToken !== claimToken) return undefined;
+      const updated: DragonsPlanTask = { ...current, status: "BLOCKED", blockedReason };
+      delete updated.claimToken;
+      await save(session, { version: 1, tasks: plan.tasks.map((task) => task.id === id ? updated : task), ...(plan.history === undefined ? {} : { history: plan.history }) });
+      return cloneTask(updated);
     },
     async add(input): Promise<DragonsPlanTask> {
       assertInput(input);
@@ -450,6 +547,7 @@ export function createSessionPlanStore(sessionStore: PlanSessionStore, sessionId
       if (current.status === "BLOCKED" && current.dependsOn?.length && status !== "BLOCKED") throw new Error("Blocked dependency-aware plan tasks require explicit recovery.");
       const updated: DragonsPlanTask = { ...current, status, ...(status === "BLOCKED" ? { blockedReason } : {}) };
       if (status !== "BLOCKED") delete updated.blockedReason;
+      if (status !== "IN_PROGRESS") delete updated.claimToken;
       const tasks = plan.tasks.map((task) => task.id === id ? updated : task);
       if (!taskStatusesRespectDependencies(tasks)) throw new Error("Plan task dependencies are not complete.");
       await save(session, { version: 1, tasks, ...(plan.history === undefined ? {} : { history: plan.history }) });
@@ -509,6 +607,40 @@ export function createSessionPlanStore(sessionStore: PlanSessionStore, sessionId
       return true;
     },
   };
+  const add = store.add.bind(store);
+  const completeClaim = store.completeClaim.bind(store);
+  const blockClaim = store.blockClaim.bind(store);
+  const update = store.update.bind(store);
+  const setStatus = store.setStatus.bind(store);
+  const recoverBlocked = store.recoverBlocked.bind(store);
+  const replan = store.replan.bind(store);
+  const remove = store.remove.bind(store);
+  const mutatePlan = async <T>(operation: () => Promise<T>): Promise<T> => await serializePlanMutation(sessionStore, sessionId, async () => {
+    if (!sessionStore.mutate) return await operation();
+    let result: T | undefined;
+    let completed = false;
+    const session = await sessionStore.mutate(sessionId, async (current) => {
+      activeMutationSession = current;
+      try {
+        result = await operation();
+        completed = true;
+        return activeMutationSession!;
+      } finally {
+        activeMutationSession = undefined;
+      }
+    });
+    if (!session || !completed) throw new Error(`Active plan session was not found: ${sessionId}`);
+    return result!;
+  });
+  store.completeClaim = (id, claimToken) => mutatePlan(() => completeClaim(id, claimToken));
+  store.blockClaim = (id, claimToken, blockedReason) => mutatePlan(() => blockClaim(id, claimToken, blockedReason));
+  store.add = (input) => mutatePlan(() => add(input));
+  store.update = (id, input) => mutatePlan(() => update(id, input));
+  store.setStatus = (id, status, blockedReason) => mutatePlan(() => setStatus(id, status, blockedReason));
+  store.recoverBlocked = (id, recoveryNote, source) => mutatePlan(() => recoverBlocked(id, recoveryNote, source));
+  store.replan = (id, input) => mutatePlan(() => replan(id, input));
+  store.remove = (id) => mutatePlan(() => remove(id));
+  return store;
 }
 
 /** Provider-callable plan operations; mutations deliberately stay behind AgentTool WRITE authorization. */

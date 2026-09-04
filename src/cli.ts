@@ -57,6 +57,7 @@ import {
   createPlanTools,
   createSessionPlanStore,
 } from "./plan.js";
+import { createPlanOrchestrationTools } from "./orchestration.js";
 import { parseCliCommand, providerFrom, type CliCommand, type ProviderName } from "./cli/commands.js";
 import { formatMemorySuggestion, handleInteractiveMemoryCommand, memoryContextFor, runMemoryCommand } from "./cli/memory-commands.js";
 import { handleInteractivePlanCommand, runPlanCommand } from "./cli/plan-commands.js";
@@ -486,10 +487,18 @@ async function runInteractiveConversation(
         continue;
       }
       if (task === "/clear") {
-        session = { ...session, updatedAt: new Date().toISOString(), messages: [], continuation: undefined };
+        const clearedAt = new Date().toISOString();
+        const clearedSession = sessionStore.mutate
+          ? await sessionStore.mutate(session.id, (current) => ({ ...current, updatedAt: clearedAt, messages: [], continuation: undefined }))
+          : await (async () => {
+            const next = { ...session, updatedAt: clearedAt, messages: [], continuation: undefined };
+            await sessionStore.save(next);
+            return next;
+          })();
+        if (!clearedSession) throw new Error(`Active session was not found: ${session.id}`);
+        session = clearedSession;
         conversationResponseId = undefined;
         continuationState = undefined;
-        await sessionStore.save(session);
         write("Current conversation cleared.\n");
         continue;
       }
@@ -746,10 +755,20 @@ async function runInteractiveConversation(
           memory,
           getPlan: async () => ({ version: 1, tasks: await createSessionPlanStore(sessionStore, session.id).list() }),
         });
-        const runTools = [...tools, suggestionTool, subagent, parallelSubagents];
+        const orchestrationTools = createPlanOrchestrationTools({
+          resolveStore: () => createSessionPlanStore(sessionStore, session.id),
+          createModel: () => createFreshSubagentModel(dependencies, activeProvider, activeModelName, write),
+          tools: [...tools, suggestionTool],
+          projectContext,
+          skills,
+          memory,
+          getPlan: async () => ({ version: 1, tasks: await createSessionPlanStore(sessionStore, session.id).list() }),
+        });
+        const runTools = [...tools, suggestionTool, subagent, parallelSubagents, ...orchestrationTools];
         operations.set(suggestionTool.name, suggestionTool.operation);
         operations.set(subagent.name, subagent.operation);
         operations.set(parallelSubagents.name, parallelSubagents.operation);
+        for (const tool of orchestrationTools) operations.set(tool.name, tool.operation);
         activeModel ??= dependencies.modelFactory?.(activeProvider, activeModelInput) ?? dependencies.model ?? defaultModel(activeProvider, activeModelName, write);
         const runDiagnostics = diagnostics.start({ sessionId: session.id, provider: activeProvider, model: activeModelName });
         const result = await runAgent({
@@ -774,27 +793,31 @@ async function runInteractiveConversation(
         conversationResponseId = result.responseId;
         continuationState = result.continuationState;
         const completedAt = new Date().toISOString();
-        // A provider plan tool may have persisted a plan during this turn. Merge that field back instead of overwriting it with the pre-turn session snapshot.
-        const persistedPlan = (await sessionStore.load(session.id))?.plan;
-        session = {
-          ...session,
-          ...(persistedPlan === undefined ? {} : { plan: persistedPlan }),
-          updatedAt: completedAt,
-          messages: [
-            ...session.messages,
+        const updateSession = (current: DragonsSession): DragonsSession => {
+          const messages = compactSessionMessages([
+            ...current.messages,
             { role: "user", content: task, createdAt: completedAt },
             { role: "assistant", content: result.finalText, createdAt: completedAt },
-          ],
-          continuation: {
-            responseId: result.responseId,
-            ...(result.continuationState === undefined ? {} : { providerState: result.continuationState }),
-          },
+          ], Math.max(1, Math.floor((dependencies.config?.contextBudgetChars ?? 120_000) / 2)));
+          return {
+            ...current,
+            updatedAt: completedAt,
+            messages,
+            continuation: {
+              responseId: result.responseId,
+              ...(result.continuationState === undefined ? {} : { providerState: result.continuationState }),
+            },
+          };
         };
-        session = {
-          ...session,
-          messages: compactSessionMessages(session.messages, Math.max(1, Math.floor((dependencies.config?.contextBudgetChars ?? 120_000) / 2))),
-        };
-        await sessionStore.save(session);
+        const savedSession = sessionStore.mutate
+          ? await sessionStore.mutate(session.id, updateSession)
+          : await (async () => {
+            const next = updateSession(session);
+            await sessionStore.save(next);
+            return next;
+          })();
+        if (!savedSession) throw new Error(`Active session was not found: ${session.id}`);
+        session = savedSession;
       } catch (error: unknown) {
         if (!(error instanceof AgentRunCancelledError)) {
           const message = error instanceof Error ? error.message : "Unexpected error.";

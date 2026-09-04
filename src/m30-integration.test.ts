@@ -89,7 +89,7 @@ test("M30 interactive advanced workflow keeps plan, MCP, subagent, and backgroun
               assert.match(request.memory?.memories[0]?.body ?? "", /Persist only this advisory preference/);
               assert.equal(request.plan?.tasks.length, 1);
               assert.equal(request.plan?.tasks[0]?.title, "Local plan");
-              assert.deepEqual(request.tools.map((tool) => tool.name), ["read_fixture", "mcp__fixture__inspect", "plan_list", "plan_add", "plan_runnable", "plan_history", "plan_update", "plan_set_status", "plan_recover", "plan_replan", "plan_remove", "suggest_memory", "delegate_subagent", "delegate_parallel_subagents"]);
+              assert.deepEqual(request.tools.map((tool) => tool.name), ["read_fixture", "mcp__fixture__inspect", "plan_list", "plan_add", "plan_runnable", "plan_history", "plan_update", "plan_set_status", "plan_recover", "plan_replan", "plan_remove", "suggest_memory", "delegate_subagent", "delegate_parallel_subagents", "orchestration_status", "orchestrate_runnable"]);
               assert.equal(request.tools.some((tool) => tool.name.includes("background") || tool.name === "start_background_task"), false);
               return {
                 responseId: "parent-tools",

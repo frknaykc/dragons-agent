@@ -16,6 +16,15 @@ export function writeSkillNotices(notices: readonly string[], write: (text: stri
   for (const notice of notices) write(`${notice}\n`);
 }
 
+async function saveSessionSkills(sessionStore: SessionStore, session: DragonsSession, resolve: (current: DragonsSession) => Promise<SkillReference[]>): Promise<DragonsSession> {
+  const update = async (current: DragonsSession): Promise<DragonsSession> => ({ ...current, updatedAt: new Date().toISOString(), skills: await resolve(current) });
+  const saved = sessionStore.mutate
+    ? await sessionStore.mutate(session.id, update)
+    : await (async () => { const next = await update(session); await sessionStore.save(next); return next; })();
+  if (!saved) throw new Error(`Saved session was not found or is unreadable: ${session.id}`);
+  return saved;
+}
+
 export async function writeActiveSkillNotices(directory: string, references: readonly SkillReference[], write: (text: string) => void, workspace?: string): Promise<void> {
   writeSkillNotices((await createSkillsContext(directory, references, workspace)).notices, write);
 }
@@ -40,13 +49,13 @@ export async function runSkillsCommand(input: {
   }
   const session = await sessionStore.load(command.sessionId);
   if (!session) throw new Error(`Saved session was not found or is unreadable: ${command.sessionId}`);
-  const project = command.scope === "project";
-  const projectWorkspace = session.workingDirectory;
-  if (project && !projectWorkspace) throw new Error("Project skills require a workspace.");
-  const skills = command.action === "activate"
-    ? project ? await activateProjectSkill(projectWorkspace, session.skills ?? [], command.id) : await activateSkill(directory, session.skills ?? [], command.id)
-    : deactivateSkill(session.skills ?? [], command.id, project ? "PROJECT" : "USER");
-  await sessionStore.save({ ...session, updatedAt: new Date().toISOString(), skills });
+  const saved = await saveSessionSkills(sessionStore, session, async (current) => {
+    const project = command.scope === "project";
+    if (project && !current.workingDirectory) throw new Error("Project skills require a workspace.");
+    return command.action === "activate"
+      ? project ? await activateProjectSkill(current.workingDirectory, current.skills ?? [], command.id) : await activateSkill(directory, current.skills ?? [], command.id)
+      : deactivateSkill(current.skills ?? [], command.id, project ? "PROJECT" : "USER");
+  });
   write(`${command.action === "activate" ? "Activated" : "Deactivated"} skill: ${command.id}\n`);
 }
 
@@ -95,11 +104,9 @@ export async function handleInteractiveSkillsCommand(input: {
     const id = project ? requested.slice("project ".length).trim() : requested;
     try {
       if (project && !workingDirectory) throw new Error("Project skills require a workspace.");
-      const skills = project ? await activateProjectSkill(workingDirectory!, activeSkillReferences, id) : await activateSkill(directory, activeSkillReferences, id);
-      const saved = { ...session, updatedAt: new Date().toISOString(), skills };
-      await sessionStore.save(saved);
+      const saved = await saveSessionSkills(sessionStore, session, async (current) => project ? await activateProjectSkill(workingDirectory!, current.skills ?? [], id) : await activateSkill(directory, current.skills ?? [], id));
       write(`Activated skill: ${id}\n`);
-      return { handled: true, activeSkillReferences: skills, session: saved };
+      return { handled: true, activeSkillReferences: saved.skills ?? [], session: saved };
     } catch (error: unknown) {
       write(`${error instanceof Error ? error.message : "Unable to activate skill."}\n`);
     }
@@ -110,11 +117,9 @@ export async function handleInteractiveSkillsCommand(input: {
     const project = requested.startsWith("project ");
     const id = project ? requested.slice("project ".length).trim() : requested;
     try {
-      const skills = deactivateSkill(activeSkillReferences, id, project ? "PROJECT" : "USER");
-      const saved = { ...session, updatedAt: new Date().toISOString(), skills };
-      await sessionStore.save(saved);
+      const saved = await saveSessionSkills(sessionStore, session, async (current) => deactivateSkill(current.skills ?? [], id, project ? "PROJECT" : "USER"));
       write(`Deactivated skill: ${id}\n`);
-      return { handled: true, activeSkillReferences: skills, session: saved };
+      return { handled: true, activeSkillReferences: saved.skills ?? [], session: saved };
     } catch (error: unknown) {
       write(`${error instanceof Error ? error.message : "Unable to deactivate skill."}\n`);
     }

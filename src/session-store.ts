@@ -51,6 +51,8 @@ export type SessionStore = {
   create(metadata: Pick<DragonsSession, "workingDirectory" | "provider" | "model">): Promise<DragonsSession>;
   load(id: string): Promise<DragonsSession | undefined>;
   save(session: DragonsSession): Promise<void>;
+  /** Atomically read, validate, and replace one session while holding its durable exclusive lock. */
+  mutate?(id: string, operation: (session: DragonsSession) => DragonsSession | Promise<DragonsSession>): Promise<DragonsSession | undefined>;
   list(): Promise<DragonsSession[]>;
   delete(id: string): Promise<boolean>;
 };
@@ -99,8 +101,33 @@ function sessionPath(directory: string, id: string): string {
   return join(directory, `${id}.json`);
 }
 
+function sessionLockPath(directory: string, id: string): string {
+  if (!SESSION_ID_PATTERN.test(id)) throw new Error("Invalid Dragons session ID.");
+  return join(directory, `.${id}.lock`);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+async function acquireSessionLock(directory: string, id: string): Promise<() => Promise<void>> {
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(directory, 0o700);
+  const path = sessionLockPath(directory, id);
+  const token = randomUUID();
+  try {
+    await writeFile(path, JSON.stringify({ version: 1, pid: process.pid, token }), { encoding: "utf8", mode: 0o600, flag: "wx" });
+  } catch {
+    // Reclaiming a stale path needs a compare-and-delete primitive Node does not expose.
+    // Fail closed instead of risking deletion of a newly acquired cross-process claim.
+    throw new Error("Dragons session is busy.");
+  }
+  return async () => {
+    try {
+      const lock = JSON.parse(await readFile(path, "utf8")) as unknown;
+      if (isRecord(lock) && lock.token === token) await rm(path, { force: true });
+    } catch { /* A lost or replaced lock must not remove another owner's claim. */ }
+  };
 }
 
 function containsProviderCredentials(value: unknown): boolean {
@@ -198,6 +225,20 @@ export function createSessionStore(directory: string, options: SessionStoreOptio
     async save(session): Promise<void> {
       if (!parseSession(session)) throw new Error("Refusing to save an invalid or credential-bearing Dragons session.");
       await writeSession(sessionPath(directory, session.id), session);
+    },
+
+    async mutate(id, operation): Promise<DragonsSession | undefined> {
+      const release = await acquireSessionLock(directory, id);
+      try {
+        const current = await this.load(id);
+        if (!current) return undefined;
+        const next = await operation(structuredClone(current));
+        if (next.id !== id || !parseSession(next)) throw new Error("Refusing to save an invalid or credential-bearing Dragons session.");
+        await writeSession(sessionPath(directory, id), next);
+        return structuredClone(next);
+      } finally {
+        await release();
+      }
     },
 
     async list(): Promise<DragonsSession[]> {
