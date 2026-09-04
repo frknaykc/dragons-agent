@@ -14,8 +14,8 @@ export type CliCommand =
   | { kind: "session"; action: "delete"; id: string }
   | { kind: "session"; action: "resume"; id: string }
   | { kind: "skills"; action: "list" }
-  | { kind: "skills"; action: "show"; id: string }
-  | { kind: "skills"; action: "activate" | "deactivate"; id: string; sessionId: string }
+  | { kind: "skills"; action: "show"; id: string; scope?: "project" }
+  | { kind: "skills"; action: "activate" | "deactivate"; id: string; sessionId: string; scope?: "project" }
   | { kind: "memory"; action: "list"; scope: "user" | "project" }
   | { kind: "memory"; action: "show"; id: string; scope: "user" | "project" }
   | { kind: "memory"; action: "add"; body: string; scope: "user" | "project" }
@@ -125,11 +125,14 @@ export function parseCliCommand(arguments_: string[]): CliCommand {
   }
   if (forwardedArguments[0] === "skills") {
     if (forwardedArguments[1] === "list" && forwardedArguments.length === 2) return { kind: "skills", action: "list" };
-    if (forwardedArguments[1] === "show" && forwardedArguments[2] && forwardedArguments.length === 3) return { kind: "skills", action: "show", id: forwardedArguments[2] };
+    if (forwardedArguments[1] === "show" && forwardedArguments[2] && (forwardedArguments.length === 3 || (forwardedArguments.length === 4 && forwardedArguments[3] === "project"))) return { kind: "skills", action: "show", id: forwardedArguments[2], ...(forwardedArguments[3] === "project" ? { scope: "project" } : {}) };
     if ((forwardedArguments[1] === "activate" || forwardedArguments[1] === "deactivate") && forwardedArguments[2] && forwardedArguments[3] === "--session" && forwardedArguments[4] && forwardedArguments.length === 5) {
       return { kind: "skills", action: forwardedArguments[1], id: forwardedArguments[2], sessionId: forwardedArguments[4] };
     }
-    throw new Error("Use dragons skills list, dragons skills show <id>, or dragons skills activate|deactivate <id> --session <id>.");
+    if ((forwardedArguments[1] === "activate" || forwardedArguments[1] === "deactivate") && forwardedArguments[2] && forwardedArguments[3] === "project" && forwardedArguments[4] === "--session" && forwardedArguments[5] && forwardedArguments.length === 6) {
+      return { kind: "skills", action: forwardedArguments[1], id: forwardedArguments[2], scope: "project", sessionId: forwardedArguments[5] };
+    }
+    throw new Error("Use dragons skills list, dragons skills show <id> [project], or dragons skills activate|deactivate <id> [project] --session <id>.");
   }
   if (forwardedArguments[0] === "session") {
     if (forwardedArguments[1] === "list" && forwardedArguments.length === 2) return { kind: "session", action: "list" };

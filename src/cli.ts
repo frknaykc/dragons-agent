@@ -36,6 +36,7 @@ import {
 } from "./session-store.js";
 import {
   createSkillsContext,
+  getProjectSkillsDirectory,
   getDragonsSkillsDirectory,
   type SkillReference,
 } from "./skills.js";
@@ -387,7 +388,7 @@ async function runInteractiveConversation(
     workingDirectory,
   });
   write(`${resumed ? "Resumed session" : "Session"}: ${session.id}\n`);
-  await writeActiveSkillNotices(skillsDirectory, activeSkillReferences, write);
+  await writeActiveSkillNotices(skillsDirectory, activeSkillReferences, write, workingDirectory);
   process.on("SIGINT", cancel);
   try {
     for (;;) {
@@ -457,7 +458,7 @@ async function runInteractiveConversation(
           ?? defaultModel(activeProvider, activeModelName, write);
         sessionApprovals.clear();
         write(`Resumed session: ${session.id}\n`);
-        await writeActiveSkillNotices(skillsDirectory, activeSkillReferences, write);
+        await writeActiveSkillNotices(skillsDirectory, activeSkillReferences, write, workingDirectory);
         continue;
       }
       if (task === "/tasks") {
@@ -467,7 +468,7 @@ async function runInteractiveConversation(
       if (task.startsWith("/tasks start ")) {
         const prompt = task.slice("/tasks start ".length).trim();
         try {
-          const skills = await createSkillsContext(skillsDirectory, activeSkillReferences);
+          const skills = await createSkillsContext(skillsDirectory, activeSkillReferences, workingDirectory);
           const memory = await memoryContextFor(memoryStore, workingDirectory);
           const projectContext = await discoverProjectContext(workingDirectory);
           const plan = { version: 1 as const, tasks: await createSessionPlanStore(sessionStore, session.id).list() };
@@ -512,6 +513,7 @@ async function runInteractiveConversation(
       const skillsCommand = await handleInteractiveSkillsCommand({
         task,
         directory: skillsDirectory,
+        workingDirectory,
         activeSkillReferences,
         session,
         sessionStore,
@@ -601,7 +603,7 @@ async function runInteractiveConversation(
       const controller = new AbortController();
       activeController = controller;
       try {
-        const skills = await createSkillsContext(skillsDirectory, activeSkillReferences);
+        const skills = await createSkillsContext(skillsDirectory, activeSkillReferences, workingDirectory);
         const memory = await memoryContextFor(memoryStore, workingDirectory);
         const projectContext = await discoverProjectContext(workingDirectory);
         // The parent receives one immutable current-session plan snapshot; mutations remain AgentTool calls behind M10.
@@ -773,6 +775,7 @@ export async function main(
     await runSkillsCommand({
       command: parsedCommand,
       directory: skillsDirectoryFor(dependencies),
+      workingDirectory: dependencies.workingDirectory ?? process.cwd(),
       sessionStore: sessionStoreFor(dependencies),
       write,
     });
