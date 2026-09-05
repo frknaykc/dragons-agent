@@ -553,6 +553,11 @@ export class McpClientManager {
         ...resources.resources.map((resource): McpCapability => ({ serverId: id, transport: transportOf(config), state: "connected", type: "resource", originalName: redactMcpText(resource.name, sensitiveValues), name: mappedCapabilityName(id, "resource", resource.uri), uri: redactMcpText(resource.uri, sensitiveValues), ...(resource.mimeType ? { mimeType: redactMcpText(resource.mimeType, sensitiveValues) } : {}) })),
         ...prompts.prompts.map((prompt): McpCapability => ({ serverId: id, transport: transportOf(config), state: "connected", type: "prompt", originalName: redactMcpText(prompt.name, sensitiveValues), name: mappedCapabilityName(id, "prompt", prompt.name), ...(prompt.description ? { description: redactMcpText(prompt.description, sensitiveValues) } : {}) })),
       ];
+      // Resource/prompt discovery above awaits: another connection may have
+      // published its tools meanwhile. Check and publish without another await.
+      if (this.tools().length + tools.length > this.options.maxTotalTools) {
+        throw new Error(`MCP tools across connected servers exceed ${this.options.maxTotalTools}.`);
+      }
       connection.state = "connected";
       return tools;
     } catch (error: unknown) {
