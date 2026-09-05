@@ -33,6 +33,8 @@ import { McpClientManager } from "./mcp-client.js";
 import { RuntimeDiagnosticsService, formatRuntimeDiagnostics, type RuntimeDiagnosticsRun } from "./diagnostics.js";
 import { createTerminalRenderer, type TerminalRenderer } from "./terminal/renderer.js";
 import { loadDragonsConfig, parseDragonsConfig, saveDragonsConfig, type DragonsConfig } from "./config.js";
+import { createDragonsRuntime } from "./runtime.js";
+import { runTui, type TuiOutput } from "./tui/terminal.js";
 import { DRAGONS_VERSION } from "./version.js";
 import {
   compactSessionMessages,
@@ -78,6 +80,8 @@ export type CliDependencies = {
   chatgptAuth?: Pick<ChatGPTAuthService, "login" | "status" | "logout"> & Partial<Pick<ChatGPTAuthService, "credentials">>;
   tools?: AgentTool[];
   input?: NodeJS.ReadableStream;
+  /** TUI-only writable terminal injection; existing plain write callbacks remain unchanged. */
+  tuiOutput?: TuiOutput;
   write?: (text: string) => void;
   terminal?: {
     inputIsTTY?: boolean;
@@ -860,7 +864,7 @@ export async function main(
     return;
   }
   if (arguments_.length === 1 && (arguments_[0] === "--help" || arguments_[0] === "-h")) {
-    write(`Usage: dragons [--provider ${configuredProviderIds.join("|")}] [--model <model>] [task]\n\nRun without a task for interactive mode. Commands: auth, config, session, skills, memory, plan, mcp.\n`);
+    write(`Usage: dragons [--provider ${configuredProviderIds.join("|")}] [--model <model>] [task]\n\nRun without a task for interactive mode. Use --tui for the full-screen runtime client; --tui --resume <id> continues a saved session. Commands: auth, config, session, skills, memory, plan, mcp.\n`);
     return;
   }
   let config = dependencies.config ? parseDragonsConfig(dependencies.config, configuredProviderIds) : {};
@@ -880,6 +884,40 @@ export async function main(
       provider: providerExplicit ? parsedCommand.provider : config.provider ?? parsedCommand.provider,
       model: modelExplicit ? parsedCommand.model : config.models?.[providerExplicit ? parsedCommand.provider : config.provider ?? parsedCommand.provider] ?? config.model ?? parsedCommand.model,
     };
+  }
+  if (parsedCommand.kind === "tui") {
+    const input = dependencies.input ?? process.stdin;
+    const output = dependencies.tuiOutput ?? process.stdout;
+    if (!(input as { isTTY?: boolean }).isTTY || !output.isTTY) {
+      throw new Error("TUI requires a TTY on stdin and stdout. Use dragons without --tui for plain/headless mode.");
+    }
+    const provider = parsedCommand.provider ?? config.provider ?? providers.ids()[0]!;
+    const model = parsedCommand.model ?? config.models?.[provider] ?? config.model;
+    const workingDirectory = dependencies.workingDirectory ?? process.cwd();
+    try {
+      const runtime = await createDragonsRuntime({
+        workingDirectory,
+        providerRegistry: providers,
+        sessionStore: sessionStoreFor(dependencies, providers),
+        tools: dependencies.tools ?? await createCodingTools(workingDirectory, {
+          maxToolOutputBytes: config.maxToolOutputBytes,
+          shellTimeoutMilliseconds: config.shellTimeoutMilliseconds,
+        }),
+        mcpManager: dependencies.mcpManager ?? new McpClientManager(config.mcpServers ?? []),
+        diagnostics: dependencies.diagnostics,
+        memoryStore: memoryStoreFor(dependencies),
+        skillsDirectory: skillsDirectoryFor(dependencies),
+        defaultProvider: provider,
+        defaultModel: model,
+        maxTurns: config.maxTurns,
+        contextBudgetChars: config.contextBudgetChars,
+      });
+      await runTui(runtime, { input, output, ...(parsedCommand.resume ? { resume: parsedCommand.resume } : { provider, model }) });
+    } catch {
+      // Boot errors can contain host paths/provider credentials. Never print arbitrary exceptions.
+      throw new Error("Unable to open TUI. Check provider configuration, session ID/workspace, and terminal availability.");
+    }
+    return;
   }
   const mcp = dependencies.mcpManager ?? new McpClientManager(config.mcpServers ?? []);
   const diagnostics = dependencies.diagnostics ?? new RuntimeDiagnosticsService();

@@ -5,6 +5,7 @@ export type ProviderName = ProviderId;
 
 
 export type CliCommand =
+  | { kind: "tui"; provider?: ProviderName; model?: string; resume?: string }
   | { kind: "run"; provider: ProviderName; model?: string; prompt?: string }
   | { kind: "auth"; action: "login" | "status" | "logout" }
   | { kind: "config"; action: "show" }
@@ -136,6 +137,23 @@ function parsePlanCommand(arguments_: string[]): Extract<CliCommand, { kind: "pl
 
 export function parseCliCommand(arguments_: string[], providerIds: readonly ProviderId[] = DEFAULT_PROVIDER_IDS): CliCommand {
   const forwardedArguments = arguments_[0] === "--" ? arguments_.slice(1) : arguments_;
+  if (forwardedArguments[0] === "--tui") {
+    const command: Extract<CliCommand, { kind: "tui" }> = { kind: "tui" };
+    const seen = new Set<string>();
+    for (let index = 1; index < forwardedArguments.length; index += 2) {
+      const flag = forwardedArguments[index]!;
+      const value = forwardedArguments[index + 1]?.trim();
+      if (!["--provider", "--model", "--resume"].includes(flag) || !value || value.startsWith("--") || seen.has(flag)) {
+        throw new Error("Use dragons --tui [--provider <id>] [--model <name>] or dragons --tui --resume <session-id>.");
+      }
+      seen.add(flag);
+      if (flag === "--provider") command.provider = providerFrom(value, providerIds);
+      if (flag === "--model") command.model = value;
+      if (flag === "--resume") command.resume = value;
+    }
+    if (command.resume && (command.provider || command.model)) throw new Error("TUI resume uses the saved provider and model; overrides are not allowed.");
+    return command;
+  }
   if (forwardedArguments[0] === "plan") return parsePlanCommand(forwardedArguments);
   if (forwardedArguments[0] === "mcp") {
     if ((forwardedArguments[1] === "list" || forwardedArguments[1] === "status") && forwardedArguments.length === 2) return { kind: "mcp", action: forwardedArguments[1] };

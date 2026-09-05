@@ -67,6 +67,36 @@ dragons session list
 dragons session resume <id>
 ```
 
+## Full-screen TUI v2
+
+The opt-in TUI is a client of the public Dragons runtime API, not a second agent loop. The existing line-oriented CLI and headless commands are unchanged.
+
+```sh
+dragons --tui
+dragons --tui --provider local --model <installed-model>
+dragons --tui --resume <session-id>
+```
+
+Place `--tui` first. Provider/model defaults come from the same Dragons configuration as the CLI; resume uses the saved provider and model and rejects overrides. Both stdin and stdout must be terminals. With redirected streams, omit `--tui` to use the plain CLI; requesting full-screen mode fails without emitting terminal escapes or creating a session.
+
+- **Enter** sends the draft; **Left/Right**, **Home/End** (or Ctrl+A/Ctrl+E), **Backspace/Delete** edit grapheme-aware text. Bracketed paste inserts text and never submits or approves a request. Input is single-line, limited to 8,000 characters; pasted newlines become spaces.
+- **Tab** switches conversation/activity views. **Page Up/Page Down** scroll the selected view. **Ctrl+R** refreshes session and background status.
+- A permission panel shows the pending operation, tool, and request ID. **Deny is selected initially**; **Tab** chooses Allow once and **Enter** confirms. Each decision is tied to that exact runtime run/request. The TUI does not offer persistent/session grants, expose raw tool arguments, or bypass `runAgent()` authorization. Cancel if the shown information is insufficient to approve.
+- **Esc** or **Ctrl+C** cancels the current run. **Ctrl+C** while idle or **Ctrl+D** exits. Exit/EOF and catchable SIGINT/SIGTERM/SIGHUP restore raw mode, cursor, bracketed paste and alternate screen. SIGKILL cannot run cleanup.
+- Resizing preserves the draft and client state. Below **25 columns × 9 rows**, only a resize notice is shown and approvals are disabled. Display width uses grapheme segmentation and Unicode cell widths; ambiguous-width glyphs assume narrow rendering.
+
+The conversation has one assistant slot per run, updated during streaming and reconciled with the final runtime result without duplication. Retention is bounded to 100 messages (16,000 characters each) and 50 tool-activity entries (2,000 characters each); intermediate assistant text is replaced by the final result. Terminal control sequences are stripped from all displayed content. Output rendering is coalesced and respects writable-stream backpressure.
+
+Status includes provider/model, session ID, runtime activity, context budget, and the plan-task count exposed by the runtime. The activity view includes structured tool/subagent activity and runtime-owned background-task summaries; Ctrl+R refreshes background status. This milestone does not add plan editing or background-task launch controls. Resume retains the runtime's saved continuation, but does **not** display prior transcript bodies because the public runtime API intentionally does not return them. Use the existing CLI for its broader session/plan/MCP commands. Memory suggestions are explicitly rejected with a notice; accepting suggestions is not supported by this TUI.
+
+Local deterministic verification (no live provider inference):
+
+```sh
+pnpm build
+node --test dist/tui-controller.test.js dist/tui-screen.test.js dist/tui-terminal.test.js
+python3 scripts/verify-tui-pty.py  # POSIX PTY fixture; not a native-emulator visual test
+```
+
 ## Providers
 
 ### OpenAI Platform API
