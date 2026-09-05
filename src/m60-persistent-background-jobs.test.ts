@@ -104,7 +104,8 @@ test("M60 exposes explicitly persistent jobs through bounded slash management af
     }
     await main([], { workingDirectory: workspace, sessionDirectory: sessionsDirectory, backgroundJobsDirectory: jobsDirectory, input: Readable.from(input()), tools: [readTool], write: (text) => output.push(text), modelFactory: () => ({ async respond(request) { assert.equal(request.task, "Persist this safe research."); assert.deepEqual(request.tools.map((tool) => tool.name), ["read_fixture"]); completed(); return { responseId: "job", text: "Persisted result", toolCalls: [] }; } }) });
     assert.match(output.join(""), /Persistent background job started: [0-9a-f-]{36}/i);
-    assert.match(output.join(""), /\[completed\].*Persist this safe research/i);
+    const durableStates = (await createPersistentBackgroundJobStore(jobsDirectory).list()).map(({ state, error }) => ({ state, error }));
+    assert.match(output.join(""), /\[completed\].*Persist this safe research/i, JSON.stringify(durableStates));
     const reloaded = new PersistentBackgroundJobManager({ store: createPersistentBackgroundJobStore(jobsDirectory) });
     await reloaded.initialize();
     assert.equal(reloaded.list().length, 1);

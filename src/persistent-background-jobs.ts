@@ -481,27 +481,28 @@ export class PersistentBackgroundJobManager {
       timedOut = true;
       controller.abort();
     }, this.limits.maxDurationMs);
+    const pendingPolls = new Set<Promise<void>>();
     const cancellationPoller = setInterval(() => {
-      void this.store.load(job.id).then((latest) => {
+      if (pendingPolls.size > 0) return;
+      const poll = this.store.load(job.id).then((latest) => {
         if (latest?.state === "cancelled") controller.abort();
       }).catch(() => undefined);
+      pendingPolls.add(poll);
+      void poll.then(() => pendingPolls.delete(poll));
     }, 50);
     const diagnostics = this.onJobStarted?.(cloneJob(job));
     const runtime: RuntimeJob = {
       controller,
       promise: Promise.resolve().then(async () => {
-        if (controller.signal.aborted || job.state === "cancelled") return;
-        await this.transition(job, {
-          state: "running",
-          startedAt: this.now().toISOString(),
-          executionAttempts: job.executionAttempts + 1,
-        });
-        if (controller.signal.aborted) {
-          const latest = await this.store.load(job.id);
-          if (latest?.state === "cancelled") Object.assign(job, latest);
-          return;
-        }
         try {
+          if (job.state === "cancelled") return;
+          if (controller.signal.aborted) throw new AgentRunCancelledError();
+          await this.transition(job, {
+            state: "running",
+            startedAt: this.now().toISOString(),
+            executionAttempts: job.executionAttempts + 1,
+          });
+          if (controller.signal.aborted) throw new AgentRunCancelledError();
           const result = await runAgent({
             task: job.prompt,
             model: options.createModel(),
@@ -557,14 +558,25 @@ export class PersistentBackgroundJobManager {
       }),
     };
     runtime.promise = runtime.promise.finally(async () => {
-      this.runtimes.delete(job.id);
-      this.launching.delete(job.id);
       clearTimeout(durationTimer);
       clearInterval(cancellationPoller);
-      await releaseClaim();
+      try {
+        await Promise.all(pendingPolls);
+        await releaseClaim();
+      } finally {
+        this.runtimes.delete(job.id);
+        this.launching.delete(job.id);
+      }
     });
+    // A detached job can fail to persist; wait() still observes that rejection.
+    void runtime.promise.catch(() => undefined);
     this.runtimes.set(job.id, runtime);
     this.launching.delete(job.id);
+  }
+
+  /** Wait for local execution, in-flight polling, and claim release to settle. */
+  async wait(id: string): Promise<void> {
+    await this.runtimes.get(id)?.promise;
   }
 
   async start(options: StartPersistentBackgroundJobOptions): Promise<PersistentBackgroundJob> {

@@ -278,6 +278,8 @@ Memory is explicit, local, and user- or project-scoped. Dragons does not automat
 
 Plans are bounded, explicit session-local tasks. Subagents are one-level only and receive a restricted read-only tool snapshot; they cannot recursively create teams. `/tasks` remains read-only and process-local: its state and continuation do not survive process exit. `/jobs start <task>` creates a separate read-only persistent job; `/jobs`, `/jobs show <id>`, `/jobs cancel <id>`, `/jobs resume <id>`, and `/jobs cleanup` provide bounded management. Jobs enforce a bounded active count, duration, turns, output, and durable storage. Only bounded lifecycle metadata and redacted result summaries are durable; runtime handles, approvals, credentials, and tool registries are never stored. After a process exit, active persistent jobs reconcile once to `interrupted` and require explicit manual resume—Dragons never blindly retries them.
 
+Duration exhaustion also terminalizes a job when it occurs during initial durable admission, without invoking a model after cancellation. Local embeddings can await `PersistentBackgroundJobManager.wait(id)` while a job is active to include outstanding cancellation polling and execution-claim release; a terminal status alone is not a filesystem-cleanup barrier. Polling remains single-flight.
+
 ## Coding intelligence
 
 v0.1.0 includes bounded repository intelligence, JavaScript/TypeScript symbol navigation, approval-gated unified-diff `apply_patch`, heuristic test recommendations, and Git/current-run self-review.
