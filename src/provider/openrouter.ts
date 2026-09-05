@@ -49,6 +49,10 @@ export type OpenRouterAgentModelOptions = {
   fetchImpl?: typeof fetch;
   model?: string;
   baseUrl?: string;
+  /** Internal shared-protocol hook for credential-free local runtimes. */
+  sendAuthorization?: boolean;
+  /** Only permits plain HTTP for literal loopback local runtimes. */
+  allowInsecureLoopback?: boolean;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -272,8 +276,13 @@ function endpointFor(baseUrl: string): string {
   return `${baseUrl.replace(/\/$/, "")}/chat/completions`;
 }
 
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
+}
+
 export function createOpenRouterAgentModel(options: OpenRouterAgentModelOptions = {}): AgentModel {
-  const apiKey = resolveApiKey(options.apiKey);
+  const sendAuthorization = options.sendAuthorization !== false;
+  const apiKey = sendAuthorization ? resolveApiKey(options.apiKey) : undefined;
   const fetchImpl = options.fetchImpl ?? fetch;
   const model = options.model ?? DEFAULT_OPENROUTER_MODEL;
   const baseUrl = options.baseUrl ?? OPENROUTER_API_BASE_URL;
@@ -284,7 +293,11 @@ export function createOpenRouterAgentModel(options: OpenRouterAgentModelOptions 
   } catch {
     throw new Error("OpenRouter API base URL must be a valid HTTPS URL.");
   }
-  if (parsedBaseUrl.protocol !== "https:" || parsedBaseUrl.username || parsedBaseUrl.password || parsedBaseUrl.search || parsedBaseUrl.hash) {
+  const isAllowedLoopbackHttp = sendAuthorization === false
+    && options.allowInsecureLoopback === true
+    && parsedBaseUrl.protocol === "http:"
+    && isLoopbackHost(parsedBaseUrl.hostname);
+  if ((parsedBaseUrl.protocol !== "https:" && !isAllowedLoopbackHttp) || parsedBaseUrl.username || parsedBaseUrl.password || parsedBaseUrl.search || parsedBaseUrl.hash) {
     throw new Error("OpenRouter API base URL must be a credential-free HTTPS URL.");
   }
 
@@ -348,7 +361,7 @@ export function createOpenRouterAgentModel(options: OpenRouterAgentModelOptions 
           const candidate = await fetchImpl(endpointFor(parsedBaseUrl.toString()), {
             method: "POST",
             headers: {
-              authorization: `Bearer ${apiKey}`,
+              ...(apiKey === undefined ? {} : { authorization: `Bearer ${apiKey}` }),
               "content-type": "application/json",
               accept: "text/event-stream",
             },

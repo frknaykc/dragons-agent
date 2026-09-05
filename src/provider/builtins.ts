@@ -4,10 +4,13 @@ import { createOpenAIAgentModel, DEFAULT_OPENAI_MODEL } from "./openai.js";
 import { createAnthropicAgentModel, DEFAULT_ANTHROPIC_MODEL } from "./anthropic.js";
 import { createGeminiAgentModel, DEFAULT_GEMINI_MODEL } from "./gemini.js";
 import { createOpenRouterAgentModel, DEFAULT_OPENROUTER_MODEL } from "./openrouter.js";
+import { createLocalAgentModel, DEFAULT_LOCAL_MODEL } from "./local.js";
 import { createProviderRegistry, type ProviderRegistry } from "./registry.js";
 
 export type BuiltInProviderRegistryOptions = {
   chatgptAuth?: Pick<ChatGPTAuthService, "credentials">;
+  /** Explicit endpoint configuration for the credential-free local runtime. */
+  localEndpoint?: string;
 };
 
 /** Registers built-in adapters without moving their wire protocols into the agent loop. */
@@ -80,6 +83,22 @@ export function createBuiltInProviderRegistry(options: BuiltInProviderRegistryOp
         usageMetadata: true,
       },
       createModel: ({ model }) => createOpenRouterAgentModel({ model: model ?? DEFAULT_OPENROUTER_MODEL }),
+    },
+    {
+      id: "local",
+      label: "Local Model (OpenAI-compatible)",
+      defaultModel: DEFAULT_LOCAL_MODEL,
+      credentialRequirement: "none",
+      capabilities: {
+        streaming: true,
+        toolCalls: true,
+        toolResultContinuation: true,
+        usageMetadata: false,
+      },
+      createModel: ({ model }) => createLocalAgentModel({
+        model: model ?? DEFAULT_LOCAL_MODEL,
+        ...(options.localEndpoint === undefined ? {} : { baseUrl: options.localEndpoint }),
+      }),
     },
   ]);
 }

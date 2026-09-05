@@ -17,7 +17,7 @@ import {
   type ChatGPTAuthService,
 } from "./provider/codex-auth.js";
 import { createBuiltInProviderRegistry } from "./provider/builtins.js";
-import type { ProviderRegistry } from "./provider/registry.js";
+import { DEFAULT_PROVIDER_IDS, type ProviderRegistry } from "./provider/registry.js";
 import { createCodingTools, type AgentTool } from "./tools.js";
 import { discoverProjectContext } from "./project-context.js";
 import { createSubagentTool } from "./subagents.js";
@@ -228,9 +228,10 @@ function terminalRenderer(
   return createTerminalRenderer({ write, isTTY, color, width });
 }
 
-function providerRegistryFor(dependencies: CliDependencies): ProviderRegistry {
+function providerRegistryFor(dependencies: CliDependencies, localEndpoint?: string): ProviderRegistry {
   return dependencies.providerRegistry ?? createBuiltInProviderRegistry({
     ...(dependencies.chatgptAuth?.credentials ? { chatgptAuth: { credentials: dependencies.chatgptAuth.credentials } } : {}),
+    ...(localEndpoint === undefined ? {} : { localEndpoint }),
   });
 }
 
@@ -853,22 +854,23 @@ export async function main(
   dependencies: CliDependencies = {},
 ): Promise<void> {
   const write = dependencies.write ?? ((text: string) => process.stdout.write(text));
-  const providers = providerRegistryFor(dependencies);
+  const configuredProviderIds = dependencies.providerRegistry?.ids() ?? DEFAULT_PROVIDER_IDS;
   if (arguments_.length === 1 && arguments_[0] === "--version") {
     write(`dragons ${DRAGONS_VERSION}\n`);
     return;
   }
   if (arguments_.length === 1 && (arguments_[0] === "--help" || arguments_[0] === "-h")) {
-    write(`Usage: dragons [--provider ${providers.ids().join("|")}] [--model <model>] [task]\n\nRun without a task for interactive mode. Commands: auth, config, session, skills, memory, plan, mcp.\n`);
+    write(`Usage: dragons [--provider ${configuredProviderIds.join("|")}] [--model <model>] [task]\n\nRun without a task for interactive mode. Commands: auth, config, session, skills, memory, plan, mcp.\n`);
     return;
   }
-  let config = dependencies.config ? parseDragonsConfig(dependencies.config, providers.ids()) : {};
+  let config = dependencies.config ? parseDragonsConfig(dependencies.config, configuredProviderIds) : {};
   if (!dependencies.config) {
-    try { config = await loadDragonsConfig(dependencies.configPath, providers.ids()); }
+    try { config = await loadDragonsConfig(dependencies.configPath, configuredProviderIds); }
     catch (error: unknown) {
       if (!(error instanceof Error) || !error.message.startsWith("Unable to determine a home directory")) throw error;
     }
   }
+  const providers = providerRegistryFor(dependencies, config.localEndpoint);
   let parsedCommand = parseCliCommand(arguments_, providers.ids());
   if (parsedCommand.kind === "run") {
     const providerExplicit = arguments_.includes("--provider");
@@ -914,6 +916,7 @@ export async function main(
     const next: DragonsConfig = { ...config, version: 1 };
     if (parsedCommand.action === "set-provider") next.provider = parsedCommand.provider;
     if (parsedCommand.action === "set-model") next.models = { ...next.models, [parsedCommand.provider]: parsedCommand.model };
+    if (parsedCommand.action === "set-local-endpoint") next.localEndpoint = parsedCommand.endpoint;
     if (parsedCommand.action === "reset" && parsedCommand.target === "provider") delete next.provider;
     if (parsedCommand.action === "reset" && parsedCommand.target === "model") { delete next.model; delete next.models; }
     await saveDragonsConfig(next, dependencies.configPath, providers.ids());

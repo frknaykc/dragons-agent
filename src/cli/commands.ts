@@ -10,6 +10,7 @@ export type CliCommand =
   | { kind: "config"; action: "show" }
   | { kind: "config"; action: "set-provider"; provider: ProviderName }
   | { kind: "config"; action: "set-model"; provider: ProviderName; model: string }
+  | { kind: "config"; action: "set-local-endpoint"; endpoint: string }
   | { kind: "config"; action: "reset"; target: "provider" | "model" }
   | { kind: "session"; action: "list" }
   | { kind: "session"; action: "show"; id: string }
@@ -191,8 +192,9 @@ export function parseCliCommand(arguments_: string[], providerIds: readonly Prov
     if (forwardedArguments[1] === "show" && forwardedArguments.length === 2) return { kind: "config", action: "show" };
     if (forwardedArguments[1] === "set-provider" && forwardedArguments[2] && forwardedArguments.length === 3) return { kind: "config", action: "set-provider", provider: providerFrom(forwardedArguments[2], providerIds) };
     if (forwardedArguments[1] === "set-model" && forwardedArguments[2] && forwardedArguments[3]?.trim() && forwardedArguments.length === 4) return { kind: "config", action: "set-model", provider: providerFrom(forwardedArguments[2], providerIds), model: forwardedArguments[3].trim() };
+    if (forwardedArguments[1] === "set-local-endpoint" && forwardedArguments[2]?.trim() && forwardedArguments.length === 3) return { kind: "config", action: "set-local-endpoint", endpoint: forwardedArguments[2].trim() };
     if (forwardedArguments[1] === "reset" && (forwardedArguments[2] === "provider" || forwardedArguments[2] === "model") && forwardedArguments.length === 3) return { kind: "config", action: "reset", target: forwardedArguments[2] };
-    throw new Error("Use dragons config show, set-provider <provider>, set-model <provider> <model>, or reset <provider|model>.");
+    throw new Error("Use dragons config show, set-provider <provider>, set-model <provider> <model>, set-local-endpoint <url>, or reset <provider|model>.");
   }
   if (forwardedArguments[0] !== "auth") return parseRunCommand(forwardedArguments, providerIds);
   const action = forwardedArguments[1];

@@ -12,6 +12,8 @@ export type DragonsConfig = {
   /** Legacy global model value retained for existing local configuration. */
   model?: string;
   models?: Partial<Record<ProviderId, string>>;
+  /** Explicit credential-free OpenAI-compatible local-runtime endpoint. */
+  localEndpoint?: string;
   maxTurns?: number;
   maxToolOutputBytes?: number;
   shellTimeoutMilliseconds?: number;
@@ -22,7 +24,7 @@ export type DragonsConfig = {
 };
 
 export type ConfigPathOptions = { platform?: NodeJS.Platform; homeDirectory?: string; xdgConfigHome?: string; appData?: string };
-const ALLOWED = new Set<keyof DragonsConfig>(["version", "provider", "model", "models", "maxTurns", "maxToolOutputBytes", "shellTimeoutMilliseconds", "contextBudgetChars", "retryMaxAttempts", "mcpServers"]);
+const ALLOWED = new Set<keyof DragonsConfig>(["version", "provider", "model", "models", "localEndpoint", "maxTurns", "maxToolOutputBytes", "shellTimeoutMilliseconds", "contextBudgetChars", "retryMaxAttempts", "mcpServers"]);
 
 export function getDragonsConfigPath(options: ConfigPathOptions = {}): string {
   const platform = options.platform ?? process.platform;
@@ -35,6 +37,16 @@ export function getDragonsConfigPath(options: ConfigPathOptions = {}): string {
 function positiveInteger(value: unknown, key: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(`Dragons config ${key} must be a positive integer.`);
   return value as number;
+}
+function validLocalEndpoint(value: unknown): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 2_048) throw new Error("Dragons config localEndpoint must be a bounded non-empty URL.");
+  let endpoint: URL;
+  try { endpoint = new URL(value.trim()); } catch { throw new Error("Dragons config localEndpoint must be a valid URL."); }
+  const loopbackHttp = endpoint.protocol === "http:" && (endpoint.hostname === "127.0.0.1" || endpoint.hostname === "[::1]" || endpoint.hostname === "::1");
+  if ((endpoint.protocol !== "https:" && !loopbackHttp) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
+    throw new Error("Dragons config localEndpoint must be credential-free HTTPS or literal loopback HTTP.");
+  }
+  return endpoint.toString().replace(/\/$/, "");
 }
 export function parseDragonsConfig(value: unknown, providerIds: readonly ProviderId[] = DEFAULT_PROVIDER_IDS): DragonsConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Dragons config must be a JSON object.");
@@ -57,6 +69,7 @@ export function parseDragonsConfig(value: unknown, providerIds: readonly Provide
     }
     config.models = Object.fromEntries(Object.entries(models).map(([provider, model]) => [provider, (model as string).trim()])) as DragonsConfig["models"];
   }
+  if (source.localEndpoint !== undefined) config.localEndpoint = validLocalEndpoint(source.localEndpoint);
   if (source.mcpServers !== undefined) config.mcpServers = parseMcpServerConfigs(source.mcpServers);
   for (const key of ["maxTurns", "maxToolOutputBytes", "shellTimeoutMilliseconds", "contextBudgetChars", "retryMaxAttempts"] as const) if (source[key] !== undefined) config[key] = positiveInteger(source[key], key);
   return config;

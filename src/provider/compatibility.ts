@@ -19,6 +19,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   anthropic: "Anthropic",
   gemini: "Google Gemini",
   openrouter: "OpenRouter",
+  local: "Local Model",
 };
 
 export class ProviderCompatibilityError extends Error {

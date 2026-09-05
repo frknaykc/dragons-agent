@@ -82,15 +82,49 @@ dragons session resume <id>
 - Native credential storage is used where supported, with a restrictive local fallback.
 - Compatibility can change because this transport is implementation-specific. It is not a claim of official OpenAI support for Dragons as a third-party subscription client.
 
+### Anthropic, Google Gemini, and OpenRouter
+
+- `anthropic` uses the Anthropic Messages API with `ANTHROPIC_API_KEY`.
+- `gemini` uses Google Gemini Generate Content with `GEMINI_API_KEY`.
+- `openrouter` uses OpenRouter Chat Completions with `OPENROUTER_API_KEY`.
+- These adapters support streamed text and tool-result continuation through the same runtime authorization boundary. Tool support depends on the selected model; an unsupported tool request fails explicitly rather than bypassing authorization. Authenticated endpoints require HTTPS.
+
+### Local Model — OpenAI-compatible
+
+`local` connects to an already-running OpenAI-compatible Chat Completions server, such as Ollama or vLLM. It does not install a runtime or download a model. Select a model available on your server with tool-calling support for coding runs.
+
+```sh
+dragons config set-local-endpoint http://127.0.0.1:11434/v1
+dragons config set-model local qwen2.5-coder:7b
+dragons --provider local
+```
+
+The default base endpoint is `http://127.0.0.1:11434/v1`; Dragons appends `/chat/completions`. `set-local-endpoint` validates and persists the `localEndpoint` configuration field. Configured URLs must be credential-free HTTPS or HTTP on literal loopback (`127.0.0.1` or `[::1]`); remote plain HTTP and `http://localhost` are rejected. URL user information, query parameters, and fragments are rejected.
+
+The Local adapter has no API-key or environment-credential fallback and sends no Authorization header, including to an explicitly configured HTTPS endpoint. A remote HTTPS endpoint receives the selected project context just like any other chosen provider. Local continuation state is provider-tagged and isolated from OpenRouter state; WRITE and EXECUTE still require runtime approval.
+
+Local coverage uses deterministic transports for configuration, streaming/tool continuation, malformed responses, cancellation, and state isolation. This is not a claim of live Ollama or vLLM inference acceptance. Live provider checks remain opt-in and require the corresponding credentials or an installed, running model.
+
+### Provider and model defaults
+
 Set local defaults with:
 
 ```sh
 dragons config show
-dragons config set-provider <openai-api|chatgpt>
-dragons config set-model <openai-api|chatgpt> <model>
+dragons config set-provider <provider>
+dragons config set-model <provider> <model>
 ```
 
-The built-in defaults are `gpt-4.1-mini` for OpenAI Platform API and `gpt-5.6-terra` for the experimental ChatGPT transport. A configured model overrides its provider default.
+| Provider ID | Built-in default model |
+| --- | --- |
+| `openai-api` | `gpt-4.1-mini` |
+| `chatgpt` | `gpt-5.6-terra` |
+| `anthropic` | `claude-sonnet-5` |
+| `gemini` | `gemini-2.5-flash` |
+| `openrouter` | `openai/gpt-4.1-mini` |
+| `local` | `qwen2.5-coder:7b` |
+
+A configured model overrides its provider default; `--model` overrides the configured choice for a run. Built-in model names are configuration defaults, not guarantees of account or server availability.
 
 ## Features
 
