@@ -116,6 +116,23 @@ The sandboxed renderer has no Node integration. Its isolated preload exposes onl
 
 Deterministic bridge tests run on all CI platforms without a GUI. `acceptance:desktop` separately exercises the actual Electron window, sandbox/preload, configured model defaults, inert model content, streaming, real isolated write allow/deny, cancellation, resume and reload cleanup. Reload is a fail-closed disconnect: the window closes and cancels its run; reopen and resume explicitly. Neither test path establishes live provider acceptance.
 
+## Web / remote runtime foundation
+
+`dragons-agent/remote/server` exports `startRemoteServer`; `dragons-agent/remote/client` exports the browser-compatible `RemoteClient` (fetch + SSE, no Node imports in emitted client JavaScript). This is a protocol/SDK foundation, not a hosted website or permission to publish a local agent to the internet. The source-checkout `pnpm remote` launcher requires a host-provided random base64url `DRAGONS_REMOTE_TOKEN` (32–256 characters), prints only its loopback URL, and uses the launch workspace and existing host configuration. Never put transport tokens in URLs, command arguments, source, browser storage or logs.
+
+The trusted server receives `principals: [{id, token, sessionIds?}]` and a `createRuntime(principalId)` factory. The factory must create isolated runtimes in a workspace/store authorized for that principal. Provider credentials and arbitrary dependencies never cross the protocol. It binds **only `127.0.0.1`**, on an ephemeral port by default; there is no public bind option. Remote access requires a separately secured channel such as authenticated SSH forwarding. TLS termination, public deployment and a web UI are not included.
+
+Protocol:
+
+1. `POST /connect` with JSON `{}` and `Authorization: Bearer <transport-token>` obtains a fresh `connectionId`. One connection per principal; a competing connection fails rather than taking over.
+2. Open `GET /events` with bearer plus `x-dragons-connection`. This SSE stream must exist before sending input. Runtime events are structured `data: <JSON>` frames; no terminal parsing or automatic event replay.
+3. `POST /command` uses the same headers, JSON content type, and `{sequence, command}`. Sequence starts at 1, must be exactly next, and is consumed before asynchronous execution. Commands are `providers`, `create`, `resume`, `status`, `send`, `approve`, `cancel`; the desktop bridge's strict command schema also applies remotely. Approvals require exact session/run/pending approval ID and only `allow_once` or `deny`.
+4. `DELETE /connection`, lost event stream, slow-consumer overflow or shutdown cancels/disposes the owned bridge. Reconnect creates a new connection/sequence space and may resume an owned saved session. It never resumes an approval or retries a lost command. After an ambiguous failure, inspect persisted state before deciding whether to submit new input.
+
+`RemoteClient.connect({url, token, onEvent})` opens both transports; `request(command)` returns `{ok,value}` or a bounded error envelope; `close()` disconnects and `disconnected` signals teardown. Client commands are ordered with a bounded queue; lost replies are **not retried**. The host remembers created-session ownership across reconnects within its lifetime (up to 128 per principal). After restart, only the trusted host may supply `sessionIds` to restore access; knowing an ID is not authorization.
+
+Security: exact Host header; authentication on every operational endpoint; no cookie/query authentication; no wildcard CORS. Browser Origin is rejected by default. Explicit `allowedOrigins` enables exact-origin CORS and an unauthenticated, rate-bounded OPTIONS preflight exposing only fixed protocol metadata. There is no filesystem/shell RPC. Bounds include 32 principals/connections, 64 sockets/in-flight HTTP requests, 8 in-flight requests per principal, 256 KiB request/reply bodies, 64 KiB event frames, header/time limits, token-bucket request rates and disconnect-on-SSE-backpressure. Transport shutdown is bounded, but an unresolved runtime disposal retains ownership rather than allowing an unsafe replacement. Deterministic tests use actual local sockets and the existing runtime/tools, not external infrastructure or live models.
+
 ## Providers
 
 ### OpenAI Platform API

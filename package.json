@@ -15,7 +15,9 @@
   "types": "./dist/runtime.d.ts",
   "exports": {
     ".": "./dist/runtime.js",
-    "./runtime": "./dist/runtime.js"
+    "./runtime": "./dist/runtime.js",
+    "./remote/client": "./dist/remote/client.js",
+    "./remote/server": "./dist/remote/server.js"
   },
   "bin": {
     "dragons": "./dist/cli.js"
@@ -47,6 +49,7 @@
     "test": "pnpm build && node --test dist/*.test.js dist/provider/*.test.js",
     "dragons": "pnpm build && node dist/cli.js",
     "desktop": "pnpm build && electron desktop/main.mjs",
+    "remote": "pnpm build && node scripts/serve-remote.mjs",
     "acceptance:desktop": "pnpm build && electron scripts/verify-desktop-smoke.mjs",
     "smoke:live": "pnpm build && node dist/live-smoke.js",
     "acceptance:openai": "pnpm build && node dist/acceptance-openai.js",

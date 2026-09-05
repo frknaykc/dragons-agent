@@ -51,7 +51,7 @@ try {
   const packagedLicense = await command("tar", ["-xOf", tarball, "package/LICENSE"], directory);
   assert.equal(packagedManifest.license, "MIT");
   assert.equal(packagedManifest.types, "./dist/runtime.d.ts");
-  assert.deepEqual(packagedManifest.exports, { ".": "./dist/runtime.js", "./runtime": "./dist/runtime.js" });
+  assert.deepEqual(packagedManifest.exports, { ".": "./dist/runtime.js", "./runtime": "./dist/runtime.js", "./remote/client": "./dist/remote/client.js", "./remote/server": "./dist/remote/server.js" });
   assert.match(packagedLicense, /^MIT License\n\nCopyright \(c\) 2026 Furkan "NaxoziwuS" Aykaç\n/);
   assert.equal(packagedLicense.includes("[INSERT COPYRIGHT HOLDER]"), false, "packaged license must not retain a copyright placeholder");
 
@@ -74,6 +74,8 @@ try {
   assert.equal(config.trim(), "{}");
   assert.match(sessions, /No saved Dragons sessions/);
   assert.equal(runtimeApi.trim(), "RUNTIME_API_OK");
+  const remoteApi = await command(process.execPath, ["--input-type=module", "--eval", "import { RemoteClient } from 'dragons-agent/remote/client'; import { startRemoteServer } from 'dragons-agent/remote/server'; if (typeof RemoteClient.connect !== 'function' || typeof startRemoteServer !== 'function') throw new Error('remote API unavailable'); process.stdout.write('REMOTE_API_OK\\n');"], install, isolatedEnv);
+  assert.equal(remoteApi.trim(), "REMOTE_API_OK");
 
   console.log(`PACKAGE_ACCEPTANCE_OK ${basename(tarball)}`);
 } finally {
