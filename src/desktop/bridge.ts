@@ -3,6 +3,7 @@ import type {
   RuntimeEvent,
   RuntimeRunHandle,
 } from "../runtime.js";
+import { observeRuntimeRun } from "../runtime-observation.js";
 
 export const MAX_DESKTOP_CONTENT_CHARACTERS = 64_000;
 export const MAX_DESKTOP_MESSAGE_BYTES = 256_000;
@@ -13,6 +14,7 @@ export type DesktopCommand =
   | { type: "create"; provider?: string; model?: string }
   | { type: "resume"; sessionId: string }
   | { type: "status" }
+  | { type: "background" }
   | { type: "send"; content: string; sessionId?: string }
   | { type: "approve"; sessionId: string; runId: string; approvalId: string; decision: "allow_once" | "deny" }
   | { type: "cancel"; runId: string };
@@ -73,6 +75,7 @@ function commandFrom(input: unknown): DesktopCommand | undefined {
   switch (copy.type) {
     case "providers":
     case "status":
+    case "background":
       valid = exact(["type"]);
       break;
     case "create":
@@ -159,7 +162,7 @@ export class DesktopBridge {
     } catch { return failure(this.#closed ? "CLOSED" : "RUNTIME_ERROR"); }
 
     // Reserve before the first await: concurrent creates, sends and session swaps cannot race.
-    if (this.#admitting || (this.#active && command.type !== "status")) return failure("BUSY");
+    if (this.#admitting || (this.#active && command.type !== "status" && command.type !== "background")) return failure("BUSY");
     if (command.type === "send") {
       if (!this.#sessionId) return failure("NO_SESSION");
       if (command.sessionId !== undefined && command.sessionId !== this.#sessionId) return failure("STALE_SESSION");
@@ -175,14 +178,36 @@ export class DesktopBridge {
           : await this.#runtime.resumeSession(command.sessionId);
         if (this.#closed) return failure("CLOSED");
         this.#sessionId = session.id;
+        if (command.type === "resume") {
+          const handle = observeRuntimeRun(this.#runtime, session.id);
+          if (handle) {
+            const run: OwnedRun = { handle, settled: handle.result.then(() => {}, () => {}), approvals: new Set(), cancelled: false };
+            this.#active = run;
+            void this.#consume(run).catch(() => { void this.close(); });
+          }
+        }
         return success(session);
       }
       if (command.type === "status") {
         const status = await this.#runtime.status(this.#sessionId === undefined ? {} : { sessionId: this.#sessionId });
+        if (!this.#closed && !this.#active && this.#sessionId) {
+          const handle = observeRuntimeRun(this.#runtime, this.#sessionId);
+          if (handle) {
+            const run: OwnedRun = { handle, settled: handle.result.then(() => {}, () => {}), approvals: new Set(), cancelled: false };
+            this.#active = run;
+            void this.#consume(run).catch(() => { void this.close(); });
+          }
+        }
         return this.#closed ? failure("CLOSED") : success(status);
+      }
+      if (command.type === "background") {
+        if (!this.#sessionId) return failure("NO_SESSION");
+        const tasks = await this.#runtime.listBackgroundTasks(this.#sessionId);
+        return this.#closed ? failure("CLOSED") : success(tasks);
       }
       if (command.type === "send") {
         const sessionId = this.#sessionId!;
+        // Input is admitted only against the revision acknowledged by this client's facade.
         const handle = await this.#runtime.sendUserInput({ sessionId, content: command.content });
         // Observe rejection before any lifecycle check, event iteration, or further await.
         const settled = handle.result.then(() => {}, () => {});

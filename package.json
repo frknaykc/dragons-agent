@@ -17,7 +17,9 @@
     ".": "./dist/runtime.js",
     "./runtime": "./dist/runtime.js",
     "./remote/client": "./dist/remote/client.js",
-    "./remote/server": "./dist/remote/server.js"
+    "./remote/server": "./dist/remote/server.js",
+    "./remote/runtime": "./dist/remote/runtime.js",
+    "./shared-runtime": "./dist/shared-runtime.js"
   },
   "bin": {
     "dragons": "./dist/cli.js"
@@ -51,6 +53,7 @@
     "desktop": "pnpm build && electron desktop/main.mjs",
     "remote": "pnpm build && node scripts/serve-remote.mjs",
     "acceptance:desktop": "pnpm build && electron scripts/verify-desktop-smoke.mjs",
+    "acceptance:shared": "pnpm build && electron scripts/verify-desktop-smoke.mjs --shared",
     "smoke:live": "pnpm build && node dist/live-smoke.js",
     "acceptance:openai": "pnpm build && node dist/acceptance-openai.js",
     "acceptance:chatgpt": "pnpm build && node dist/acceptance-chatgpt.js",

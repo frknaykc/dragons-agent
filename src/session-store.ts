@@ -56,6 +56,8 @@ export type SessionStore = {
   save(session: DragonsSession): Promise<void>;
   /** Atomically read, validate, and replace one session while holding its durable exclusive lock. */
   mutate?(id: string, operation: (session: DragonsSession) => DragonsSession | Promise<DragonsSession>): Promise<DragonsSession | undefined>;
+  /** Exclusive foreground execution lease; independent of short session mutations. */
+  acquireExecution?(id: string): Promise<() => Promise<void>>;
   list(): Promise<DragonsSession[]>;
   delete(id: string): Promise<boolean>;
 };
@@ -95,19 +97,19 @@ function sessionPath(directory: string, id: string): string {
   return join(directory, `${id}.json`);
 }
 
-function sessionLockPath(directory: string, id: string): string {
+function sessionLockPath(directory: string, id: string, purpose: "mutation" | "execution"): string {
   if (!SESSION_ID_PATTERN.test(id)) throw new Error("Invalid Dragons session ID.");
-  return join(directory, `.${id}.lock`);
+  return join(directory, `.${id}${purpose === "execution" ? ".execution" : ""}.lock`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-async function acquireSessionLock(directory: string, id: string): Promise<() => Promise<void>> {
+async function acquireSessionLock(directory: string, id: string, purpose: "mutation" | "execution" = "mutation"): Promise<() => Promise<void>> {
+  const path = sessionLockPath(directory, id, purpose);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
-  const path = sessionLockPath(directory, id);
   const token = randomUUID();
   try {
     await writeFile(path, JSON.stringify({ version: 1, pid: process.pid, token }), { encoding: "utf8", mode: 0o600, flag: "wx" });
@@ -225,6 +227,10 @@ export function createSessionStore(directory: string, options: SessionStoreOptio
     async save(session): Promise<void> {
       if (!parseSession(session, providers)) throw new Error("Refusing to save an invalid or credential-bearing Dragons session.");
       await writeSession(sessionPath(directory, session.id), session);
+    },
+
+    acquireExecution(id) {
+      return acquireSessionLock(directory, id, "execution");
     },
 
     async mutate(id, operation): Promise<DragonsSession | undefined> {

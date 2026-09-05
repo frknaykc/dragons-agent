@@ -3,6 +3,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { DesktopBridge } from '../dist/desktop/bridge.js';
 import { createDesktopRuntime } from '../dist/desktop/host.js';
+import { connectRemoteRuntime } from '../dist/remote/runtime.js';
 
 const asset = (name) => new URL(name, import.meta.url);
 const page = asset('index.html').href;
@@ -82,7 +83,9 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
   void (async () => { try {
     await app.whenReady();
     // Workspace is selected by the trusted launcher, never by UI messages.
-    const runtime = await createDesktopRuntime(process.cwd());
+    const runtime = process.env.DRAGONS_RUNTIME_URL
+      ? await connectRemoteRuntime({ url: process.env.DRAGONS_RUNTIME_URL, token: process.env.DRAGONS_REMOTE_TOKEN || '' })
+      : await createDesktopRuntime(process.cwd());
     desktop = await openDesktop(runtime);
   } catch {
     console.error('Unable to open Dragons Desktop. Check local configuration and workspace.');

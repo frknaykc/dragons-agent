@@ -7,10 +7,14 @@ let busy = false;
 let stopped = false;
 let assistant;
 let providers = [];
+let mayControl = true;
+let refreshing = false;
+let eventVersion = 0;
 function controls() {
-  $('send').disabled = !session || busy || stopped;
-  $('cancel').disabled = !runId || stopped;
-  for (const id of ['create', 'resume', 'provider', 'model']) $(id).disabled = busy || stopped;
+  $('send').disabled = !session || busy || refreshing || stopped;
+  $('cancel').disabled = !runId || !mayControl || stopped;
+  $('refresh').disabled = !session || stopped;
+  for (const id of ['create', 'resume', 'provider', 'model']) $(id).disabled = busy || refreshing || stopped;
   $('status').textContent = stopped ? 'Disconnected' : busy ? 'Running' : session ? 'Ready' : 'No session';
   $('approval').hidden = !approval || stopped;
 }
@@ -27,26 +31,47 @@ function message(role, text) {
   while ($('messages').childElementCount > 80) $('messages').firstElementChild.remove();
   return node;
 }
-function useSession(value) {
+async function useSession(value) {
+  eventVersion++;
   session = value; runId = undefined; approval = undefined; assistant = undefined;
   $('messages').replaceChildren(); $('activity').textContent = 'No activity.';
   $('session').textContent = `${value.id} · ${value.provider} / ${value.model} · Resume restores context, not previous message display.`;
-  $('resume-id').value = value.id; controls();
+  $('resume-id').value = value.id;
+  await refresh(); controls();
 }
+async function refresh() {
+  if (!session || stopped || refreshing) return;
+  const version = eventVersion;
+  const sessionId = session.id;
+  refreshing = true; controls();
+  try {
+  const status = await request({ type: 'status' });
+  if (stopped || session?.id !== sessionId || (version !== eventVersion && status.activeRunId !== runId)) return;
+  mayControl = !status.shared?.ownerClientId || status.shared.ownerClientId === status.shared.clientId;
+  runId = status.activeRunId; busy = !!runId;
+  if (!runId) approval = undefined;
+  if (status.shared) $('session').textContent = `${session.id} · ${session.provider} / ${session.model} · revision ${status.shared.revision} · ${mayControl ? 'owner / ready' : 'observing'} · plan tasks ${status.session?.planTaskCount || 0}`;
+  const tasks = await request({ type: 'background' });
+  if (stopped || session?.id !== sessionId || version !== eventVersion) return;
+  if (tasks.length) $('activity').textContent = ($('activity').textContent + '\nBackground: ' + tasks.map((task) => `${task.id}: ${task.state}`).join('\n')).slice(-16000);
+  } finally { refreshing = false; controls(); }
+}
+$('refresh').onclick = () => refresh().catch(fail);
 $('provider').onchange = () => { $('model').value = providers.find((p) => p.id === $('provider').value)?.defaultModel || ''; };
 $('create').onclick = async () => {
   busy = true; controls();
-  try { useSession(await request({ type: 'create', ...($('provider').value ? { provider: $('provider').value } : {}), ...($('model').value.trim() ? { model: $('model').value.trim() } : {}) })); }
-  catch (error) { fail(error); } finally { busy = false; controls(); }
+  try { await useSession(await request({ type: 'create', ...($('provider').value ? { provider: $('provider').value } : {}), ...($('model').value.trim() ? { model: $('model').value.trim() } : {}) })); }
+  catch (error) { fail(error); } finally { busy = !!runId; controls(); }
 };
 $('resume').onclick = async () => {
   busy = true; controls();
-  try { useSession(await request({ type: 'resume', sessionId: $('resume-id').value.trim() })); }
-  catch (error) { fail(error); } finally { busy = false; controls(); }
+  try { await useSession(await request({ type: 'resume', sessionId: $('resume-id').value.trim() })); }
+  catch (error) { fail(error); } finally { busy = !!runId; controls(); }
 };
 $('composer').onsubmit = async (event) => {
-  event.preventDefault(); if (busy || !session || stopped || !$('prompt').value.trim()) return;
-  busy = true; assistant = undefined; controls();
+  event.preventDefault(); if (busy || refreshing || !session || stopped || !$('prompt').value.trim()) return;
+  eventVersion++;
+  busy = true; mayControl = true; assistant = undefined; controls();
   const content = $('prompt').value; message('user', content); $('prompt').value = '';
   try { const result = await request({ type: 'send', sessionId: session.id, content }); if (busy) runId = result.runId; }
   catch (error) { busy = false; fail(error); } finally { controls(); }
@@ -60,9 +85,9 @@ async function decide(decision) {
 }
 $('deny').onclick = () => decide('deny'); $('allow').onclick = () => decide('allow_once');
 function receive(event) {
-  if (event.type === 'client_disconnected') { stopped = true; busy = false; approval = undefined; fail(new Error(event.message)); controls(); return; }
+  if (event.type === 'client_disconnected') { eventVersion++; stopped = true; busy = false; approval = undefined; fail(new Error(event.message)); controls(); return; }
   if (!session || event.sessionId !== session.id) return;
-  if (event.type === 'run_started') { runId = event.runId; busy = true; }
+  if (event.type === 'run_started') { eventVersion++; runId = event.runId; busy = true; }
   if (event.type === 'assistant_delta') {
     assistant ??= message('assistant', ''); assistant.textContent = (assistant.textContent + event.text).slice(-32000);
   }
@@ -73,8 +98,11 @@ function receive(event) {
     assistant ??= message('assistant', ''); assistant.textContent = event.result.finalText.slice(-32000);
   }
   if (['run_completed', 'run_failed', 'run_cancelled'].includes(event.type)) {
+    eventVersion++;
+    const owned = mayControl;
     busy = false; runId = undefined; approval = undefined;
     if (event.type !== 'run_completed') $('error').textContent = event.message || 'Run cancelled.';
+    if (owned) void refresh().catch(fail);
   }
   controls();
 }

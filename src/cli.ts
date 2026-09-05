@@ -34,6 +34,7 @@ import { RuntimeDiagnosticsService, formatRuntimeDiagnostics, type RuntimeDiagno
 import { createTerminalRenderer, type TerminalRenderer } from "./terminal/renderer.js";
 import { loadDragonsConfig, parseDragonsConfig, saveDragonsConfig, type DragonsConfig } from "./config.js";
 import { createDragonsRuntime } from "./runtime.js";
+import { connectRemoteRuntime } from "./remote/runtime.js";
 import { runTui, type TuiOutput } from "./tui/terminal.js";
 import { DRAGONS_VERSION } from "./version.js";
 import {
@@ -740,7 +741,18 @@ async function runInteractiveConversation(
 
       const controller = new AbortController();
       activeController = controller;
+      let releaseExecution: (() => Promise<void>) | undefined;
       try {
+        releaseExecution = await sessionStore.acquireExecution?.(session.id);
+        const current = await sessionStore.load(session.id);
+        if (!current) throw new Error(`Active session was not found: ${session.id}`);
+        if (current.workingDirectory !== workingDirectory || current.provider !== activeProvider || current.model !== activeModelName) {
+          throw new Error("Active session workspace, provider, or model changed.");
+        }
+        session = current;
+        conversationResponseId = current.continuation?.responseId;
+        continuationState = current.continuation?.providerState;
+        activeSkillReferences = current.skills ?? [];
         const skills = await createSkillsContext(skillsDirectory, activeSkillReferences, workingDirectory);
         const memory = await memoryContextFor(memoryStore, workingDirectory, task);
         const projectContext = await discoverProjectContext(workingDirectory);
@@ -839,8 +851,12 @@ async function runInteractiveConversation(
           renderer.renderError(message);
         }
       } finally {
-        activeController = undefined;
-        renderer.finishRun();
+        try {
+          activeController = undefined;
+          renderer.finishRun();
+        } finally {
+          await releaseExecution?.();
+        }
       }
       write("\n");
     }
@@ -895,6 +911,12 @@ export async function main(
     const model = parsedCommand.model ?? config.models?.[provider] ?? config.model;
     const workingDirectory = dependencies.workingDirectory ?? process.cwd();
     try {
+      if (process.env.DRAGONS_RUNTIME_URL) {
+        const remote = await connectRemoteRuntime({ url: process.env.DRAGONS_RUNTIME_URL, token: process.env.DRAGONS_REMOTE_TOKEN ?? "" });
+        // Explicit CLI selectors override the shared host, never local configured defaults.
+        await runTui(remote, { input, output, ...(parsedCommand.resume ? { resume: parsedCommand.resume } : { provider: parsedCommand.provider, model: parsedCommand.model }) });
+        return;
+      }
       const runtime = await createDragonsRuntime({
         workingDirectory,
         providerRegistry: providers,

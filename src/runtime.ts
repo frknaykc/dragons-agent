@@ -437,6 +437,7 @@ function selectedModel(provider: ProviderDescriptor, candidate: string | undefin
 class DragonsRuntimeCore implements DragonsRuntime {
   private readonly activeRuns = new Map<string, ActiveRun>();
   private readonly activeRunIdsBySession = new Map<string, string>();
+  private readonly pendingAdmissions = new Set<string>();
   private readonly pendingMemorySuggestions = new Map<string, PendingRuntimeMemorySuggestion>();
   private readonly backgroundTaskIds = new Set<string>();
   private readonly runtimeMcpConnectionIds = new Set<string>();
@@ -610,50 +611,75 @@ class DragonsRuntimeCore implements DragonsRuntime {
   async sendUserInput(input: SendUserInput): Promise<RuntimeRunHandle> {
     this.assertOpen();
     const content = checkedInput(input);
-    const session = await this.loadOwnedSession(input.sessionId);
-    this.assertOpen();
-    if (this.activeRunIdsBySession.has(session.id)) throw new Error("This Dragons session already has an active run.");
+    if (this.activeRunIdsBySession.has(input.sessionId) || this.pendingAdmissions.has(input.sessionId)) throw new Error("This Dragons session already has an active run.");
+    if (this.activeRuns.size + this.pendingAdmissions.size >= 128) throw new Error("Runtime foreground admission limit reached.");
+    this.pendingAdmissions.add(input.sessionId);
+    let release: (() => Promise<void>) | undefined;
+    try {
+      release = await this.sessionStore.acquireExecution?.(input.sessionId);
+      this.assertOpen();
+      const session = await this.loadOwnedSession(input.sessionId);
+      this.assertOpen();
+      if (this.activeRunIdsBySession.has(session.id)) throw new Error("This Dragons session already has an active run.");
 
-    const runId = this.createRunId();
-    if (!runId || this.activeRuns.has(runId)) throw new Error("Unable to allocate a unique runtime run ID.");
-    const queue = new AsyncEventQueue<RuntimeEvent>(DEFAULT_MAX_RUNTIME_QUEUED_EVENTS);
-    const controller = new AbortController();
-    const active: ActiveRun = { controller, queue, pendingApprovals: new Map(), completion: Promise.resolve(undefined as never), eventStreamTruncated: false, textRedactor: new RuntimeTextRedactor() };
-    this.activeRuns.set(runId, active);
-    this.activeRunIdsBySession.set(session.id, runId);
-    this.enqueueRuntimeEvent(active, { type: "run_started", runId, sessionId: session.id, provider: session.provider, model: session.model });
+      const runId = this.createRunId();
+      if (!runId || this.activeRuns.has(runId)) throw new Error("Unable to allocate a unique runtime run ID.");
+      const queue = new AsyncEventQueue<RuntimeEvent>(DEFAULT_MAX_RUNTIME_QUEUED_EVENTS);
+      const controller = new AbortController();
+      const active: ActiveRun = { controller, queue, pendingApprovals: new Map(), completion: Promise.resolve(undefined as never), eventStreamTruncated: false, textRedactor: new RuntimeTextRedactor() };
+      this.activeRuns.set(runId, active);
+      this.activeRunIdsBySession.set(session.id, runId);
+      this.enqueueRuntimeEvent(active, { type: "run_started", runId, sessionId: session.id, provider: session.provider, model: session.model });
 
-    active.completion = this.executeRun(runId, session, content, controller.signal, active)
-      .then((result) => {
-        this.flushAssistantText(active, runId, session.id);
-        this.enqueueRuntimeEvent(active, { type: "run_completed", runId, sessionId: session.id, result });
-        return result;
-      })
-      .catch(async (error: unknown) => {
-        this.flushAssistantText(active, runId, session.id);
-        await this.rejectPendingMemorySuggestions(runId);
-        if (error instanceof AgentRunCancelledError || controller.signal.aborted) {
-          this.enqueueRuntimeEvent(active, { type: "run_cancelled", runId, sessionId: session.id });
-          throw new AgentRunCancelledError();
-        }
-        const message = boundedClientText(error instanceof Error ? error.message : "Unexpected runtime error.");
-        this.enqueueRuntimeEvent(active, { type: "run_failed", runId, sessionId: session.id, message });
-        throw new RuntimeRunError(message);
-      })
-      .finally(() => {
-        this.denyPendingAuthorizations(active);
-        queue.close();
-        if (this.activeRuns.get(runId) === active) this.activeRuns.delete(runId);
-        if (this.activeRunIdsBySession.get(session.id) === runId) this.activeRunIdsBySession.delete(session.id);
-      });
+      const releaseExecution = release;
+      active.completion = this.executeRun(runId, session, content, controller.signal, active)
+        // Cleanup must settle before terminal success/failure and share their safe error boundary.
+        .finally(async () => { await releaseExecution?.(); })
+        .then((result) => {
+          this.flushAssistantText(active, runId, session.id);
+          this.enqueueRuntimeEvent(active, { type: "run_completed", runId, sessionId: session.id, result });
+          return result;
+        })
+        .catch(async (error: unknown) => {
+          this.flushAssistantText(active, runId, session.id);
+          await this.rejectPendingMemorySuggestions(runId);
+          if (error instanceof AgentRunCancelledError || controller.signal.aborted) {
+            this.enqueueRuntimeEvent(active, { type: "run_cancelled", runId, sessionId: session.id });
+            throw new AgentRunCancelledError();
+          }
+          const message = boundedClientText(error instanceof Error ? error.message : "Unexpected runtime error.");
+          this.enqueueRuntimeEvent(active, { type: "run_failed", runId, sessionId: session.id, message });
+          throw new RuntimeRunError(message);
+        })
+        .finally(() => {
+          try {
+            this.denyPendingAuthorizations(active);
+            queue.close();
+          } finally {
+            if (this.activeRuns.get(runId) === active) this.activeRuns.delete(runId);
+            if (this.activeRunIdsBySession.get(session.id) === runId) this.activeRunIdsBySession.delete(session.id);
+          }
+        });
+      release = undefined; // Ownership transfers to completion, including cancellation and cleanup.
 
-    return {
-      id: runId,
-      sessionId: session.id,
-      events: queue,
-      result: active.completion,
-      cancel: () => this.cancelRun(runId),
-    };
+      return {
+        id: runId,
+        sessionId: session.id,
+        events: queue,
+        result: active.completion,
+        cancel: () => this.cancelRun(runId),
+      };
+    } catch (error: unknown) {
+      throw new RuntimeRunError(boundedClientText(error instanceof Error ? error.message : "Runtime admission failed."));
+    } finally {
+      try {
+        await release?.();
+      } catch (error: unknown) {
+        throw new RuntimeRunError(boundedClientText(error instanceof Error ? error.message : "Runtime admission cleanup failed."));
+      } finally {
+        this.pendingAdmissions.delete(input.sessionId);
+      }
+    }
   }
 
   cancelRun(runId: string): boolean {

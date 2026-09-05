@@ -8,6 +8,7 @@ import {
   type RuntimeSession,
   type RuntimeStatus,
 } from "../runtime.js";
+import { observeRuntimeRun } from "../runtime-observation.js";
 
 export type TuiState = {
   session?: RuntimeSession;
@@ -26,6 +27,7 @@ type Submission = {
   assistant?: TuiState["messages"][number];
   cancelled: boolean;
   ended: boolean;
+  observing?: boolean;
 };
 
 const MAX_MESSAGE_CHARACTERS = 16_000;
@@ -60,7 +62,7 @@ export class TuiController {
       } catch {
         if (!this.closed) this.state.error = "Unable to initialize session. Check the session ID, provider, and model.";
       } finally {
-        if (!this.closed) { this.state.busy = false; this.changed(); }
+        if (!this.closed) { this.state.busy = false; this.attachObservation(); this.changed(); }
       }
     });
     this.changed();
@@ -68,6 +70,7 @@ export class TuiController {
   }
 
   async submit(content: string): Promise<void> {
+    this.attachObservation();
     if (this.closed || this.state.busy || !content.trim()) return;
     if (!this.state.session) {
       this.state.error = "Initialize a session before starting a run.";
@@ -108,7 +111,7 @@ export class TuiController {
 
   cancel(): boolean {
     const submission = this.submission;
-    if (!submission || !this.current(submission) || submission.cancelled || submission.ended) return false;
+    if (!submission || submission.observing || !this.current(submission) || submission.cancelled || submission.ended) return false;
     submission.cancelled = true;
     this.state.approval = undefined;
     submission.handle?.cancel();
@@ -129,6 +132,7 @@ export class TuiController {
       this.state.status = status;
       this.state.session = status.session;
       this.state.background = background.filter((task) => task.sessionId === sessionId);
+      this.attachObservation();
       this.changed();
     } catch {
       if (!this.closed && version === this.refreshVersion && this.state.session?.id === sessionId) {
@@ -163,10 +167,22 @@ export class TuiController {
     return !this.closed && this.submission === submission && this.state.session?.id === submission.sessionId;
   }
 
-  private async consume(submission: Submission, content: string): Promise<void> {
+  private attachObservation(): void {
+    if (this.closed || this.state.busy || !this.state.session) return;
+    const handle = observeRuntimeRun(this.runtime, this.state.session.id);
+    if (!handle) return;
+    const submission: Submission = { sessionId: handle.sessionId, handle, cancelled: false, ended: false, observing: true };
+    this.submission = submission;
+    this.state.busy = true;
+    this.message("notice", "Observing another client's active run. Its owner controls approval and cancellation.");
+    this.pending = this.consume(submission, "", handle);
+    this.changed();
+  }
+
+  private async consume(submission: Submission, content: string, observed?: RuntimeRunHandle): Promise<void> {
     try {
       if (this.closed || submission.cancelled) return;
-      const handle = await this.runtime.sendUserInput({ sessionId: submission.sessionId, content });
+      const handle = observed ?? await this.runtime.sendUserInput({ sessionId: submission.sessionId, content });
       // A run can reject before its event stream is drained. Observe both outcomes now.
       const outcome = handle.result.then(
         (result) => ({ ok: true as const, result }),

@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import termios
 import time
+import sys
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -27,7 +28,7 @@ class Probe:
         self.before = termios.tcgetattr(self.slave)
         self.resize(100, 24, notify=False)
         self.proc = subprocess.Popen(
-            ["node", str(REPO / "scripts/tui-pty-fixture.mjs"), str(root), *extra],
+            ["node", str(REPO / "scripts/tui-pty-fixture.mjs"), str(root), *(["--shared"] if "--shared" in sys.argv else []), *extra],
             cwd=REPO, stdin=self.slave, stdout=self.slave, stderr=self.slave,
             start_new_session=True,
             # Keep the parent's slave usable after child exit (macOS revokes a
@@ -177,7 +178,7 @@ with tempfile.TemporaryDirectory(prefix="dragons-m72-pty-") as directory:
     try:
         p.wait(lambda: session_id in p.screen and "READY" in p.screen, "resume startup")
         p.send("resume-check\r")
-        p.wait(lambda: "RESUME CONTINUATION OK" in p.screen, "resumed model continuation")
+        p.wait(lambda: "RESUME CONTINUATION OK" in p.screen and " | READY" in p.screen, "resumed model continuation settled")
         p.exit(key="\x03")
         checks.append("session resume retains continuation + idle Ctrl+C restoration")
     finally:
@@ -190,4 +191,4 @@ with tempfile.TemporaryDirectory(prefix="dragons-m72-pty-") as directory:
             checks.append(f"{sig.name} terminal restoration + canonical input")
         finally:
             p.close()
-print(json.dumps({"result": "M72_PTY_ACCEPTANCE_OK", "checks": checks, "count": len(checks), "live_provider_inference": False}, indent=2))
+print(json.dumps({"result": "M75_SHARED_PTY_ACCEPTANCE_OK" if "--shared" in sys.argv else "M72_PTY_ACCEPTANCE_OK", "checks": checks, "count": len(checks), "live_provider_inference": False}, indent=2))

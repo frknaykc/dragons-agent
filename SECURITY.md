@@ -1,5 +1,11 @@
 # Security Policy
 
+## Shared-session boundary
+
+The shared host is a coordinator above the existing core, not a second executor. It reserves a single foreground owner per session before asynchronous admission, requires revision refresh after another writer, and routes approval/cancellation only to the owning connection. Observer streams omit actionable approval IDs, are independently bounded, and cannot cancel an owner's work when detached. Client IDs do not authenticate callers; trusted host composition and remote principal session access remain required. The optional multi-connection remote mode never relaxes bearer, Origin, Host, sequence or session-ownership checks.
+
+Default file-backed runtimes and persisted interactive CLI runs take an independent exclusive execution lease before loading current continuation, retaining it through execution and persistence. A stale lock is a fail-closed condition, not permission to steal ownership. Injected custom stores without `acquireExecution` do not establish cross-process coordination. Shared revisions cover foreground writes admitted by the shared host, not arbitrary out-of-band edits; the underlying core must not be shared with independent writers.
+
 ## Reporting a vulnerability
 
 A private security reporting channel has not yet been established for this repository. Do **not** include API keys, access or refresh tokens, authorization headers, credentials, private project data, or exploit payloads containing sensitive data in a public issue.

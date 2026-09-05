@@ -7,7 +7,9 @@ import type { DragonsRuntime, RuntimeEvent } from "../runtime.js";
 export type RemoteServerOptions = {
   /** Trusted host supplies cryptographically random, unique bearer tokens (>=32 characters). */
   principals: Array<{ id: string; token: string; sessionIds?: string[] }>;
-  createRuntime: (principalId: string) => Promise<DragonsRuntime>;
+  createRuntime: (principalId: string, connectionId: string) => Promise<DragonsRuntime>;
+  /** Opt-in shared hosts may admit up to eight independently owned clients per principal. */
+  maxConnectionsPerPrincipal?: number;
   port?: number;
   allowedOrigins?: string[];
 };
@@ -19,7 +21,7 @@ const REQUEST_TIMEOUT = 10_000;
 const IDLE_TIMEOUT = 10_000;
 const CLEANUP_TIMEOUT = 1_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-type Principal = { id: string; digest: Buffer; sessions: Set<string>; inFlight: number; tokens: number; last: number; connection?: Connection };
+type Principal = { id: string; digest: Buffer; sessions: Set<string>; pendingCreates: number; inFlight: number; tokens: number; last: number; connections: Map<string, Connection> };
 type Connection = { id: string; principal: Principal; closed: boolean; sequence: number; bridge?: DesktopBridge; factory?: Promise<DragonsRuntime>; stream?: ServerResponse; idle?: NodeJS.Timeout; heartbeat?: NodeJS.Timeout; closing?: Promise<void> };
 class HttpFailure extends Error {
   constructor(readonly status: number, readonly code: string) { super("Remote request rejected."); }
@@ -55,6 +57,8 @@ export async function startRemoteServer(options: RemoteServerOptions): Promise<R
     throw new Error("Invalid remote server configuration.");
   }
   const ids = new Set<string>();
+  const perPrincipal = options.maxConnectionsPerPrincipal ?? 1;
+  if (!Number.isSafeInteger(perPrincipal) || perPrincipal < 1 || perPrincipal > 8) throw new Error("Invalid remote connection limit.");
   const digests = new Set<string>();
   const principals: Principal[] = options.principals.map((entry) => {
     if (!entry || typeof entry.id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(entry.id)
@@ -67,7 +71,7 @@ export async function startRemoteServer(options: RemoteServerOptions): Promise<R
     const key = digest.toString("hex");
     if (digests.has(key)) throw new Error("Duplicate remote principal credential.");
     digests.add(key); ids.add(entry.id);
-    return { id: entry.id, digest, sessions: new Set(entry.sessionIds ?? []), inFlight: 0, tokens: 120, last: Date.now() };
+    return { id: entry.id, digest, sessions: new Set(entry.sessionIds ?? []), pendingCreates: 0, inFlight: 0, tokens: 120, last: Date.now(), connections: new Map() };
   });
   if (options.allowedOrigins !== undefined && (!Array.isArray(options.allowedOrigins) || options.allowedOrigins.length > 32)) throw new Error("Invalid remote origins.");
   const origins = new Set(options.allowedOrigins ?? []);
@@ -99,7 +103,7 @@ export async function startRemoteServer(options: RemoteServerOptions): Promise<R
       else if (connection.factory) { const runtime = await connection.factory; await runtime.dispose(); }
     }).catch(() => {}).finally(() => {
       connections.delete(connection);
-      if (connection.principal.connection === connection) connection.principal.connection = undefined;
+      connection.principal.connections.delete(connection.id);
     });
     return bounded(connection.closing);
   }
@@ -194,16 +198,16 @@ export async function startRemoteServer(options: RemoteServerOptions): Promise<R
       authenticated.tokens -= 1; authenticated.inFlight += 1; principal = authenticated;
       if (request.method === "POST" && request.url === "/connect") {
         // Reserve before body I/O and before factory invocation.
-        if (principal.connection || connections.size >= 32 || creating >= 32) throw new HttpFailure(409, "CONFLICT");
+        if (principal.connections.size >= perPrincipal || connections.size >= 32 || creating >= 32) throw new HttpFailure(409, "CONFLICT");
         owned = { id: randomUUID(), principal, sequence: 0, closed: false };
-        principal.connection = owned; connections.add(owned);
+        principal.connections.set(owned.id, owned); connections.add(owned);
         const connection = owned;
         const input = await body(request);
         if (!object(input) || Object.keys(input).length !== 0) throw new HttpFailure(400, "INVALID_MESSAGE");
         if (connection.closed || closing || response.destroyed) throw new HttpFailure(409, "CLOSED");
         creating += 1;
         let runtime: DragonsRuntime;
-        connection.factory = Promise.resolve().then(() => factory(principal!.id));
+        connection.factory = Promise.resolve().then(() => factory(principal!.id, connection.id));
         try { runtime = await connection.factory; } finally { creating -= 1; }
         if (connection.closed || closing || response.destroyed) { await disconnect(connection); throw new HttpFailure(409, "CLOSED"); }
         connection.bridge = new DesktopBridge(runtime, (event) => emit(connection, event));
@@ -211,7 +215,8 @@ export async function startRemoteServer(options: RemoteServerOptions): Promise<R
         respond(response, 200, { ok: true, value: { connectionId: connection.id } });
         return;
       }
-      const connection = principal.connection;
+      const connectionId = request.headers["x-dragons-connection"];
+      const connection = typeof connectionId === "string" ? principal.connections.get(connectionId) : undefined;
       if (!connection || connection.closed || !connection.bridge || request.headers["x-dragons-connection"] !== connection.id) throw new HttpFailure(403, "NOT_OWNED");
       owned = connection;
       if (request.method === "GET" && request.url === "/events") {
@@ -243,8 +248,11 @@ export async function startRemoteServer(options: RemoteServerOptions): Promise<R
       const command = input.command;
       if (command.type === "send" && (!connection.stream || connection.stream.destroyed)) throw new HttpFailure(409, "STREAM_REQUIRED");
       if (command.type === "resume" && (typeof command.sessionId !== "string" || !principal.sessions.has(command.sessionId))) throw new HttpFailure(403, "NOT_OWNED");
-      if (command.type === "create" && principal.sessions.size >= 128) throw new HttpFailure(409, "BUSY");
-      const reply: DesktopBridgeReply = await connection.bridge.request(command);
+      if (command.type === "create" && principal.sessions.size + principal.pendingCreates >= 128) throw new HttpFailure(409, "BUSY");
+      if (command.type === "create") principal.pendingCreates++;
+      let reply: DesktopBridgeReply;
+      try { reply = await connection.bridge.request(command); }
+      finally { if (command.type === "create") principal.pendingCreates--; }
       if (command.type === "create" && reply.ok && object(reply.value) && typeof reply.value.id === "string") principal.sessions.add(reply.value.id);
       respond(response, 200, reply);
     })().catch(async (error: unknown) => {
