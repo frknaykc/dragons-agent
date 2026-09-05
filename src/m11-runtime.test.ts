@@ -190,15 +190,31 @@ test("cancellation after one tool prevents later queued tool calls", async () =>
   assert.equal(laterExecutions, 0);
 });
 
-test("cancellation during a shell command terminates it before its delayed side effect", async () => {
+function validatedFixturePid(text: string): number {
+  const pid = Number(text);
+  assert.ok(Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid, "Expected an owned child PID, never a process group.");
+  return pid;
+}
+
+test("shell fixture validation cannot assign an invalid cleanup PID", () => {
+  for (const text of ["", "0", "-1", "invalid", String(process.pid)]) {
+    let cleanupPid: number | undefined;
+    assert.throws(() => { cleanupPid = validatedFixturePid(text); });
+    assert.equal(cleanupPid, undefined);
+  }
+});
+
+test("cancellation during a shell command terminates its process before a gated side effect", async () => {
   const directory = await workspace();
   const controller = new AbortController();
   const started = join(directory, "started.txt");
   const delayed = join(directory, "delayed.txt");
-  const command = "node -e \"const fs=require('node:fs'); fs.writeFileSync('started.txt','started'); setTimeout(() => fs.writeFileSync('delayed.txt','late'), 400)\"";
+  const command = "node -e \"const fs=require('node:fs'); fs.writeFileSync('started.tmp',String(process.pid)); fs.renameSync('started.tmp','started.txt'); setInterval(() => { if(fs.existsSync('release.txt')) { fs.writeFileSync('delayed.txt','late'); process.exit(0); } }, 10)\"";
+  let fixturePid: number | undefined;
+  let run: ReturnType<typeof runAgent> | undefined;
 
   try {
-    const run = runAgent({
+    run = runAgent({
       task: "Run the long command.",
       model: modelWithCalls([{ callId: "shell-call", name: "shell", arguments: JSON.stringify({ command }) }]),
       tools: await createCodingTools(directory),
@@ -206,11 +222,22 @@ test("cancellation during a shell command terminates it before its delayed side 
       signal: controller.signal,
     } as Parameters<typeof runAgent>[0]);
 
+    void run.catch(() => undefined);
     await waitForFile(started);
+    fixturePid = validatedFixturePid(await readFile(started, "utf8"));
     controller.abort();
     await assert.rejects(run, { name: "AgentRunCancelledError" });
+    // Cancellation completion, not a wall-clock race, must precede the possible effect.
+    await writeFile(join(directory, "release.txt"), "released", "utf8");
+    assert.throws(() => process.kill(fixturePid!, 0), { code: "ESRCH" });
+    fixturePid = undefined;
     await assert.rejects(access(delayed), { code: "ENOENT" });
   } finally {
+    controller.abort();
+    await run?.catch(() => undefined);
+    if (fixturePid !== undefined && fixturePid > 1 && fixturePid !== process.pid) {
+      try { process.kill(fixturePid, "SIGKILL"); } catch { /* The fixture has already exited. */ }
+    }
     await rm(directory, { recursive: true, force: true });
   }
 });
