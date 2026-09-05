@@ -12,6 +12,11 @@
     "url": "https://github.com/frknaykc/dragons-agent/issues"
   },
   "type": "module",
+  "types": "./dist/runtime.d.ts",
+  "exports": {
+    ".": "./dist/runtime.js",
+    "./runtime": "./dist/runtime.js"
+  },
   "bin": {
     "dragons": "./dist/cli.js"
   },
@@ -22,12 +27,19 @@
     "LICENSE",
     "package.json",
     "!dist/**/*.test.js",
+    "!dist/**/*.test.d.ts",
     "!dist/acceptance-*.js",
+    "!dist/acceptance-*.d.ts",
     "!dist/provider-acceptance.js",
+    "!dist/provider-acceptance.d.ts",
     "!dist/live-smoke.js",
+    "!dist/live-smoke.d.ts",
     "!dist/chatgpt-stream-trace.js",
+    "!dist/chatgpt-stream-trace.d.ts",
     "!dist/mcp-mock-server.js",
-    "!dist/mcp-official-sdk-server.js"
+    "!dist/mcp-mock-server.d.ts",
+    "!dist/mcp-official-sdk-server.js",
+    "!dist/mcp-official-sdk-server.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

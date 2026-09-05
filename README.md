@@ -204,6 +204,30 @@ CLI → Agent runtime → Provider → tool calls → authorization → tools �
 
 The provider-neutral runtime is event-driven: it owns ordered tool execution, authorization, cancellation, workspace boundaries, and bounded advisory context while emitting streamed text and tool lifecycle events. Providers supply model output and tool-call continuations through that runtime.
 
+## Runtime API
+
+The package also exposes the programmatic runtime facade from `dragons-agent` (or the explicit `dragons-agent/runtime` subpath). It is a structured client API over the existing `runAgent()` authorization boundary, not a provider-specific execution path.
+
+```ts
+import { createDragonsRuntime } from "dragons-agent";
+
+const runtime = await createDragonsRuntime({ workingDirectory: process.cwd() });
+const session = await runtime.createSession();
+const run = await runtime.sendUserInput({ sessionId: session.id, content: "Inspect this project." });
+
+for await (const event of run.events) {
+  // assistant_delta, tool_activity, approval_requested, event_stream_truncated, run_completed, …
+}
+await run.result;
+await runtime.dispose();
+```
+
+`providers()`, `createSession()`, `resumeSession()`, `status()`, and `sendUserInput()` return typed client-safe summaries. Transcript bodies, provider continuation state, tools, stores, raw arguments, model objects, and credentials are not exposed. WRITE and EXECUTE requests are surfaced as `approval_requested` events and must be resolved with `resolveAuthorization()`; the underlying `runAgent()` authorization boundary remains authoritative. A failed run rejects with a redacted `RuntimeRunError`, and cancellation emits `run_cancelled` rather than normal completion. A run event iterable is a single-consumer projection and must not be shared between clients. Each run caps both queued events and outstanding event requests at 256; an excess concurrent `next()` request resolves with `done`. When presentation events are dropped under backpressure, the client receives `event_stream_truncated` while interactive and terminal lifecycle events are retained.
+
+MCP lifecycle is explicit and process-local: a trusted host may pass an existing `McpClientManager`, then call `connectMcp()` and `disconnectMcp()`. The runtime exposes safe status metadata only, never endpoints, credentials, raw errors, or remote descriptions; it closes only connections it opened when disposed. `startBackgroundTask()`, `listBackgroundTasks()`, and `cancelBackgroundTask()` provide explicit, session-bound, read-only process-local work with redacted summaries. Background task prompts, handles, approvals, and continuation state are never persisted or re-exposed. Disposal rejects late run admission, waits for pending MCP connections and releases their leases; concurrent disposal callers await the same cleanup.
+
+Credential-shaped text is redacted incrementally across provider chunk boundaries, including quoted values and Basic/Bearer payloads. Incomplete tokens are buffered with a fixed bound; oversized tokens produce a visible truncation marker. Clients must concatenate `assistant_delta` text rather than assume provider chunk boundaries, and must not append the final result again to an already streamed answer. Redaction is not permission to render model/tool content as executable code.
+
 ## Diagnostics
 
 Use `/diagnostics` during an interactive session for a concise local recent-run summary. Diagnostics are bounded and process-local.
