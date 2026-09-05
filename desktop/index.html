@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Dragons Agent</title>
+<link rel="stylesheet" href="style.css">
+<script src="renderer.js" defer></script>
+</head>
+<body>
+<header><div><small>LOCAL RUNTIME / DESKTOP FOUNDATION</small><h1>Dragons Agent</h1></div><span id="status" role="status">Starting</span></header>
+<section aria-label="Session setup" class="setup">
+<label>Provider<select id="provider"><option value="">Host default</option></select></label>
+<label>Model<input id="model" maxlength="256" placeholder="Provider default"></label>
+<button id="create">New session</button>
+<label>Session ID<input id="resume-id" maxlength="128" placeholder="Saved session ID"></label>
+<button id="resume">Resume</button>
+</section>
+<p id="session">Create or resume a session. Credentials are configured on the trusted host, never in this window.</p>
+<main>
+<section class="conversation"><h2>Conversation</h2><div id="messages" role="log" aria-label="Conversation"></div></section>
+<aside><h2>Tool activity</h2><pre id="activity" aria-live="polite">No activity.</pre></aside>
+</main>
+<section id="approval" hidden aria-label="Operation approval"><strong id="approval-label"></strong><p>Allow only if you trust this operation. Approval applies once to this exact request.</p><button id="deny">Deny</button><button id="allow">Allow once</button></section>
+<form id="composer"><label for="prompt">Coding request</label><textarea id="prompt" maxlength="16000" rows="3" placeholder="Describe the change to make in the launch workspace…" required></textarea><div><button id="send" type="submit" disabled>Send request</button><button id="cancel" type="button" disabled>Cancel run</button></div></form>
+<p id="error" role="alert"></p>
+</body>
+</html>

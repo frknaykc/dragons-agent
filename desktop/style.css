@@ -1,0 +1,30 @@
+:root { color-scheme: light; font-family: -apple-system, 'Helvetica Neue', sans-serif; color: #2f3437; background: #f7f6f3; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 28px 36px; }
+header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #deddd8; margin-bottom: 24px; }
+small { font-size: 10px; letter-spacing: .14em; color: #787774; }
+h1 { font: 32px Georgia, serif; margin: 8px 0 20px; letter-spacing: -.03em; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin: 0 0 16px; }
+#status { font-size: 12px; background: #edf3ec; padding: 6px 10px; }
+.setup { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+label { display: flex; flex-direction: column; font-size: 12px; gap: 6px; }
+input, select, textarea { font: inherit; color: inherit; border: 1px solid #cfcec8; background: white; border-radius: 4px; padding: 9px; }
+input { width: 165px; }
+button { border: 1px solid #cfcec8; border-radius: 4px; padding: 9px 13px; font: inherit; font-size: 12px; color: #2f3437; background: #fff; cursor: pointer; }
+button:hover { background: #ecebe6; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid #346538; outline-offset: 3px; }
+#send { background: #2f3437; color: white; }
+#session { color: #787774; font: 11px ui-monospace, monospace; overflow-wrap: anywhere; margin: 18px 0; }
+main { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; height: 300px; }
+.conversation, aside { padding: 20px; border: 1px solid #eaeaea; background: white; min-width: 0; overflow: auto; border-radius: 8px; }
+pre, #messages p { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; }
+#messages .user { border-left: 2px solid #cfcec8; padding-left: 12px; color: #787774; }
+#messages .assistant { margin-bottom: 24px; }
+#approval { border: 1px solid #cfbf9b; background: #fbf3db; padding: 16px; margin-top: 16px; font-size: 13px; }
+#approval p { margin: 8px 0; }
+#composer { margin-top: 20px; }
+textarea { width: 100%; resize: vertical; margin: 8px 0; }
+#composer div { display: flex; gap: 8px; }
+#error { color: #9f2f2d; font-size: 13px; min-height: 20px; }
+@media (max-width: 720px) { body { padding: 20px; } main { grid-template-columns: 1fr; height: auto; } .conversation { height: 230px; } aside { max-height: 130px; } }

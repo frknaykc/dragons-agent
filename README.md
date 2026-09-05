@@ -97,6 +97,25 @@ node --test dist/tui-controller.test.js dist/tui-screen.test.js dist/tui-termina
 python3 scripts/verify-tui-pty.py  # POSIX PTY fixture; not a native-emulator visual test
 ```
 
+## Desktop foundation
+
+The source-checkout desktop client uses a small Electron shell with plain local HTML/CSS/JavaScript, rather than a UI framework or a second agent engine. Electron is a **development-only** dependency; this milestone does not ship an installer or change the CLI package's installation requirements.
+
+```sh
+pnpm install --frozen-lockfile
+pnpm desktop
+# To choose a different trusted workspace after building:
+# cd /path/to/workspace
+# /path/to/DragonsAgent/node_modules/.bin/electron /path/to/DragonsAgent/desktop/main.mjs
+pnpm acceptance:desktop  # actual local window; deterministic provider, no live inference
+```
+
+Launch uses the working directory as the immutable workspace. Configure credentials through existing host-side provider authentication/configuration, not the window. Choose **Host default** to use configured provider/model/limits, or select an explicit provider/model; create a session or resume its ID, send a request, observe streamed text and tool activity, allow once/deny the exact pending operation, or cancel. Resume restores saved continuation, not prior message display. Provider/model changes apply to new sessions only.
+
+The sandboxed renderer has no Node integration. Its isolated preload exposes only validated runtime commands and a bounded event drain. Only the exact local main frame may invoke them; there is no filesystem, shell, credential, or arbitrary Electron RPC. The main process owns the M71 runtime and existing workspace/authorization boundary. All content uses text nodes; scripts, navigation, popups, webviews, permissions and external network/content are blocked in the renderer. The event queue is capped at 256 events / 512 Ki characters and disconnects/cancels on overflow; the UI retains at most 80 messages of 32,000 characters and 16,000 activity characters. Closing/crashing the window cancels and disposes its runtime. Memory suggestions are explicitly rejected; plan/background editing and automatic MCP connection are outside this foundation.
+
+Deterministic bridge tests run on all CI platforms without a GUI. `acceptance:desktop` separately exercises the actual Electron window, sandbox/preload, configured model defaults, inert model content, streaming, real isolated write allow/deny, cancellation, resume and reload cleanup. Reload is a fail-closed disconnect: the window closes and cancels its run; reopen and resume explicitly. Neither test path establishes live provider acceptance.
+
 ## Providers
 
 ### OpenAI Platform API

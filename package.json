@@ -46,6 +46,8 @@
     "typecheck": "tsc --noEmit",
     "test": "pnpm build && node --test dist/*.test.js dist/provider/*.test.js",
     "dragons": "pnpm build && node dist/cli.js",
+    "desktop": "pnpm build && electron desktop/main.mjs",
+    "acceptance:desktop": "pnpm build && electron scripts/verify-desktop-smoke.mjs",
     "smoke:live": "pnpm build && node dist/live-smoke.js",
     "acceptance:openai": "pnpm build && node dist/acceptance-openai.js",
     "acceptance:chatgpt": "pnpm build && node dist/acceptance-chatgpt.js",
@@ -63,6 +65,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "electron": "44.2.0",
     "typescript": "^5.9.0"
   },
   "engines": {
