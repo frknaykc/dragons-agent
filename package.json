@@ -57,6 +57,7 @@
     "smoke:live": "pnpm build && node dist/live-smoke.js",
     "acceptance:openai": "pnpm build && node dist/acceptance-openai.js",
     "acceptance:chatgpt": "pnpm build && node dist/acceptance-chatgpt.js",
+    "acceptance:provider": "pnpm build && node dist/acceptance-live.js",
     "acceptance:mcp": "pnpm build && node --test dist/m32-mcp-acceptance.test.js",
     "verify:package": "pnpm build && node scripts/verify-package.mjs",
     "release:check": "node scripts/release-check.mjs",

@@ -143,7 +143,7 @@ async function parseSse(
   };
 
   const cancelReader = (): void => {
-    void reader.cancel();
+    void reader.cancel().catch(() => undefined);
   };
   signal?.addEventListener("abort", cancelReader, { once: true });
   try {

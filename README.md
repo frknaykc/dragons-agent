@@ -116,6 +116,12 @@ The sandboxed renderer has no Node integration. Its isolated preload exposes onl
 
 Deterministic bridge tests run on all CI platforms without a GUI. `acceptance:desktop` separately exercises the actual Electron window, sandbox/preload, configured model defaults, inert model content, streaming, real isolated write allow/deny, cancellation, resume and reload cleanup. Reload is a fail-closed disconnect: the window closes and cancels its run; reopen and resume explicitly. Neither test path establishes live provider acceptance.
 
+## Live provider acceptance
+
+From a source checkout, `pnpm acceptance:provider --live --provider chatgpt` runs a bounded READ-only acceptance through the public runtime and real registered adapter. Other provider IDs are `openai-api`, `anthropic`, `gemini`, `openrouter`, and `local`; each uses its existing credential/configuration path. It uses an isolated temporary fixture, checks native streaming, tool-result continuation, multi-turn/session isolation and cancellation, and removes temporary state. It does not install local runtimes or authorize effectful tools.
+
+The [M76 evidence and configuration matrix](docs/m76-live-provider-acceptance.md) separates actual live verification from missing credentials/runtimes and deterministic coverage. Live checks are explicit opt-in, not part of ordinary credential-free CI. An incomplete attempt requires evidence-based classification, not an automatic product-defect or upstream-failure label.
+
 ## Web / remote runtime foundation
 
 `dragons-agent/remote/server` exports `startRemoteServer`; `dragons-agent/remote/client` exports the browser-compatible `RemoteClient` (fetch + SSE, no Node imports in emitted client JavaScript). This is a protocol/SDK foundation, not a hosted website or permission to publish a local agent to the internet. The source-checkout `pnpm remote` launcher requires a host-provided random base64url `DRAGONS_REMOTE_TOKEN` (32–256 characters), prints only its loopback URL, and uses the launch workspace and existing host configuration. Never put transport tokens in URLs, command arguments, source, browser storage or logs.

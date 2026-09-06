@@ -183,7 +183,7 @@ async function parseSse(response: Response, onChunk: (chunk: Record<string, unkn
   const decoder = new TextDecoder();
   let buffered = "";
   let sawDone = false;
-  const cancelReader = (): void => { void reader.cancel(); };
+  const cancelReader = (): void => { void reader.cancel().catch(() => undefined); };
   signal?.addEventListener("abort", cancelReader, { once: true });
   const consume = (block: string): void => {
     const data = block.split(/\r?\n/)
