@@ -54,6 +54,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: node scripts/verify-desktop-credentials.mjs "desktop-artifacts/win-unpacked/Dragons Agent.exe" "desktop-artifacts/win-unpacked/resources/app.asar"
+      - name: Exercise Windows native workspace picker
+        if: runner.os == 'Windows'
+        run: node scripts/verify-desktop-picker.mjs "desktop-artifacts/win-unpacked/Dragons Agent.exe"
       # Linux needs a display and a working Chromium sandbox. Do not add --no-sandbox.
       - name: Prepare sandboxed Linux application (ephemeral runner only)
         if: runner.os == 'Linux'
@@ -76,6 +79,14 @@ jobs:
       - name: Verify packaged Linux native credential stores (synthetic accounts)
         if: runner.os == 'Linux'
         run: node scripts/verify-desktop-credentials.mjs /opt/dragons-ci/dragons-agent /opt/dragons-ci/resources/app.asar
+      - name: Exercise Linux native workspace picker
+        if: runner.os == 'Linux'
+        env:
+          CHROME_DEVEL_SANDBOX: /opt/dragons-ci/chrome-sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xdotool
+          xvfb-run --auto-servernum node scripts/verify-desktop-picker.mjs /opt/dragons-ci/dragons-agent
       - name: Remove Linux runner sandbox configuration
         if: always() && runner.os == 'Linux'
         run: |
