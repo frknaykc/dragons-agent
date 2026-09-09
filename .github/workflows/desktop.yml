@@ -96,6 +96,7 @@ jobs:
       - name: Install, exercise and purge Linux DEB
         if: runner.os == 'Linux'
         run: |
+          node --test scripts/desktop-linux-acceptance.test.mjs
           packages=(desktop-artifacts/*.deb)
           [[ ${#packages[@]} -eq 1 ]]
           node scripts/verify-desktop-linux.mjs deb "${packages[0]}"

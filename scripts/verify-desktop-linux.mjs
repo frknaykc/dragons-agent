@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { mkdtemp, writeFile, unlink, rmdir, access, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { assertNoDebIntegration, pathExists as exists } from './desktop-linux-acceptance.mjs';
 const exec = promisify(execFile);
 const mode = process.argv[2];
 const artifact = resolve(process.argv[3] || '.');
@@ -25,7 +26,7 @@ const run = async (file, args, extra = {}) => {
     throw error;
   }
 };
-const exists = async (path) => { try { await lstat(path); return true; } catch (e) { if (e.code === 'ENOENT') return false; throw e; } };
+
 async function mountPresent(path) {
   try { await run('findmnt', ['--mountpoint', path, '--noheadings', '--output', 'TARGET']); return true; }
   catch (e) { if (e.code === 1) return false; throw e; }
@@ -73,6 +74,7 @@ async function deb() {
     await run('dpkg-query', ['--status', name]);
     throw new Error('Existing package');
   } catch (e) { if (e.code !== 1) throw e; }
+  await assertNoDebIntegration({ run });
   let attempted = false;
   try {
     stage = 'deb-install';
@@ -98,7 +100,7 @@ async function deb() {
     assert.equal(await exists(executable), false);
     assert.equal(await exists(join(directory, 'resources', 'app.asar')), false);
     assert.equal(await exists(directory), false, 'Package installation directory remains');
-    assert.equal(await exists('/etc/apparmor.d/dragons-agent'), false, 'Package AppArmor profile remains');
+    await assertNoDebIntegration({ run });
     try { await run('dpkg-query', ['--status', name]); throw new Error('Package still registered'); }
     catch (e) { if (e.code !== 1) throw e; }
     attempted = false;
@@ -145,6 +147,9 @@ async function appimage() {
     if (mount) assert.equal(await mountPresent(mount), false);
     // Unknown mount startup is not a successful cleanup; retain the image conservatively.
     assert.ok(mount && stopped, 'Mount cleanup unverified');
+    // Remove only an empty mountpoint after confirmed unmount; never recursively delete it.
+    if (await exists(mount)) await rmdir(mount);
+    assert.equal(await exists(mount), false);
     if (installed) await run('sudo', ['rm', '--', image]);
     assert.equal(await exists(image), false);
   }
