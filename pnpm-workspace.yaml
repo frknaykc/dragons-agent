@@ -1,2 +1,4 @@
+allowBuilds:
+  electron-winstaller: false
 minimumReleaseAgeExclude:
   - openai@7.9.0

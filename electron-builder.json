@@ -1,0 +1,21 @@
+{
+  "appId": "com.dragonsagent.desktop",
+  "productName": "Dragons Agent",
+  "artifactName": "Dragons-Agent-${version}-${os}-${arch}.${ext}",
+  "directories": { "output": "desktop-artifacts" },
+  "extraMetadata": { "main": "desktop/main.mjs", "author": "Furkan Aykaç" },
+  "asar": true,
+  "asarUnpack": ["**/*.node"],
+  "npmRebuild": false,
+  "publish": null,
+  "files": [
+    "desktop/main.mjs", "desktop/preload.cjs", "desktop/index.html", "desktop/renderer.js", "desktop/style.css",
+    "dist/**/*.js", "LICENSE", "package.json",
+    "!dist/**/*.test.js", "!dist/acceptance-*.js", "!dist/provider-acceptance.js",
+    "!dist/live-smoke.js", "!dist/chatgpt-stream-trace.js", "!dist/mcp-mock-server.js", "!dist/mcp-official-sdk-server.js"
+  ],
+  "mac": { "target": ["dmg", "zip"], "category": "public.app-category.developer-tools", "identity": "-", "notarize": false },
+  "win": { "target": ["nsis"] },
+  "nsis": { "oneClick": false, "perMachine": false, "allowToChangeInstallationDirectory": true, "deleteAppDataOnUninstall": false },
+  "linux": { "target": ["AppImage", "deb"], "category": "Development", "maintainer": "Furkan Aykaç" }
+}

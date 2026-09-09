@@ -99,7 +99,7 @@ python3 scripts/verify-tui-pty.py  # POSIX PTY fixture; not a native-emulator vi
 
 ## Desktop foundation
 
-The source-checkout desktop client uses a small Electron shell with plain local HTML/CSS/JavaScript, rather than a UI framework or a second agent engine. Electron is a **development-only** dependency; this milestone does not ship an installer or change the CLI package's installation requirements.
+The desktop client uses a small Electron shell with plain local HTML/CSS/JavaScript, rather than a UI framework or a second agent engine. Electron and its packaging tools are **development-only** dependencies; the CLI package's installation requirements are unchanged. M77 adds local development packaging, not a published or fully accepted cross-platform release.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -110,11 +110,17 @@ pnpm desktop
 pnpm acceptance:desktop  # actual local window; deterministic provider, no live inference
 ```
 
-Launch uses the working directory as the immutable workspace. Configure credentials through existing host-side provider authentication/configuration, not the window. Choose **Host default** to use configured provider/model/limits, or select an explicit provider/model; create a session or resume its ID, send a request, observe streamed text and tool activity, allow once/deny the exact pending operation, or cancel. Resume restores saved continuation, not prior message display. Provider/model changes apply to new sessions only.
+Source-checkout launch uses the working directory as the immutable workspace. A packaged local launch instead asks for a workspace through a native main-process folder picker; cancellation exits without creating a runtime, and invalid selections are rejected. Remote launches retain the host's workspace and do not show this picker. Configure credentials through existing host-side provider authentication/configuration, not the window. Choose **Host default** to use configured provider/model/limits, or select an explicit provider/model; create a session or resume its ID, send a request, observe streamed text and tool activity, allow once/deny the exact pending operation, or cancel. Resume restores saved continuation, not prior message display. Provider/model changes apply to new sessions only.
 
 The sandboxed renderer has no Node integration. Its isolated preload exposes only validated runtime commands and a bounded event drain. Only the exact local main frame may invoke them; there is no filesystem, shell, credential, or arbitrary Electron RPC. The main process owns the M71 runtime and existing workspace/authorization boundary. All content uses text nodes; scripts, navigation, popups, webviews, permissions and external network/content are blocked in the renderer. The event queue is capped at 256 events / 512 Ki characters and disconnects/cancels on overflow; the UI retains at most 80 messages of 32,000 characters and 16,000 activity characters. Closing/crashing the window cancels and disposes its runtime. Memory suggestions are explicitly rejected; plan/background editing and automatic MCP connection are outside this foundation.
 
 Deterministic bridge tests run on all CI platforms without a GUI. `acceptance:desktop` separately exercises the actual Electron window, sandbox/preload, configured model defaults, inert model content, streaming, real isolated write allow/deny, cancellation, resume and reload cleanup. Reload is a fail-closed disconnect: the window closes and cancels its run; reopen and resume explicitly. Neither test path establishes live provider acceptance.
+
+### Development application packages (M77 in progress)
+
+`pnpm desktop:pack` builds an unpacked application for the host platform; `pnpm desktop:dist` builds local DMG/ZIP (macOS), NSIS (Windows), or AppImage/DEB (Linux) targets. Outputs go to ignored `desktop-artifacts/`. Build natively on each platform: a successful macOS build does not verify Windows/Linux or another CPU architecture. The Electron entry point is overridden only in the application package; npm continues to expose the CLI/runtime.
+
+These are unsigned/ad-hoc development artifacts, not notarized or publicly trusted installers. No auto-update, publishing, version bump, tag, or release is included. See [M77 scope, commands and outstanding acceptance](docs/m77-application-distribution.md) before treating a package as distributable.
 
 ## Live provider acceptance
 

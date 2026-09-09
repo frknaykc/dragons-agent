@@ -48,9 +48,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
-    "test": "pnpm build && node --test dist/*.test.js dist/provider/*.test.js",
+    "test": "pnpm build && node --test dist/*.test.js dist/provider/*.test.js scripts/desktop-*.test.mjs",
     "dragons": "pnpm build && node dist/cli.js",
     "desktop": "pnpm build && electron desktop/main.mjs",
+    "desktop:pack": "pnpm build && electron-builder --config electron-builder.json --dir --publish never",
+    "desktop:dist": "pnpm build && electron-builder --config electron-builder.json --publish never",
+    "verify:desktop-package": "node scripts/verify-desktop-package.mjs",
+    "acceptance:installed": "node scripts/verify-desktop-installed.mjs",
+    "acceptance:desktop-dmg": "node scripts/verify-desktop-dmg.mjs",
     "remote": "pnpm build && node scripts/serve-remote.mjs",
     "acceptance:desktop": "pnpm build && electron scripts/verify-desktop-smoke.mjs",
     "acceptance:shared": "pnpm build && electron scripts/verify-desktop-smoke.mjs --shared",
@@ -71,8 +76,10 @@
     "string-width": "^8.2.2"
   },
   "devDependencies": {
+    "@electron/asar": "4.3.0",
     "@types/node": "^22.0.0",
     "electron": "44.2.0",
+    "electron-builder": "26.15.3",
     "typescript": "^5.9.0"
   },
   "engines": {

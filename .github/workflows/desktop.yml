@@ -1,0 +1,65 @@
+name: Desktop package validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm desktop:pack
+      - name: Audit packaged contents
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            apps=(desktop-artifacts/mac*/"Dragons Agent.app")
+            [[ ${#apps[@]} -eq 1 ]]
+            pnpm verify:desktop-package "${apps[0]}/Contents/Resources/app.asar"
+          elif [[ "$RUNNER_OS" == "Windows" ]]; then
+            pnpm verify:desktop-package "desktop-artifacts/win-unpacked/resources/app.asar"
+          else
+            pnpm verify:desktop-package "desktop-artifacts/linux-unpacked/resources/app.asar"
+          fi
+      - name: Smoke actual packaged executable (macOS/Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            apps=(desktop-artifacts/mac*/"Dragons Agent.app")
+            [[ ${#apps[@]} -eq 1 ]]
+            pnpm acceptance:installed "${apps[0]}/Contents/MacOS/Dragons Agent"
+          else
+            pnpm acceptance:installed "desktop-artifacts/win-unpacked/Dragons Agent.exe"
+          fi
+      # Linux needs a display and a working Chromium sandbox. Do not add --no-sandbox.
+      - name: Smoke actual packaged executable (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum pnpm acceptance:installed desktop-artifacts/linux-unpacked/dragons-agent
+      - run: pnpm desktop:dist
+      - name: Mount, copy, launch and remove macOS image application
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          images=(desktop-artifacts/*.dmg)
+          [[ ${#images[@]} -eq 1 ]]
+          pnpm acceptance:desktop-dmg "${images[0]}"
+      # No upload, signing credentials, release, tag, or publishing in this validation workflow.

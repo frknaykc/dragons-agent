@@ -1,9 +1,10 @@
-import { app, BrowserWindow, ipcMain, session } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, session } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { DesktopBridge } from '../dist/desktop/bridge.js';
 import { createDesktopRuntime } from '../dist/desktop/host.js';
 import { connectRemoteRuntime } from '../dist/remote/runtime.js';
+import { selectDesktopWorkspace } from '../dist/desktop/workspace.js';
 
 const asset = (name) => new URL(name, import.meta.url);
 const page = asset('index.html').href;
@@ -70,7 +71,7 @@ export async function openDesktop(runtime) {
   return { window, close };
 }
 
-if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+if (app.isPackaged || (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url)) {
   let desktop;
   let exiting = false;
   app.on('before-quit', (event) => {
@@ -83,9 +84,18 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
   void (async () => { try {
     await app.whenReady();
     // Workspace is selected by the trusted launcher, never by UI messages.
+    const workingDirectory = process.env.DRAGONS_RUNTIME_URL ? undefined : await selectDesktopWorkspace({
+      packaged: app.isPackaged,
+      workingDirectory: process.cwd(),
+      selectDirectory: async () => {
+        const selection = await dialog.showOpenDialog({ title: 'Choose a Dragons workspace', properties: ['openDirectory'] });
+        return selection.canceled ? undefined : selection.filePaths[0];
+      },
+    });
+    if (!process.env.DRAGONS_RUNTIME_URL && workingDirectory === undefined) { app.quit(); return; }
     const runtime = process.env.DRAGONS_RUNTIME_URL
       ? await connectRemoteRuntime({ url: process.env.DRAGONS_RUNTIME_URL, token: process.env.DRAGONS_REMOTE_TOKEN || '' })
-      : await createDesktopRuntime(process.cwd());
+      : await createDesktopRuntime(workingDirectory);
     desktop = await openDesktop(runtime);
   } catch {
     console.error('Unable to open Dragons Desktop. Check local configuration and workspace.');
