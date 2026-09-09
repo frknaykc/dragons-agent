@@ -43,35 +43,14 @@ try {
     $escaped = [regex]::Replace($Workspace, '[+^%~(){}\[\]]', { param($m) '{' + $m.Value + '}' })
     [System.Windows.Forms.SendKeys]::SendWait($escaped)
     [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
-    $stage = 'selection-control'
-    $button = $null
-    do {
-      $button = $dialog.FindFirst([System.Windows.Automation.TreeScope]::Descendants,
-        [System.Windows.Automation.AndCondition]::new(
-          [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty, '1'),
-          [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)))
-      if (-not $button -or -not $button.Current.IsEnabled) { Start-Sleep -Milliseconds 100 }
-    } until (($button -and $button.Current.IsEnabled) -or [DateTime]::UtcNow -gt $deadline)
-    if (-not $button -or -not $button.Current.IsEnabled) { throw 'Native selection button unavailable' }
-    $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $stage = 'keyboard-confirmation'
+    # Hosted Windows exposes the dialog but an empty UIA descendant tree.
+    # Use its native Select Folder accelerator; persisted session binding is the oracle.
+    if ([PickerFocus]::GetForegroundWindow() -ne $handle) { throw 'Native dialog lost focus' }
+    [System.Windows.Forms.SendKeys]::SendWait('%s')
   }
   Write-Output "NATIVE_PICKER_DRIVEN $Mode"
 } catch {
   Write-Output "NATIVE_PICKER_DIAGNOSTIC stage=$stage"
-  if ($dialog -and $stage -eq 'selection-control') {
-    try {
-      $controls = $dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-      $summary = @()
-      foreach ($control in $controls) {
-        $type = $control.Current.ControlType.ProgrammaticName
-        if ($type -in @('ControlType.Button', 'ControlType.SplitButton')) {
-          $id = if ($control.Current.AutomationId -match '^\d{1,8}$') { $control.Current.AutomationId } else { 'non-numeric' }
-          $label = if ($control.Current.Name -in @('Select Folder', 'Open', 'Cancel', 'Select', 'Choose', 'OK')) { $control.Current.Name } else { 'other' }
-          $summary += @{ type=$type; id=$id; label=$label }
-        }
-      }
-      Write-Output ('NATIVE_PICKER_DIAGNOSTIC ' + (ConvertTo-Json -InputObject $summary -Compress))
-    } catch { Write-Output 'NATIVE_PICKER_DIAGNOSTIC controls-unavailable' }
-  }
   exit 1
 }
