@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { assertPickerBinding, cleanupPicker, signalPickerGroup } from './desktop-picker-acceptance.mjs';
@@ -22,6 +22,17 @@ test('cleanup attempts directory removal even if process cleanup fails', async (
   let removed = false;
   await assert.rejects(() => cleanupPicker(async () => { throw new Error('stop failed'); }, async () => { removed = true; }));
   assert.equal(removed, true);
+});
+test('directory identity accepts an alias of selected folder, rejects the same basename elsewhere', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dragons-picker-identity-'));
+  try {
+    const selected = join(root, 'a', 'workspace'), other = join(root, 'b', 'workspace'), launcher = join(root, 'launcher'), alias = join(root, 'alias');
+    await Promise.all([selected, other, launcher].map((path) => mkdir(path, { recursive: true })));
+    await symlink(selected, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    await assertPickerBinding({ id: 'fixture', workingDirectory: alias }, selected, launcher, 'fixture · provider');
+    await assert.rejects(() => assertPickerBinding({ id: 'fixture', workingDirectory: other }, selected, launcher, 'fixture · provider'), /PICKER_SELECTED_PATH_MISMATCH/);
+    await assert.rejects(() => assertPickerBinding({ id: 'fixture', workingDirectory: selected }, selected, alias, 'fixture · provider'), /PICKER_LAUNCHER_COLLISION/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 test('cleanup errors cannot pass', async () => {
   await assert.rejects(() => cleanupPicker(async () => {}, async () => { throw new Error('remove failed'); }));
