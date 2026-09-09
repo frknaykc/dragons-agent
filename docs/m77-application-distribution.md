@@ -22,6 +22,8 @@ pnpm desktop:pack  # unpacked application in desktop-artifacts/
 pnpm desktop:dist  # host-platform installers/archives, --publish never
 pnpm verify:desktop-package "path/to/resources/app.asar"
 pnpm acceptance:installed "path/to/packaged/executable"
+# Opt-in: uses only unique synthetic native-store entries (not a GUI test):
+node scripts/verify-desktop-credentials.mjs "path/to/packaged/executable" "path/to/resources/app.asar"
 # macOS only:
 pnpm acceptance:desktop-dmg "desktop-artifacts/Dragons-Agent-0.1.0-mac-arm64.dmg"
 ```
@@ -60,7 +62,7 @@ Public signing/notarization, signing credential setup, public-trust clean-machin
 - Windows NSIS and Linux AppImage/DEB install/remove: **NOT_RUN**.
 - macOS Intel or other CPU architectures: **NOT_RUN**.
 - Clean-machine trust/signing/notarization: **NOT_CONFIGURED / NOT_RUN**.
-- Native workspace picker end-to-end and native credential-store access: **NOT_RUN**.
+- Native workspace picker and credential-store access: macOS arm64 evidence is recorded below; Windows/Linux remain **NOT_RUN**.
 - M77 foundation and CI remediation commits were pushed to `main`; no publication, version bump, tag or release occurred.
 - Windows job failure was reproduced with the bounded native diagnostic (64 runs, concurrency 8): `a26675b`, run `34328493226`, produced 55 passes and 9 failures, including confirmed `EPERM` from atomic rename. The external handle owner was not identified; no scanner-specific cause is claimed. macOS baseline passed 64/64. Production recovery now retries only Windows `EPERM`/`rename`, with six attempts and bounded backoff; it releases the temporary file/store lock before waiting and rechecks the original expected revision after reacquiring the lock. It never deletes the destination or relaxes permissions.
 - Final code acceptance at `9b8d4ce76ab2e4289dcdf98537322fd5c15b9d41`: **538/538 tests PASS**, typecheck/build and clean-install package verification PASS (`pnpm release:check`); normal CI `34329647168` and Desktop workflow `34329650217` each passed on all three platforms. The same native Windows diagnostic passed **64/64** (run `34329647005`). These before/after results plus deterministic regression coverage close the reproduced rename-failure blocker; they do not prove that every possible Windows filesystem failure is recoverable.
@@ -86,3 +88,15 @@ The distribution/signing policy is settled above. Do not mark M77 CLOSED until t
 - Real source-checkout native Keychain round trips passed for both provider and MCP stores: unique synthetic service/accounts, initial absence, save, exact readback, remove and verified final absence. Only fixed-label outcomes were logged. This is **source-checkout native-store acceptance**, not execution of the store from inside the packaged Electron application. The existing package predates this remediation and must be rebuilt before claiming packaged credential-store acceptance.
 - Remaining: packaged native-store execution, Windows/Linux native-flow and installation/removal evidence, and final M77 acceptance. M77 remains **IN_PROGRESS**.
 - Independent read-only review of both loader changes and the regression tests: **PASS**, no blocker. Nullish normalization preserves malformed-payload rejection, backend error handling, provider fallback distinctions and MCP write verification. No material source change followed the passing release gate.
+
+### Packaged native-store checkpoint (2026-09-09)
+
+- Rebuilt the macOS arm64 application from `c9b8cf2` runtime sources using `pnpm desktop:pack`. Archive audit: **PASS**, 3,893 files, version `0.1.0`, native sidecar present. Both archived loaders contain the nullish-absence remediation.
+- `scripts/verify-desktop-credentials.mjs` launches the packaged executable with `ELECTRON_RUN_AS_NODE=1`, loads both credential-store modules directly from the supplied `app.asar`, and resolves `@napi-rs/keyring` from that same archive. No source-checkout runtime import, production entry-point hook, provider request or default credential account is used.
+- Native execution: **PASS** for provider and MCP on macOS 26.6.2 arm64, Electron `44.2.0` / Node `24.20.0`. Each store independently verified initial absence, save, exact readback, remove and final absence. All writes used fixed synthetic values with independent random UUID accounts under a dedicated acceptance service; both entries were verified deleted.
+- The first isolated-HOME probe failed before writing: this host's Keychain lookup requires the logged-in user's HOME. The harness preserves HOME on macOS solely for native-store access, while its working directory and other config/temp paths remain disposable and the environment is allowlisted. It does not load application configuration, sessions or credential files. This is not complete HOME isolation.
+- Evidence scope: **packaged executable in Electron Node mode plus packaged resources/native binding**, not the GUI credential route, signing/notarization, clean-machine trust or live provider inference. The harness has a 60-second deadline; abnormal exit or timeout fails acceptance and does not establish synthetic-entry cleanup.
+- The same rebuilt application passed `codesign --verify --deep --strict` and `pnpm acceptance:installed` (production entry, sandbox, deterministic remote READ continuation, graceful quit). ASAR SHA-256: `ab53739480728699903b16fccae2f46ebebc887c2727804530985f94475e5fea`. This identifies the archive only, not its unpacked native sidecars.
+- Harness syntax and three negative checks (missing arguments, missing executable, missing archive) passed without a false acceptance. `pnpm release:check`: **PASS**, 549/549 tests, typecheck, build and clean-install npm package verification. No runtime/dependency/version change was needed for this checkpoint.
+- Independent read-only harness review: **PASS**, no confirmed blocker within the stated Electron Node-mode scope. The review checked injected synthetic accounts, actual store APIs, roundtrip/deletion and subprocess success requirements, error redaction and attempted failure cleanup. Forced-timeout cleanup remains unverified, never accepted. No material code change followed the passing gate.
+- Windows/Linux native-store and picker acceptance, Windows NSIS / Linux installation-removal, and final selected-matrix acceptance remain open. M77 remains **IN_PROGRESS**.
