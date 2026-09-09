@@ -53,15 +53,16 @@ async function withProfile(executable, smoke) {
     await rmdir(root);
   }
 }
-async function smoke(executable, archive) {
+async function smoke(executable, archive, temporaryProfile = true) {
   const scope = stage;
   stage = `${scope}-archive`;
   await run(process.execPath, ['scripts/verify-desktop-package.mjs', archive]);
   stage = `${scope}-profile`;
-  await withProfile(executable, async () => {
+  const launch = async () => {
     stage = `${scope}-runtime`;
     await run('xvfb-run', ['--auto-servernum', process.execPath, 'scripts/verify-desktop-installed.mjs', executable]);
-  });
+  };
+  if (temporaryProfile) await withProfile(executable, launch); else await launch();
 }
 async function deb() {
   stage = 'deb-metadata';
@@ -87,13 +88,17 @@ async function deb() {
     const executable = executables[0];
     const directory = executable.slice(0, -'/dragons-agent'.length);
     stage = 'deb-smoke';
-    await smoke(executable, join(directory, 'resources', 'app.asar'));
+    // The DEB postinstall supplies its own exact-path AppArmor profile. A second
+    // matching attachment would conflict; exercise the shipped policy unchanged.
+    assert.equal(await exists('/etc/apparmor.d/dragons-agent'), true);
+    await smoke(executable, join(directory, 'resources', 'app.asar'), false);
     stage = 'deb-remove';
     await run('sudo', ['dpkg', '--purge', name]);
     for (const path of ownedFiles) assert.equal(await exists(path), false, 'Package-owned file or symlink remains');
     assert.equal(await exists(executable), false);
     assert.equal(await exists(join(directory, 'resources', 'app.asar')), false);
     assert.equal(await exists(directory), false, 'Package installation directory remains');
+    assert.equal(await exists('/etc/apparmor.d/dragons-agent'), false, 'Package AppArmor profile remains');
     try { await run('dpkg-query', ['--status', name]); throw new Error('Package still registered'); }
     catch (e) { if (e.code !== 1) throw e; }
     attempted = false;
