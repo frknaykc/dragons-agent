@@ -15,6 +15,11 @@ const run = async (file, args, extra = {}) => {
     console.error(`LINUX_COMMAND_FAILED stage=${stage} tool=${file} code=${error.code}`);
     // Parser diagnostics contain policy paths, not application/provider payloads.
     if (file === 'sudo' && args[0] === 'apparmor_parser') console.error(String(error.stderr).slice(0, 2000));
+    if (file === 'xvfb-run') {
+      for (const line of String(error.stderr).split('\n')) {
+        if (/^DESKTOP_INSTALLED_SMOKE_FAILED stage=[a-z-]+ startup=[a-z-]+ exit=(?:[0-9]+|none) signal=(?:[A-Z0-9]+|none) \(raw process\/model output suppressed\)$/.test(line)) console.error(line);
+      }
+    }
     throw error;
   }
 };
