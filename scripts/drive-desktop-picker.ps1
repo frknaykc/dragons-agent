@@ -13,6 +13,7 @@ using System.Runtime.InteropServices;
 public static class PickerFocus {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr handle);
 }
 '@
 try {
@@ -46,8 +47,15 @@ try {
     $stage = 'keyboard-confirmation'
     # Hosted Windows exposes the dialog but an empty UIA descendant tree.
     # Use its native Select Folder accelerator; persisted session binding is the oracle.
-    if ([PickerFocus]::GetForegroundWindow() -ne $handle) { throw 'Native dialog lost focus' }
-    [System.Windows.Forms.SendKeys]::SendWait('%s')
+    # Enter may already complete the folder selection and destroy the native dialog.
+    # Never deliver another shortcut to the application window in that case.
+    while ([PickerFocus]::IsWindow($handle) -and [PickerFocus]::GetForegroundWindow() -ne $handle -and [DateTime]::UtcNow -lt $deadline) {
+      Start-Sleep -Milliseconds 100
+    }
+    if ([PickerFocus]::IsWindow($handle)) {
+      if ([PickerFocus]::GetForegroundWindow() -ne $handle) { throw 'Native dialog lost focus' }
+      [System.Windows.Forms.SendKeys]::SendWait('%s')
+    }
   }
   Write-Output "NATIVE_PICKER_DRIVEN $Mode"
 } catch {
