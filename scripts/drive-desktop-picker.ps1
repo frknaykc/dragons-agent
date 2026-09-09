@@ -51,10 +51,8 @@ public static class PickerFocus {
     IntPtr found = IntPtr.Zero;
     int matches = 0;
     EnumChildWindows(dialog, (child, unused) => {
-      if (ClassLabel(child) != "Edit" || !IsWindowVisible(child)) return true;
-      for (IntPtr parent = child; parent != IntPtr.Zero && parent != dialog; parent = GetParent(parent)) {
-        if (GetDlgCtrlID(parent) == 1148) { found = child; matches++; break; }
-      }
+      // edt1 (1152): observed Folder input in the runner's native common-item dialog.
+      if (ClassLabel(child) == "Edit" && GetDlgCtrlID(child) == 1152 && IsWindowVisible(child)) { found = child; matches++; }
       return true;
     }, IntPtr.Zero);
     return matches == 1 ? found : IntPtr.Zero;
