@@ -11,10 +11,36 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 public static class PickerFocus {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr handle);
+  [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] struct GuiInfo {
+    public int Size, Flags;
+    public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret;
+    public Rect CaretRect;
+  }
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr handle, out uint pid);
+  [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref GuiInfo info);
+  [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr handle, uint flags);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr handle, StringBuilder text, int capacity);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessageTimeout(IntPtr handle, uint message, UIntPtr capacity, StringBuilder text, uint flags, uint timeout, out UIntPtr result);
+  public static IntPtr FocusedEdit(IntPtr dialog) {
+    uint pid;
+    uint thread = GetWindowThreadProcessId(dialog, out pid);
+    var info = new GuiInfo { Size = Marshal.SizeOf(typeof(GuiInfo)) };
+    if (thread == 0 || !GetGUIThreadInfo(thread, ref info) || GetAncestor(info.Focus, 2) != dialog) return IntPtr.Zero;
+    var name = new StringBuilder(128);
+    GetClassName(info.Focus, name, name.Capacity);
+    return name.ToString() == "Edit" ? info.Focus : IntPtr.Zero;
+  }
+  public static bool ContainsPath(IntPtr edit, string expected) {
+    var text = new StringBuilder(4096);
+    UIntPtr result;
+    return edit != IntPtr.Zero && SendMessageTimeout(edit, 13, (UIntPtr)text.Capacity, text, 2, 1000, out result) != IntPtr.Zero && text.ToString() == expected;
+  }
 }
 '@
 try {
@@ -45,8 +71,24 @@ try {
     Write-Output "NATIVE_PICKER_DIAGNOSTIC stage=$stage"
     # Navigate through the real shell dialog; never pass a workspace to the application.
     [System.Windows.Forms.SendKeys]::SendWait('^l')
+    $stage = 'navigation-edit-focus'
+    $edit = [IntPtr]::Zero
+    do {
+      if ([PickerFocus]::GetForegroundWindow() -ne $handle) { throw 'Native dialog lost focus' }
+      $edit = [PickerFocus]::FocusedEdit($handle)
+      if ($edit -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 100 }
+    } until ($edit -ne [IntPtr]::Zero -or [DateTime]::UtcNow -gt $deadline)
+    if ($edit -eq [IntPtr]::Zero) { throw 'Native edit focus unavailable' }
     $escaped = [regex]::Replace($Workspace, '[+^%~(){}\[\]]', { param($m) '{' + $m.Value + '}' })
     [System.Windows.Forms.SendKeys]::SendWait($escaped)
+    $stage = 'navigation-path-readback'
+    do {
+      if ([PickerFocus]::GetForegroundWindow() -ne $handle -or [PickerFocus]::FocusedEdit($handle) -ne $edit) { throw 'Native edit lost focus' }
+      $matches = [PickerFocus]::ContainsPath($edit, $Workspace)
+      if (-not $matches) { Start-Sleep -Milliseconds 100 }
+    } until ($matches -or [DateTime]::UtcNow -gt $deadline)
+    if (-not $matches) { throw 'Native path input not confirmed' }
+    Write-Output 'NATIVE_PICKER_DIAGNOSTIC stage=navigation-path-confirmed'
     [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
     $stage = 'keyboard-confirmation'
     Write-Output "NATIVE_PICKER_DIAGNOSTIC stage=$stage"
