@@ -70,7 +70,7 @@ try {
     $stage = 'directory-navigation'
     Write-Output "NATIVE_PICKER_DIAGNOSTIC stage=$stage"
     # Navigate through the real shell dialog; never pass a workspace to the application.
-    [System.Windows.Forms.SendKeys]::SendWait('^l')
+    [System.Windows.Forms.SendKeys]::SendWait('%d')
     $stage = 'navigation-edit-focus'
     $edit = [IntPtr]::Zero
     do {
