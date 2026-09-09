@@ -28,7 +28,7 @@ export type CodexCredentialStore = {
 };
 
 export type NativeCredentialEntry = {
-  getPassword(signal?: AbortSignal | null): Promise<string | undefined>;
+  getPassword(signal?: AbortSignal | null): Promise<string | null | undefined>;
   setPassword(password: string, signal?: AbortSignal | null): Promise<void>;
   deletePassword(signal?: AbortSignal | null): Promise<boolean>;
 };
@@ -89,7 +89,7 @@ export function createNativeCodexCredentialStore(options: {
     async load(): Promise<CodexCredentials | undefined> {
       let payload: string | undefined;
       try {
-        payload = await entry.getPassword();
+        payload = (await entry.getPassword()) ?? undefined;
       } catch {
         throw new NativeCredentialStoreUnavailableError();
       }

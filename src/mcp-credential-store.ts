@@ -19,7 +19,7 @@ export type McpBearerTokenStore = {
 };
 
 export type NativeMcpCredentialEntry = {
-  getPassword(signal?: AbortSignal | null): Promise<string | undefined>;
+  getPassword(signal?: AbortSignal | null): Promise<string | null | undefined>;
   setPassword(password: string, signal?: AbortSignal | null): Promise<void>;
   deletePassword(signal?: AbortSignal | null): Promise<boolean>;
 };
@@ -94,7 +94,7 @@ export function createNativeMcpBearerTokenStore(options: {
     async load(input): Promise<string | undefined> {
       const scope = normalizedScope(input);
       let payload: string | undefined;
-      try { payload = await entryFor(scope).getPassword(); }
+      try { payload = (await entryFor(scope).getPassword()) ?? undefined; }
       catch { throw new Error("Native MCP credential storage is unavailable."); }
       return payload === undefined ? undefined : parseStoredToken(payload, scope);
     },

@@ -1,6 +1,6 @@
 # M77 — Application Distribution
 
-Status: **IN_PROGRESS**. Initial local packaging foundation; not a release acceptance.
+Status: **IN_PROGRESS**. Development distribution acceptance; not a public release acceptance.
 Package version remains `dragons-agent@0.1.0`.
 
 ## Scope and trust boundary
@@ -36,11 +36,17 @@ On the ephemeral Ubuntu runner, the audited application is copied root-owned int
 
 ## Verification levels
 
+### Selected acceptance policy (2026-09-09)
+
+The selected target is development distribution on the three existing native host platforms. M77 closure requires installer/copy removal verification and native workspace-picker and credential-store acceptance in addition to the existing archive/executable gates. Record the actual host architecture and environment with each result; a hosted CI runner is not a clean consumer machine. Preserve existing user data, never access real stored provider credentials for these checks, and do not weaken operating-system trust or Chromium sandbox controls.
+
+Public signing/notarization, signing credential setup, public-trust clean-machine checks and publication are explicitly outside this selected acceptance scope. Their absence must remain visible as a distribution limitation, not be reported as verified or silently bypassed. Other CPU architectures remain unverified rather than implied by a platform-level result.
+
 1. `pnpm test` includes deterministic workspace-selection, archive-policy, run-outcome and DMG cleanup failure-path tests.
 2. `acceptance:desktop` tests the source-checkout Electron UI with existing deterministic fixtures.
 3. `acceptance:installed` launches the actual packaged executable with an isolated temporary home/config, real remote runtime and a deterministic READ-only fixture provider. It verifies the production entry point, preload availability, Node isolation, session creation, READ execution through the runtime and a successfully settled run with the exact continuation result. Streamed text alone is not success. It closes the real page and requires a zero exit status without a termination signal; emergency process killing never produces PASS. CDP is enabled only by this test launch on loopback; no production debugging switch or renderer test API is added. Renderer discovery waits for DOM readiness, not just a CDP page URL. This is **not live provider verification**, native credential-store access, native-folder-dialog acceptance or an installer test.
 4. `acceptance:desktop-dmg` mounts the image read-only, copies the app into a disposable directory (not `/Applications`), detaches it, audits and runs the copied app, then removes that copy. Even a failed attach may have mounted the image: cleanup attempts detach and never recursively deletes an uncertain mount. If detach fails, it reports the retained path for manual cleanup and fails acceptance. This is **not a fresh-machine Gatekeeper/quarantine check** or proof of system-wide installation/uninstallation.
-5. Public-trust signing/notarization, native OS clean-user installation/removal, local workspace picker interaction and OS-specific credential-store access require separate acceptance before M77 can close.
+5. Native installation/removal, local workspace picker interaction and OS-specific credential-store access require separate acceptance before M77 can close under the selected development-distribution policy. Public-trust signing/notarization and clean-consumer-machine trust checks are excluded, not passed.
 
 ## Evidence and remaining work
 
@@ -61,4 +67,22 @@ On the ephemeral Ubuntu runner, the audited application is copied root-owned int
 - Independent review caught cancellation starvation in the first lock-held retry implementation. The final implementation releases the lock between attempts, preserves CAS, and includes a real-store cancellation regression proving no model creation, durable `cancelled`, and no claim/temp residue. Targeted re-review: **PASS, B1 resolved, no new blocker**. The native diagnostic is available through the manual `Native job stability diagnostic` workflow; output is fixed-label aggregate data, not raw errors or credentials.
 - Independent review passed the ASAR, startup diagnostic and job-wait changes. The Linux policy re-review identified cleanup short-circuiting after a command failure; independent cleanup attempts now preserve failure status, with four mocked-shell success/failure scenarios passing. Native end-user trust/credential-store acceptance remains separate.
 
-Do not mark M77 CLOSED until the selected platform acceptance matrix and distribution/signing policy are explicitly settled and the corresponding evidence is available.
+The distribution/signing policy is settled above. Do not mark M77 CLOSED until the remaining selected platform acceptance matrix has corresponding evidence; the policy decision itself does not establish installer or native-flow acceptance.
+
+### Local native-picker checkpoint (2026-09-09)
+
+- Host: macOS 26.6.2, arm64, existing developer account (not a clean consumer machine). Source snapshot: `4617bef`.
+- Rebuilt with `pnpm desktop:pack`; packaged ASAR audit passed with 3,893 files, version `0.1.0`, target `darwin-arm64`, native credential sidecar present. Sidecar presence is not credential-store acceptance.
+- Launched the actual packaged executable in local mode with a temporary workspace, an allowlisted environment, isolated HOME/config and Chromium user-data paths, and no remote-runtime variables. The production native “Choose a Dragons workspace” dialog appeared.
+- Native cancellation was observed in a tracked subprocess: Escape dismissed the picker, exit code was zero, and no `.dragons` state files were created in the isolated home.
+- Folder-selection acceptance remains **INCOMPLETE**: desktop automation did not reliably deliver the navigation shortcut to the native dialog. The selection attempt was terminated for cleanup and is not a passing acceptance run. No inference or native credential-store operations were attempted. This is an automation limitation, not evidence of a product defect.
+- Next seam: supervised folder selection followed by a local session bound to that exact temporary directory; native credential-store acceptance with a dedicated synthetic entry; remaining Windows/Linux installation and native-flow evidence. M77 stays **IN_PROGRESS**.
+
+### Supervised picker and native-store remediation
+
+- The user selected the isolated temporary workspace in the actual packaged macOS application. The production UI opened; New session created exactly one isolated session with zero messages. Its persisted `workingDirectory` matched the selected directory after canonicalization. Normal application quit returned exit code zero. This completes local macOS picker selection/session-binding acceptance for the `4617bef` package, not model inference or clean-machine installation acceptance.
+- A real missing-entry probe using a unique synthetic Keychain account found `AsyncEntry.getPassword()` returns `null` on this host, despite the dependency's async TypeScript declaration advertising `undefined`. Both provider and MCP loaders previously sent this result into credential parsing. The minimal remediation explicitly permits and normalizes native nullish absence; malformed string payloads still fail closed. No default provider or MCP credential account was read.
+- Six deterministic regressions cover null/undefined absence in both stores and rejection of empty, JSON-null, empty-object and invalid-JSON payloads. `pnpm release:check`: **PASS**, 549/549 tests, typecheck, build and package verification; no publication or version change.
+- Real source-checkout native Keychain round trips passed for both provider and MCP stores: unique synthetic service/accounts, initial absence, save, exact readback, remove and verified final absence. Only fixed-label outcomes were logged. This is **source-checkout native-store acceptance**, not execution of the store from inside the packaged Electron application. The existing package predates this remediation and must be rebuilt before claiming packaged credential-store acceptance.
+- Remaining: packaged native-store execution, Windows/Linux native-flow and installation/removal evidence, and final M77 acceptance. M77 remains **IN_PROGRESS**.
+- Independent read-only review of both loader changes and the regression tests: **PASS**, no blocker. Nullish normalization preserves malformed-payload rejection, backend error handling, provider fallback distinctions and MCP write verification. No material source change followed the passing release gate.
