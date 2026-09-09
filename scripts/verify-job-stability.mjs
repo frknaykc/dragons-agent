@@ -22,7 +22,8 @@ async function attempt(index) {
       clearTimeout(timer);
       const passed = code === 0 && !signal && !timedOut && !spawnFailed && /# pass 1\b/.test(output);
       const category = passed ? 'pass' : timedOut ? 'timeout' : spawnFailed ? 'spawn-failure'
-        : output.match(/first job did not finish \((EPERM|EACCES|ENOENT|EBUSY|unclassified)\)/)?.[1] ?? 'other-failure';
+        : output.match(/first job did not finish \(((?:EPERM|EACCES|ENOENT|EBUSY|unclassified):(?:rename|chmod|open|unlink|mkdir|lstat|read|write|unknown))\)/)?.[1]
+          ?? (output.includes('EPERM') ? 'EPERM-other-stage' : 'other-failure');
       resolve({ index, category });
     });
   });

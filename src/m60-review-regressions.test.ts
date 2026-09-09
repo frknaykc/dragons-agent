@@ -24,7 +24,8 @@ test("M60 review regressions bound durable storage, reject raw secrets, and prev
     await limited.wait(FIRST);
     const first = limited.show(FIRST);
     const failureCode = first?.error?.match(/\b(?:EPERM|EACCES|ENOENT|EBUSY)\b/)?.[0] ?? "unclassified";
-    assert.equal(first?.state, "completed", `first job did not finish (${failureCode})`);
+    const failureOperation = first?.error?.match(/, (rename|chmod|open|unlink|mkdir|lstat|read|write)\b/)?.[1] ?? "unknown";
+    assert.equal(first?.state, "completed", `first job did not finish (${failureCode}:${failureOperation})`);
     await assert.rejects(limited.start({ sessionId: SESSION, workingDirectory: directory, prompt: "Second.", createModel: model, tools: [readTool] }), /storage limit/i);
     await assert.rejects(limited.start({ sessionId: SESSION, workingDirectory: directory, prompt: "Use sk-proj-abcdefghijklmnopqrstuvwxyz0123456789.", createModel: model, tools: [readTool] }), /secret/i);
 
