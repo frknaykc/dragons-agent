@@ -21,10 +21,11 @@ async function drive(child, mode, workspace) {
     let result;
     try { result = await run('pwsh', ['-NoProfile', '-File', 'scripts/drive-desktop-picker.ps1', '-ApplicationPid', String(child.pid), '-Mode', mode, '-Workspace', workspace]); }
     catch (error) {
+      console.error(`NATIVE_PICKER_DIAGNOSTIC driver-code=${error.code} killed=${!!error.killed} signal=${error.signal || 'none'}`);
       for (const line of String(error.stdout).split('\n')) if (line.startsWith('NATIVE_PICKER_DIAGNOSTIC ')) console.error(line.slice(0, 4096));
       throw error;
     }
-    assert.equal(result.stdout.trim(), `NATIVE_PICKER_DRIVEN ${mode}`);
+    assert.equal(result.stdout.trim().split(/\r?\n/).at(-1), `NATIVE_PICKER_DRIVEN ${mode}`);
     return;
   }
   const window = await until(async () => {

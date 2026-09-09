@@ -4,6 +4,7 @@ param(
   [Parameter(Mandatory=$true)][string]$Workspace
 )
 $ErrorActionPreference = 'Stop'
+Write-Output 'NATIVE_PICKER_DIAGNOSTIC stage=automation-initialization'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
@@ -18,6 +19,7 @@ public static class PickerFocus {
 '@
 try {
   $stage = 'dialog-discovery'
+  Write-Output "NATIVE_PICKER_DIAGNOSTIC stage=$stage"
   if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Hosted runner required' }
   $deadline = [DateTime]::UtcNow.AddSeconds(20)
   $dialog = $null
@@ -32,6 +34,7 @@ try {
   } until ($dialog -or [DateTime]::UtcNow -gt $deadline)
   if (-not $dialog) { throw 'Native dialog unavailable' }
   $stage = 'dialog-focus'
+  Write-Output "NATIVE_PICKER_DIAGNOSTIC stage=$stage"
   $handle = [IntPtr]$dialog.Current.NativeWindowHandle
   [void][PickerFocus]::SetForegroundWindow($handle)
   if ([PickerFocus]::GetForegroundWindow() -ne $handle) { throw 'Native dialog focus unavailable' }
@@ -39,12 +42,14 @@ try {
     [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
   } else {
     $stage = 'directory-navigation'
+    Write-Output "NATIVE_PICKER_DIAGNOSTIC stage=$stage"
     # Navigate through the real shell dialog; never pass a workspace to the application.
     [System.Windows.Forms.SendKeys]::SendWait('^l')
     $escaped = [regex]::Replace($Workspace, '[+^%~(){}\[\]]', { param($m) '{' + $m.Value + '}' })
     [System.Windows.Forms.SendKeys]::SendWait($escaped)
     [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
     $stage = 'keyboard-confirmation'
+    Write-Output "NATIVE_PICKER_DIAGNOSTIC stage=$stage"
     # Hosted Windows exposes the dialog but an empty UIA descendant tree.
     # Use its native Select Folder accelerator; persisted session binding is the oracle.
     # Enter may already complete the folder selection and destroy the native dialog.

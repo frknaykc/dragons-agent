@@ -84,7 +84,6 @@ jobs:
         env:
           CHROME_DEVEL_SANDBOX: /opt/dragons-ci/chrome-sandbox
         run: |
-          sudo apt-get update
           sudo apt-get install -y xdotool
           xvfb-run --auto-servernum node scripts/verify-desktop-picker.mjs /opt/dragons-ci/dragons-agent
       - name: Remove Linux runner sandbox configuration
@@ -101,7 +100,9 @@ jobs:
       - name: Prepare AppImage FUSE support (ephemeral Linux runner only)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
+          # Refresh only Ubuntu indexes, not unrelated preinstalled third-party repositories.
+          test -f /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update -o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-
           sudo apt-get install -y libfuse2t64
           test -c /dev/fuse
       - name: Install, exercise and purge Linux DEB
