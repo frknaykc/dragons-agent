@@ -87,6 +87,24 @@ jobs:
           sudo rm -rf /opt/dragons-ci || status=1
           exit "$status"
       - run: pnpm desktop:dist
+      - name: Prepare AppImage FUSE support (ephemeral Linux runner only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2t64
+          test -c /dev/fuse
+      - name: Install, exercise and purge Linux DEB
+        if: runner.os == 'Linux'
+        run: |
+          packages=(desktop-artifacts/*.deb)
+          [[ ${#packages[@]} -eq 1 ]]
+          node scripts/verify-desktop-linux.mjs deb "${packages[0]}"
+      - name: Mount, exercise and unmount Linux AppImage
+        if: runner.os == 'Linux'
+        run: |
+          images=(desktop-artifacts/*.AppImage)
+          [[ ${#images[@]} -eq 1 ]]
+          node scripts/verify-desktop-linux.mjs appimage "${images[0]}"
       - name: Install, exercise and uninstall Windows NSIS application
         if: runner.os == 'Windows'
         shell: pwsh
