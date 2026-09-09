@@ -73,6 +73,9 @@ jobs:
         env:
           CHROME_DEVEL_SANDBOX: /opt/dragons-ci/chrome-sandbox
         run: xvfb-run --auto-servernum pnpm acceptance:installed /opt/dragons-ci/dragons-agent
+      - name: Verify packaged Linux native credential stores (synthetic accounts)
+        if: runner.os == 'Linux'
+        run: node scripts/verify-desktop-credentials.mjs /opt/dragons-ci/dragons-agent /opt/dragons-ci/resources/app.asar
       - name: Remove Linux runner sandbox configuration
         if: always() && runner.os == 'Linux'
         run: |
