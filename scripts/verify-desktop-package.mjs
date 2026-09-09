@@ -13,7 +13,7 @@ export function auditDesktopArchive(archive) {
       assert.equal(/^node_modules\/(electron|electron-builder|app-builder-lib|typescript)(\/|$)/.test(file), false, 'Development dependency in desktop archive');
       continue;
     }
-    if ('files' in statFile(archive, file)) {
+    if ('files' in statFile(archive, join(...file.split('/')))) {
       assert.equal(file === 'desktop' || file === 'dist' || file === 'node_modules' || file.startsWith('dist/'), true, 'Unexpected first-party directory');
       continue;
     }
@@ -27,7 +27,7 @@ export function auditDesktopArchive(archive) {
   const bindings = files.filter((file) => file.endsWith('.node') && (file.startsWith(`${prefix}/`) || file.startsWith(`${prefix}-`)));
   assert.ok(bindings.length > 0, 'Native credential-store binding for host OS/architecture missing');
   for (const binding of bindings) {
-    const metadata = statFile(archive, binding, false);
+    const metadata = statFile(archive, join(...binding.split('/')), false);
     assert.equal(metadata.unpacked, true, 'Native credential-store binding must be unpacked');
     assert.equal('link' in metadata, false, 'Native credential-store binding must be a regular file');
     const sidecar = lstatSync(join(`${archive}.unpacked`, binding));

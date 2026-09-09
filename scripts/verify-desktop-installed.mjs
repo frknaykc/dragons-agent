@@ -19,6 +19,7 @@ const root = await mkdtemp(join(tmpdir(), 'dragons-installed-'));
 let child, server, host, runtime, socket;
 let finished = false, timedOut = false;
 let stage = 'setup';
+let startupFailure = 'unknown';
 const deadline = setTimeout(() => { timedOut = true; child?.kill('SIGKILL'); socket?.close(); process.exitCode = 1; }, 45000);
 try {
   const home = join(root, 'home');
@@ -67,6 +68,10 @@ try {
     child.once('exit', () => reject(new Error('Packaged executable exited before readiness')));
     child.stderr.on('data', (chunk) => {
       buffer = (buffer + chunk).slice(-8192);
+      // Fixed labels only: never expose arbitrary native logs, paths or credentials.
+      if (/No usable sandbox|SUID sandbox helper binary|Failed to move to new namespace|Operation not permitted/.test(buffer)) startupFailure = 'sandbox-unavailable';
+      else if (/error while loading shared libraries/.test(buffer)) startupFailure = 'missing-shared-library';
+      else if (/Missing X server|cannot open display/.test(buffer)) startupFailure = 'display-unavailable';
       const match = buffer.match(/DevTools listening on (ws:\/\/127\.0\.0\.1:\d+\/[^\s]+)/);
       if (match) resolve_(match[1]);
     });
@@ -130,7 +135,7 @@ try {
   console.log('DESKTOP_INSTALLED_SMOKE_PASS packaged entry / native module import / sandbox / remote runtime / READ authorization / continuation / quit');
 } catch {
   process.exitCode = 1;
-  console.error(`DESKTOP_INSTALLED_SMOKE_FAILED stage=${stage} (raw process/model output suppressed)`);
+  console.error(`DESKTOP_INSTALLED_SMOKE_FAILED stage=${stage} startup=${startupFailure} exit=${child?.exitCode ?? 'none'} signal=${child?.signalCode ?? 'none'} (raw process/model output suppressed)`);
 } finally {
   clearTimeout(deadline);
   socket?.close();
