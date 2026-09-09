@@ -16,9 +16,11 @@ const run = async (file, args, extra = {}) => {
     // Parser diagnostics contain policy paths, not application/provider payloads.
     if (file === 'sudo' && args[0] === 'apparmor_parser') console.error(String(error.stderr).slice(0, 2000));
     if (file === 'xvfb-run') {
-      for (const line of String(error.stderr).split('\n')) {
-        if (/^DESKTOP_INSTALLED_SMOKE_FAILED stage=[a-z-]+ startup=[a-z-]+ exit=(?:[0-9]+|none) signal=(?:[A-Z0-9]+|none) \(raw process\/model output suppressed\)$/.test(line)) console.error(line);
+      for (const line of `${error.stdout}\n${error.stderr}`.split('\n')) {
+        if (line.startsWith('DESKTOP_INSTALLED_SMOKE_') || line.startsWith('PACKAGED_RENDERER_INITIAL_DOM_READY=')) console.error(line.slice(0, 512));
       }
+      const diagnostic = String(error.stderr);
+      console.error(JSON.stringify({ xvfbFailure: diagnostic.includes('xvfb-run: error:'), missingModule: diagnostic.includes('ERR_MODULE_NOT_FOUND'), permissionDenied: diagnostic.includes('EACCES'), stderrBytes: diagnostic.length }));
     }
     throw error;
   }
