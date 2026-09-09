@@ -108,10 +108,12 @@ async function scenario(executable, mode) {
       assert.deepEqual(await evaluate('[typeof require, typeof process]'), ['undefined', 'undefined']);
       await evaluate('document.querySelector("#create").click()');
       await until(() => evaluate('document.querySelector("#send")?.disabled === false'));
+      stage = 'persisted-session';
       const sessionDirectory = join(state, 'sessions');
       const files = (await readdir(sessionDirectory)).filter((name) => name.endsWith('.json'));
       assert.equal(files.length, 1);
       const session = JSON.parse(await readFile(join(sessionDirectory, files[0]), 'utf8'));
+      stage = 'workspace-binding';
       await assertPickerBinding(session, workspace, launchDirectory, await evaluate('document.querySelector("#session").textContent'));
       stage = 'graceful-quit';
       socket.send(JSON.stringify({ id: ++sequence, method: 'Page.close' }));
@@ -120,8 +122,9 @@ async function scenario(executable, mode) {
     }
     assert.equal(spawnFailed, false);
     completed = true;
-  } catch {
-    throw new Error(`NATIVE_PICKER_FAILED mode=${mode} stage=${stage} (native output suppressed)`);
+  } catch (error) {
+    const reason = ['PICKER_SELECTED_PATH_MISMATCH', 'PICKER_LAUNCHER_COLLISION', 'PICKER_DISPLAYED_ID_MISMATCH'].find((value) => error.message?.startsWith(value)) || 'unclassified';
+    throw new Error(`NATIVE_PICKER_FAILED mode=${mode} stage=${stage} reason=${reason} (native output suppressed)`);
   } finally {
     socket?.close();
     await cleanupPicker(async () => {
