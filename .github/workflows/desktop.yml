@@ -51,9 +51,22 @@ jobs:
             pnpm acceptance:installed "desktop-artifacts/win-unpacked/Dragons Agent.exe"
           fi
       # Linux needs a display and a working Chromium sandbox. Do not add --no-sandbox.
+      - name: Install packaged Chromium sandbox helper (Linux runner only)
+        if: runner.os == 'Linux'
+        run: |
+          test "$(id -u)" -ne 0
+          test -f desktop-artifacts/linux-unpacked/chrome-sandbox
+          test ! -L desktop-artifacts/linux-unpacked/chrome-sandbox
+          sudo install -o root -g root -m 4755 desktop-artifacts/linux-unpacked/chrome-sandbox /usr/local/lib/dragons-chrome-sandbox
+          test "$(stat -c '%u:%g:%a' /usr/local/lib/dragons-chrome-sandbox)" = '0:0:4755'
       - name: Smoke actual packaged executable (Linux)
         if: runner.os == 'Linux'
+        env:
+          CHROME_DEVEL_SANDBOX: /usr/local/lib/dragons-chrome-sandbox
         run: xvfb-run --auto-servernum pnpm acceptance:installed desktop-artifacts/linux-unpacked/dragons-agent
+      - name: Remove Linux runner sandbox helper
+        if: always() && runner.os == 'Linux'
+        run: sudo rm -f /usr/local/lib/dragons-chrome-sandbox
       - run: pnpm desktop:dist
       - name: Mount, copy, launch and remove macOS image application
         if: runner.os == 'macOS'

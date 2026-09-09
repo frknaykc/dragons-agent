@@ -58,7 +58,7 @@ try {
   const env = { HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: join(home, 'config'), APPDATA: join(home, 'config'),
     LOCALAPPDATA: join(home, 'local'), PATH: process.env.PATH || '', TMPDIR: root, TEMP: root, TMP: root,
     DRAGONS_RUNTIME_URL: server.url, DRAGONS_REMOTE_TOKEN: token };
-  for (const name of ['SystemRoot', 'WINDIR', 'DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS']) if (process.env[name]) env[name] = process.env[name];
+  for (const name of ['SystemRoot', 'WINDIR', 'DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'CHROME_DEVEL_SANDBOX']) if (process.env[name]) env[name] = process.env[name];
   child = spawn(executable, ['--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', `--user-data-dir=${join(root, 'chromium')}`], { cwd: root, env, stdio: ['ignore', 'ignore', 'pipe'] });
   // Only inspect the fixed DevTools address; never print child logs or request payloads.
   stage = 'process-readiness';
