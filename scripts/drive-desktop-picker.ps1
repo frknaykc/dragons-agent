@@ -43,6 +43,38 @@ public static class PickerFocus {
   }
   delegate bool EnumWindow(IntPtr handle, IntPtr parameter);
   [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumWindow callback, IntPtr parameter);
+  [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr handle);
+  [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr handle);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr handle);
+  [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode)] static extern IntPtr SendText(IntPtr handle, uint message, UIntPtr parameter, string text, uint flags, uint timeout, out UIntPtr result);
+  public static IntPtr FolderEdit(IntPtr dialog) {
+    IntPtr found = IntPtr.Zero;
+    int matches = 0;
+    EnumChildWindows(dialog, (child, unused) => {
+      if (ClassLabel(child) != "Edit" || !IsWindowVisible(child)) return true;
+      for (IntPtr parent = child; parent != IntPtr.Zero && parent != dialog; parent = GetParent(parent)) {
+        if (GetDlgCtrlID(parent) == 1148) { found = child; matches++; break; }
+      }
+      return true;
+    }, IntPtr.Zero);
+    return matches == 1 ? found : IntPtr.Zero;
+  }
+  public static bool EnterPath(IntPtr dialog, IntPtr edit, string path) {
+    UIntPtr result;
+    return edit != IntPtr.Zero && GetAncestor(edit, 2) == dialog && GetForegroundWindow() == dialog &&
+      SendText(edit, 12, UIntPtr.Zero, path, 2, 1000, out result) != IntPtr.Zero;
+  }
+  public static bool ConfirmFolder(IntPtr dialog) {
+    IntPtr button = IntPtr.Zero;
+    int matches = 0;
+    EnumChildWindows(dialog, (child, unused) => {
+      if (ClassLabel(child) == "Button" && GetDlgCtrlID(child) == 1 && IsWindowVisible(child)) { button = child; matches++; }
+      return true;
+    }, IntPtr.Zero);
+    UIntPtr result;
+    return matches == 1 && GetForegroundWindow() == dialog &&
+      SendMessageTimeout(button, 245, UIntPtr.Zero, null, 2, 1000, out result) != IntPtr.Zero;
+  }
   static string ClassLabel(IntPtr handle) {
     var text = new StringBuilder(128);
     GetClassName(handle, text, text.Capacity);
@@ -62,6 +94,7 @@ public static class PickerFocus {
     int total = 0;
     EnumChildWindows(dialog, (child, unused) => {
       string label = ClassLabel(child);
+      if (label == "Edit") label += "/" + GetDlgCtrlID(child) + "/parent-" + GetDlgCtrlID(GetParent(child));
       if (!counts.ContainsKey(label)) counts[label] = 0;
       counts[label]++;
       return ++total < 128;
@@ -96,42 +129,36 @@ try {
   } else {
     $stage = 'directory-navigation'
     Write-Output "NATIVE_PICKER_DIAGNOSTIC stage=$stage"
-    # Navigate through the real shell dialog; never pass a workspace to the application.
-    [System.Windows.Forms.SendKeys]::SendWait('%d')
-    $stage = 'navigation-edit-focus'
+    # Drive the real common-item dialog's Folder field, not application IPC.
+    $stage = 'folder-edit-discovery'
     $edit = [IntPtr]::Zero
     do {
       if ([PickerFocus]::GetForegroundWindow() -ne $handle) { throw 'Native dialog lost focus' }
-      $edit = [PickerFocus]::FocusedEdit($handle)
+      $edit = [PickerFocus]::FolderEdit($handle)
       if ($edit -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 100 }
     } until ($edit -ne [IntPtr]::Zero -or [DateTime]::UtcNow -gt $deadline)
     if ($edit -eq [IntPtr]::Zero) {
       Write-Output ('NATIVE_PICKER_DIAGNOSTIC ' + [PickerFocus]::FocusDiagnostic($handle))
       throw 'Native edit focus unavailable'
     }
-    $escaped = [regex]::Replace($Workspace, '[+^%~(){}\[\]]', { param($m) '{' + $m.Value + '}' })
-    [System.Windows.Forms.SendKeys]::SendWait($escaped)
+    if (-not [PickerFocus]::EnterPath($handle, $edit, $Workspace)) { throw 'Native path entry failed' }
     $stage = 'navigation-path-readback'
     do {
-      if ([PickerFocus]::GetForegroundWindow() -ne $handle -or [PickerFocus]::FocusedEdit($handle) -ne $edit) { throw 'Native edit lost focus' }
+      if ([PickerFocus]::GetForegroundWindow() -ne $handle) { throw 'Native dialog lost focus' }
       $matches = [PickerFocus]::ContainsPath($edit, $Workspace)
       if (-not $matches) { Start-Sleep -Milliseconds 100 }
     } until ($matches -or [DateTime]::UtcNow -gt $deadline)
     if (-not $matches) { throw 'Native path input not confirmed' }
     Write-Output 'NATIVE_PICKER_DIAGNOSTIC stage=navigation-path-confirmed'
-    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
-    $stage = 'keyboard-confirmation'
+    $stage = 'native-button-confirmation'
     Write-Output "NATIVE_PICKER_DIAGNOSTIC stage=$stage"
-    # Hosted Windows exposes the dialog but an empty UIA descendant tree.
-    # Use its native Select Folder accelerator; persisted session binding is the oracle.
-    # Enter may already complete the folder selection and destroy the native dialog.
-    # Never deliver another shortcut to the application window in that case.
-    while ([PickerFocus]::IsWindow($handle) -and [PickerFocus]::GetForegroundWindow() -ne $handle -and [DateTime]::UtcNow -lt $deadline) {
+    if (-not [PickerFocus]::ConfirmFolder($handle)) { throw 'Native confirmation unavailable' }
+    # The first click may navigate into the directory and clear Folder rather than close.
+    while ([PickerFocus]::IsWindow($handle) -and -not [PickerFocus]::ContainsPath($edit, '') -and [DateTime]::UtcNow -lt $deadline) {
       Start-Sleep -Milliseconds 100
     }
     if ([PickerFocus]::IsWindow($handle)) {
-      if ([PickerFocus]::GetForegroundWindow() -ne $handle) { throw 'Native dialog lost focus' }
-      [System.Windows.Forms.SendKeys]::SendWait('%s')
+      if (-not [PickerFocus]::ContainsPath($edit, '') -or -not [PickerFocus]::ConfirmFolder($handle)) { throw 'Native folder navigation incomplete' }
     }
   }
   Write-Output "NATIVE_PICKER_DRIVEN $Mode"
