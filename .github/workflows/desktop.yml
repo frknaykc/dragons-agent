@@ -50,6 +50,10 @@ jobs:
           else
             pnpm acceptance:installed "desktop-artifacts/win-unpacked/Dragons Agent.exe"
           fi
+      - name: Verify packaged Windows native credential stores (synthetic accounts)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: node scripts/verify-desktop-credentials.mjs "desktop-artifacts/win-unpacked/Dragons Agent.exe" "desktop-artifacts/win-unpacked/resources/app.asar"
       # Linux needs a display and a working Chromium sandbox. Do not add --no-sandbox.
       - name: Prepare sandboxed Linux application (ephemeral runner only)
         if: runner.os == 'Linux'
