@@ -87,6 +87,10 @@ jobs:
           sudo rm -rf /opt/dragons-ci || status=1
           exit "$status"
       - run: pnpm desktop:dist
+      - name: Install, exercise and uninstall Windows NSIS application
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/verify-desktop-nsis.ps1
       - name: Mount, copy, launch and remove macOS image application
         if: runner.os == 'macOS'
         shell: bash
