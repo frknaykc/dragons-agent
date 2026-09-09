@@ -9,7 +9,15 @@ const exec = promisify(execFile);
 const mode = process.argv[2];
 const artifact = resolve(process.argv[3] || '.');
 let stage = 'preconditions';
-const run = (file, args, extra = {}) => exec(file, args, { timeout: 120000, maxBuffer: 1024 * 1024, ...extra });
+const run = async (file, args, extra = {}) => {
+  try { return await exec(file, args, { timeout: 120000, maxBuffer: 1024 * 1024, ...extra }); }
+  catch (error) {
+    console.error(`LINUX_COMMAND_FAILED stage=${stage} tool=${file} code=${error.code}`);
+    // Parser diagnostics contain policy paths, not application/provider payloads.
+    if (file === 'sudo' && args[0] === 'apparmor_parser') console.error(String(error.stderr).slice(0, 2000));
+    throw error;
+  }
+};
 const exists = async (path) => { try { await lstat(path); return true; } catch (e) { if (e.code === 'ENOENT') return false; throw e; } };
 async function mountPresent(path) {
   try { await run('findmnt', ['--mountpoint', path, '--noheadings', '--output', 'TARGET']); return true; }
@@ -39,8 +47,12 @@ async function withProfile(executable, smoke) {
   }
 }
 async function smoke(executable, archive) {
+  const scope = stage;
+  stage = `${scope}-archive`;
   await run(process.execPath, ['scripts/verify-desktop-package.mjs', archive]);
+  stage = `${scope}-profile`;
   await withProfile(executable, async () => {
+    stage = `${scope}-runtime`;
     await run('xvfb-run', ['--auto-servernum', process.execPath, 'scripts/verify-desktop-installed.mjs', executable]);
   });
 }
