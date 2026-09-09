@@ -32,6 +32,8 @@ macOS artifacts use an ad-hoc signature and are **not notarized**. Windows signi
 
 The manual `Desktop package validation` workflow builds natively, audits the archive and exercises the real unpacked executable. It also tests the macOS DMG copy/remove path. It has read-only repository permissions and no upload/publish/signing step. Workflow definition is not evidence that its jobs passed.
 
+On the ephemeral Ubuntu runner, the audited application is copied root-owned into `/opt/dragons-ci`. The packaged Chromium helper receives root ownership and mode `4755`; an exact-executable AppArmor profile grants `userns` for Chromium sandbox creation. This is not a general AppArmor confinement profile. No global user-namespace restriction is disabled and the application runs as the normal runner user without `--no-sandbox`. Cleanup independently attempts profile unload, profile-file removal and application removal, and reports any failure. This CI-specific setup is not Linux end-user installation acceptance.
+
 ## Verification levels
 
 1. `pnpm test` includes deterministic workspace-selection, archive-policy, run-outcome and DMG cleanup failure-path tests.
@@ -48,11 +50,13 @@ The manual `Desktop package validation` workflow builds natively, audits the arc
 - Local repository gates after harness remediation: **530/530 PASS**, typecheck/build and clean-install npm package verification PASS (`pnpm release:check`). Full and production dependency audits: no known vulnerabilities.
 - DMG read-only copy/audit/real-executable/graceful-close/remove acceptance: **PASS** on macOS arm64. Deep/strict ad-hoc application signature verification: **PASS**. These do not establish public-trust signing.
 - Independent review identified harness false-positive and mount-cleanup issues. All three P2 findings were remediated with regression coverage; the targeted read-only re-review returned **PASS (3/3 fixed)**. This verdict covers those repairs, not cross-platform or complete M77 acceptance.
-- Windows/Linux native packaging and smoke: **NOT_RUN**.
+- Windows/Linux/macOS native packaging, archive audit, real executable smoke and host distribution generation: **PASS** at `b0b1628794835ef5eb1e94d2a2a1caa939c9d534`, Desktop workflow run `34326851285`. Linux required the scoped runner sandbox setup above. Windows ASAR lookups were corrected to use native path separators.
 - Windows NSIS and Linux AppImage/DEB install/remove: **NOT_RUN**.
 - macOS Intel or other CPU architectures: **NOT_RUN**.
 - Clean-machine trust/signing/notarization: **NOT_CONFIGURED / NOT_RUN**.
 - Native workspace picker end-to-end and native credential-store access: **NOT_RUN**.
-- No M77 commit, push, remote CI dispatch, publication or release is implied by local acceptance.
+- M77 foundation and CI remediation commits were pushed to `main`; no publication, version bump, tag or release occurred.
+- Normal CI passed on all three platforms at `c485446` (run `34326374330`) and `9d7f42d` (run `34327247953`). However, Windows failed the M60 review regression at intervening `b0b1628` (run `34326851401`): the job settled as `failed`, not `completed`. Replacing a 500 ms poll with `manager.wait()` improved completion/cleanup observation but did **not** establish the underlying cause or resolve this intermittent failure. Fixed filesystem error-code diagnostics are now present; a later green run is not proof of remediation. **This remains an open acceptance blocker.**
+- Independent review passed the ASAR, startup diagnostic and job-wait changes. The Linux policy re-review identified cleanup short-circuiting after a command failure; independent cleanup attempts now preserve failure status, with four mocked-shell success/failure scenarios passing. Native end-user trust/credential-store acceptance remains separate.
 
 Do not mark M77 CLOSED until the selected platform acceptance matrix and distribution/signing policy are explicitly settled and the corresponding evidence is available.

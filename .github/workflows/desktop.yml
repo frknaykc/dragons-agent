@@ -72,11 +72,13 @@ jobs:
       - name: Remove Linux runner sandbox configuration
         if: always() && runner.os == 'Linux'
         run: |
+          status=0
           if [[ -f /etc/apparmor.d/dragons-ci ]]; then
-            sudo apparmor_parser -R /etc/apparmor.d/dragons-ci
-            sudo rm /etc/apparmor.d/dragons-ci
+            sudo apparmor_parser -R /etc/apparmor.d/dragons-ci || status=1
+            sudo rm /etc/apparmor.d/dragons-ci || status=1
           fi
-          sudo rm -rf /opt/dragons-ci
+          sudo rm -rf /opt/dragons-ci || status=1
+          exit "$status"
       - run: pnpm desktop:dist
       - name: Mount, copy, launch and remove macOS image application
         if: runner.os == 'macOS'
