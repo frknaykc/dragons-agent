@@ -292,6 +292,8 @@ Plans are bounded, explicit session-local tasks. Subagents are one-level only an
 
 Duration exhaustion also terminalizes a job when it occurs during initial durable admission, without invoking a model after cancellation. Local embeddings can await `PersistentBackgroundJobManager.wait(id)` while a job is active to include outstanding cancellation polling and execution-claim release; a terminal status alone is not a filesystem-cleanup barrier. Polling remains single-flight.
 
+On Windows, atomic job-file replacement retries transient `EPERM` failures up to six attempts with at most 310 ms of scheduled backoff. The existing store lock and revision checks remain in force; the destination is never deleted as a fallback, permissions are not relaxed, and persistent failures remain errors.
+
 ## Coding intelligence
 
 v0.1.0 includes bounded repository intelligence, JavaScript/TypeScript symbol navigation, approval-gated unified-diff `apply_patch`, heuristic test recommendations, and Git/current-run self-review.

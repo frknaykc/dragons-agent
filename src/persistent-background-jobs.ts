@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { AgentRunCancelledError, runAgent, type AgentEvent, type AgentModel } from "./agent.js";
@@ -10,6 +10,7 @@ import type { ProjectContext } from "./project-context.js";
 import type { SkillsContext } from "./skills.js";
 import type { AgentTool } from "./tools.js";
 import { joinPlatformPath } from "./platform-path.js";
+import { renamePersistentJob } from "./persistent-job-rename.js";
 
 export const PERSISTENT_BACKGROUND_JOB_VERSION = 1;
 export const DEFAULT_MAX_PERSISTENT_BACKGROUND_JOBS = 128;
@@ -199,7 +200,7 @@ async function writeJob(filePath: string, job: PersistentBackgroundJob): Promise
   try {
     await writeFile(temporaryPath, `${JSON.stringify(job, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     await chmod(temporaryPath, 0o600);
-    await rename(temporaryPath, filePath);
+    await renamePersistentJob(temporaryPath, filePath);
     await chmod(filePath, 0o600);
   } finally {
     await rm(temporaryPath, { force: true });
