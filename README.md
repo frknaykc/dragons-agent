@@ -126,7 +126,7 @@ python3 scripts/verify-tui-pty.py  # POSIX PTY fixture; not a native-emulator vi
 
 ## Desktop foundation
 
-The desktop client uses a small Electron shell with plain local HTML/CSS/JavaScript, rather than a UI framework or a second agent engine. Electron and its packaging tools are **development-only** dependencies; the CLI package's installation requirements are unchanged. M77 adds local development packaging, not a published or fully accepted cross-platform release.
+The desktop client uses a small Electron shell with plain local HTML/CSS/JavaScript, rather than a UI framework or a second agent engine. Electron and its packaging tools are **development-only** dependencies; the CLI package's installation requirements are unchanged. M77 provides native development packages for macOS arm64, Windows x64 and Linux x64, not a published or publicly trusted release.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -143,11 +143,11 @@ The sandboxed renderer has no Node integration. Its isolated preload exposes onl
 
 Deterministic bridge tests run on all CI platforms without a GUI. `acceptance:desktop` separately exercises the actual Electron window, sandbox/preload, configured model defaults, inert model content, streaming, real isolated write allow/deny, cancellation, resume and reload cleanup. Reload is a fail-closed disconnect: the window closes and cancels its run; reopen and resume explicitly. Neither test path establishes live provider acceptance.
 
-### Development application packages (M77 in progress)
+### Development application packages (M77)
 
 `pnpm desktop:pack` builds an unpacked application for the host platform; `pnpm desktop:dist` builds local DMG/ZIP (macOS), NSIS (Windows), or AppImage/DEB (Linux) targets. Outputs go to ignored `desktop-artifacts/`. Build natively on each platform: a successful macOS build does not verify Windows/Linux or another CPU architecture. The Electron entry point is overridden only in the application package; npm continues to expose the CLI/runtime.
 
-These are unsigned/ad-hoc development artifacts, not notarized or publicly trusted installers. No auto-update, publishing, version bump, tag, or release is included. See [M77 scope, commands and outstanding acceptance](docs/m77-application-distribution.md) before treating a package as distributable.
+These are unsigned/ad-hoc development artifacts, not notarized or publicly trusted installers. No auto-update, publishing, version bump, tag, or release is included. See [M77 scope, acceptance evidence and limitations](docs/m77-application-distribution.md) before treating a package as distributable.
 
 ## Live provider acceptance
 
