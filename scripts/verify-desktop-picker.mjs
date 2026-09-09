@@ -7,7 +7,7 @@ import { mkdtemp, mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathExists } from './desktop-linux-acceptance.mjs';
-import { assertPickerBinding } from './desktop-picker-acceptance.mjs';
+import { assertPickerBinding, cleanupPicker, signalPickerGroup } from './desktop-picker-acceptance.mjs';
 const exec = promisify(execFile);
 const run = (command, args) => exec(command, args, { timeout: 25000, maxBuffer: 8192 });
 const pause = () => new Promise((r) => setTimeout(r, 100));
@@ -18,7 +18,12 @@ async function until(probe, timeout = 15000) {
 }
 async function drive(child, mode, workspace) {
   if (process.platform === 'win32') {
-    const result = await run('pwsh', ['-NoProfile', '-File', 'scripts/drive-desktop-picker.ps1', '-ApplicationPid', String(child.pid), '-Mode', mode, '-Workspace', workspace]);
+    let result;
+    try { result = await run('pwsh', ['-NoProfile', '-File', 'scripts/drive-desktop-picker.ps1', '-ApplicationPid', String(child.pid), '-Mode', mode, '-Workspace', workspace]); }
+    catch (error) {
+      for (const line of String(error.stdout).split('\n')) if (line.startsWith('NATIVE_PICKER_DIAGNOSTIC ')) console.error(line.slice(0, 4096));
+      throw error;
+    }
     assert.equal(result.stdout.trim(), `NATIVE_PICKER_DRIVEN ${mode}`);
     return;
   }
@@ -45,7 +50,7 @@ async function drive(child, mode, workspace) {
 }
 async function scenario(executable, mode) {
   const root = await mkdtemp(join(tmpdir(), 'dragons-native-picker-'));
-  let child, socket, ended = false, spawnFailed = false, stage = 'setup', sequence = 0;
+  let child, socket, ended = false, spawnFailed = false, stage = 'setup', sequence = 0, completed = false;
   let exit;
   try {
     const home = join(root, 'home'), workspace = join(root, 'selected workspace'), launchDirectory = join(root, 'launcher');
@@ -56,7 +61,7 @@ async function scenario(executable, mode) {
       PATH: process.env.PATH || '', TMPDIR: root, TMP: root, TEMP: root };
     for (const key of ['SystemRoot', 'WINDIR', 'DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'CHROME_DEVEL_SANDBOX']) if (process.env[key]) env[key] = process.env[key];
     let debugging, buffer = '';
-    child = spawn(executable, ['--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', `--user-data-dir=${join(root, 'chromium')}`], { cwd: launchDirectory, env, stdio: ['ignore', 'ignore', 'pipe'] });
+    child = spawn(executable, ['--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', `--user-data-dir=${join(root, 'chromium')}`], { cwd: launchDirectory, env, detached: process.platform === 'linux', stdio: ['ignore', 'ignore', 'pipe'] });
     exit = new Promise((r) => {
       child.once('exit', (code, signal) => { ended = true; r([code, signal]); });
       child.once('error', () => { spawnFailed = true; ended = true; r([null, 'spawn-error']); });
@@ -113,17 +118,27 @@ async function scenario(executable, mode) {
       assert.deepEqual(await exit, [0, null]);
     }
     assert.equal(spawnFailed, false);
+    completed = true;
   } catch {
     throw new Error(`NATIVE_PICKER_FAILED mode=${mode} stage=${stage} (native output suppressed)`);
   } finally {
     socket?.close();
-    if (child?.pid && !ended) {
-      if (process.platform === 'win32') await run('taskkill', ['/PID', String(child.pid), '/T', '/F']);
-      else child.kill('SIGKILL');
-      await until(() => ended, 5000);
-    }
-    await rm(root, { recursive: true, force: true });
-    assert.equal(await pathExists(root), false);
+    await cleanupPicker(async () => {
+      if (child?.pid && process.platform === 'linux') {
+        // A dedicated process group owns Chromium descendants even after parent exit.
+        try { if (completed) await until(() => !signalPickerGroup(child.pid, 0), 5000); }
+        finally {
+          signalPickerGroup(child.pid, 'SIGKILL');
+          await until(() => !signalPickerGroup(child.pid, 0), 5000);
+        }
+      } else if (child?.pid && !ended) {
+        await run('taskkill', ['/PID', String(child.pid), '/T', '/F']);
+        await until(() => ended, 5000);
+      }
+    }, async () => {
+      await rm(root, { recursive: true, force: true });
+      assert.equal(await pathExists(root), false);
+    });
   }
   console.log(`NATIVE_PICKER_PASS ${mode} / real dialog / clean exit / isolated state cleanup`);
 }

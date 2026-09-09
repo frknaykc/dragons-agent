@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { assertPickerBinding } from './desktop-picker-acceptance.mjs';
+import { assertPickerBinding, cleanupPicker, signalPickerGroup } from './desktop-picker-acceptance.mjs';
 
 for (const condition of ['selected', 'launcher', 'other', 'wrong-session', 'missing-session']) {
   test(`picker binding validates ${condition}`, async () => {
@@ -17,3 +17,22 @@ for (const condition of ['selected', 'launcher', 'other', 'wrong-session', 'miss
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 }
+
+test('cleanup attempts directory removal even if process cleanup fails', async () => {
+  let removed = false;
+  await assert.rejects(() => cleanupPicker(async () => { throw new Error('stop failed'); }, async () => { removed = true; }));
+  assert.equal(removed, true);
+});
+test('cleanup errors cannot pass', async () => {
+  await assert.rejects(() => cleanupPicker(async () => {}, async () => { throw new Error('remove failed'); }));
+});
+test('owned process group signals use negative PID, never just the parent', () => {
+  assert.equal(signalPickerGroup(123, 'SIGKILL', (pid, signal) => {
+    assert.equal(pid, -123); assert.equal(signal, 'SIGKILL');
+  }), true);
+  assert.throws(() => signalPickerGroup(0, 0, () => {}));
+});
+test('only absent process group is accepted; inspection errors fail closed', () => {
+  assert.equal(signalPickerGroup(123, 0, () => { throw Object.assign(new Error(), { code: 'ESRCH' }); }), false);
+  assert.throws(() => signalPickerGroup(123, 0, () => { throw Object.assign(new Error(), { code: 'EPERM' }); }));
+});

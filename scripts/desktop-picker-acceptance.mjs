@@ -8,3 +8,13 @@ export async function assertPickerBinding(session, workspace, launchDirectory, d
   assert.notEqual(await realpath(session.workingDirectory), await realpath(launchDirectory));
   assert.equal(displayedSession.split(' · ')[0], session.id);
 }
+
+export function signalPickerGroup(pid, signal, kill = process.kill) {
+  assert.ok(Number.isSafeInteger(pid) && pid > 0);
+  try { kill(-pid, signal); return true; }
+  catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+}
+
+export async function cleanupPicker(stop, remove) {
+  try { await stop(); } finally { await remove(); }
+}
