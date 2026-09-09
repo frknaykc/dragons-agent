@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, open, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { AgentRunCancelledError, runAgent, type AgentEvent, type AgentModel } from "./agent.js";
@@ -10,7 +10,7 @@ import type { ProjectContext } from "./project-context.js";
 import type { SkillsContext } from "./skills.js";
 import type { AgentTool } from "./tools.js";
 import { joinPlatformPath } from "./platform-path.js";
-import { renamePersistentJob } from "./persistent-job-rename.js";
+import { retryPersistentJobRename } from "./persistent-job-rename.js";
 
 export const PERSISTENT_BACKGROUND_JOB_VERSION = 1;
 export const DEFAULT_MAX_PERSISTENT_BACKGROUND_JOBS = 128;
@@ -200,7 +200,7 @@ async function writeJob(filePath: string, job: PersistentBackgroundJob): Promise
   try {
     await writeFile(temporaryPath, `${JSON.stringify(job, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     await chmod(temporaryPath, 0o600);
-    await renamePersistentJob(temporaryPath, filePath);
+    await rename(temporaryPath, filePath);
     await chmod(filePath, 0o600);
   } finally {
     await rm(temporaryPath, { force: true });
@@ -323,27 +323,29 @@ export function createPersistentBackgroundJobStore(directory: string, options: P
     async save(job, expectedRevision): Promise<PersistentBackgroundJob> {
       if (!isPersistentBackgroundJob(job)) throw new Error("Refusing to save an invalid or credential-bearing persistent background job.");
       await ensureJobDirectory(directory, true);
-      const releaseStoreLock = await acquireStoreLock(directory);
-      try {
-        const path = jobPath(directory, job.id);
-        const serialized = await readVerifiedRegularFile(path);
-        const existing = serialized === undefined ? undefined : JSON.parse(serialized) as unknown;
-        const existingJob = isPersistentBackgroundJob(existing) ? existing : undefined;
-        if (serialized !== undefined && existingJob === undefined) throw new Error("Persistent background job file is invalid or unsafe.");
-        if (existingJob === undefined) {
-          if (expectedRevision !== undefined) throw new Error("Persistent background job changed before it could be saved.");
-          const entries = await readdir(directory, { withFileTypes: true });
-          const count = entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json") && UUID_PATTERN.test(entry.name.slice(0, -5))).length;
-          if (count >= maxJobs) throw new Error(`Persistent background job storage limit reached (${maxJobs}).`);
-        } else if (expectedRevision === undefined || existingJob.revision !== expectedRevision) {
-          throw new Error("Persistent background job changed before it could be saved.");
+      return retryPersistentJobRename(async () => {
+        const releaseStoreLock = await acquireStoreLock(directory);
+        try {
+          const path = jobPath(directory, job.id);
+          const serialized = await readVerifiedRegularFile(path);
+          const existing = serialized === undefined ? undefined : JSON.parse(serialized) as unknown;
+          const existingJob = isPersistentBackgroundJob(existing) ? existing : undefined;
+          if (serialized !== undefined && existingJob === undefined) throw new Error("Persistent background job file is invalid or unsafe.");
+          if (existingJob === undefined) {
+            if (expectedRevision !== undefined) throw new Error("Persistent background job changed before it could be saved.");
+            const entries = await readdir(directory, { withFileTypes: true });
+            const count = entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json") && UUID_PATTERN.test(entry.name.slice(0, -5))).length;
+            if (count >= maxJobs) throw new Error(`Persistent background job storage limit reached (${maxJobs}).`);
+          } else if (expectedRevision === undefined || existingJob.revision !== expectedRevision) {
+            throw new Error("Persistent background job changed before it could be saved.");
+          }
+          const next: PersistentBackgroundJob = { ...job, revision: existingJob === undefined ? 0 : existingJob.revision + 1 };
+          await writeJob(path, next);
+          return next;
+        } finally {
+          await releaseStoreLock();
         }
-        const next: PersistentBackgroundJob = { ...job, revision: existingJob === undefined ? 0 : existingJob.revision + 1 };
-        await writeJob(path, next);
-        return next;
-      } finally {
-        await releaseStoreLock();
-      }
+      });
     },
     async delete(id): Promise<boolean> {
       try {
