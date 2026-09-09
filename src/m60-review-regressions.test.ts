@@ -22,7 +22,9 @@ test("M60 review regressions bound durable storage, reject raw secrets, and prev
     const model = () => ({ async respond() { return { responseId: "ok", text: "ok", toolCalls: [] }; } });
     await limited.start({ sessionId: SESSION, workingDirectory: directory, prompt: "First.", createModel: model, tools: [readTool] });
     await limited.wait(FIRST);
-    assert.equal(limited.show(FIRST)?.state, "completed", "first job did not finish");
+    const first = limited.show(FIRST);
+    const failureCode = first?.error?.match(/\b(?:EPERM|EACCES|ENOENT|EBUSY)\b/)?.[0] ?? "unclassified";
+    assert.equal(first?.state, "completed", `first job did not finish (${failureCode})`);
     await assert.rejects(limited.start({ sessionId: SESSION, workingDirectory: directory, prompt: "Second.", createModel: model, tools: [readTool] }), /storage limit/i);
     await assert.rejects(limited.start({ sessionId: SESSION, workingDirectory: directory, prompt: "Use sk-proj-abcdefghijklmnopqrstuvwxyz0123456789.", createModel: model, tools: [readTool] }), /secret/i);
 
