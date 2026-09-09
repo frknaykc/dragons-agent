@@ -90,7 +90,9 @@ jobs:
       - name: Install, exercise and uninstall Windows NSIS application
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/verify-desktop-nsis.ps1
+        run: |
+          ./scripts/desktop-nsis-cleanup.test.ps1
+          ./scripts/verify-desktop-nsis.ps1
       - name: Mount, copy, launch and remove macOS image application
         if: runner.os == 'macOS'
         shell: bash

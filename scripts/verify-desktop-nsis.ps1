@@ -43,7 +43,7 @@ try {
   $complete = $true
 } finally {
   try {
-    $uninstallers = @(Get-ChildItem -LiteralPath $install -Filter '*Uninstall*.exe' -File -ErrorAction SilentlyContinue)
+    $uninstallers = @(Get-ChildItem -LiteralPath $install -Filter '*Uninstall*.exe' -File -Force -ErrorAction Stop)
     if ($uninstallers.Count -ne 1) { throw 'No unique NSIS uninstaller; retaining uncertain installation.' }
     # _?= runs the actual uninstaller in place (no detached temp-copy child), so its exit is authoritative.
     Invoke-BoundedInstaller $uninstallers[0].FullName @('/S', "_?=$install")
@@ -55,17 +55,13 @@ try {
       Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -eq 'Dragons Agent' })
     if ($remaining.Count -ne 0) { throw 'Application uninstall registration remains.' }
     # In-place NSIS cannot delete its own executable. Only that exact known residual may be removed manually.
-    $residue = @(Get-ChildItem -LiteralPath $install -Recurse -File -ErrorAction SilentlyContinue)
-    if (@($residue | Where-Object { $_.FullName -ne $uninstallers[0].FullName }).Count -ne 0) {
-      throw 'Unexpected payload residue after NSIS uninstall.'
-    }
+    . (Join-Path $PSScriptRoot 'desktop-nsis-cleanup.ps1')
+    Remove-VerifiedNsisResidue $root $uninstallers[0].FullName
     $uninstalled = $true
     Write-Output 'NSIS_UNINSTALL_VERIFIED'
   } catch {
     Write-Output "NSIS_CLEANUP_INCOMPLETE retained=$root"
     throw
-  } finally {
-    if ($uninstalled) { Remove-Item -LiteralPath $root -Recurse -Force }
   }
 }
 if (-not $attempted -or -not $complete -or -not $uninstalled) { throw 'Incomplete NSIS lifecycle.' }
