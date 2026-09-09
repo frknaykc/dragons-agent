@@ -92,7 +92,7 @@ test("M14 renders one warm-colored interactive input surface", () => {
   });
   noColorRenderer.renderStartup({ provider: "OpenAI API", model: "gpt-4.1-mini", workingDirectory: "." });
   noColorRenderer.renderComposer();
-  assert.doesNotMatch(noColorOutput.join(""), /\x1b\[/);
+  assert.doesNotMatch(noColorOutput.join(""), /\x1b\[[0-9;]*m/);
 });
 
 test("M14 presentation formatters retain real values and concise distinctions", () => {

@@ -465,6 +465,7 @@ async function runInteractiveConversation(
     for (;;) {
       renderer.renderComposer();
       const answer = await answers.next();
+      renderer.finishComposer();
       if (answer.done) {
         backgroundTasks.cancelForSession(session.id);
         return;

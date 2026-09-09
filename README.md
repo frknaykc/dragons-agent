@@ -6,14 +6,29 @@
 [![License](https://img.shields.io/github/license/frknaykc/dragons-agent)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/frknaykc/dragons-agent?style=flat)](https://github.com/frknaykc/dragons-agent)
 
-Dragons Agent is a terminal-native AI coding agent. Its own local runtime owns the agent loop, workspace tools, authorization decisions, sessions, and extensions rather than delegating those controls to a provider client.
+Dragons Agent is a CLI-first AI coding-agent platform with an interactive CLI, an opt-in full-screen TUI, and a desktop client. Its own local runtime owns the agent loop, workspace tools, authorization decisions, sessions, and extensions rather than delegating those controls to a provider client. A loopback remote-runtime API and shared-session host let clients connect to the same authoritative runtime.
 
 **Status:** early public release — **v0.1.0**.
 
 <p align="center">
-  <img src="docs/assets/dragons-cli.png" alt="Dragons Agent interactive CLI showing the banner and a single inline prompt." width="960">
+  <img src="docs/assets/dragons-cli.png" alt="Dragons CLI with a centered DRAGON title, framed gold-to-red dragon, centered metadata, and an input row between red separators." width="960">
 </p>
-<p align="center"><sub>Sanitized deterministic capture of the current interactive CLI, rendered through the real runtime with no provider credentials or workspace data.</sub></p>
+<p align="center"><sub>Native macOS Terminal capture of the production CLI renderer at 120 columns. The credential-free presentation fixture uses demo metadata; it does not run provider inference. Window chrome is cropped to exclude personal paths.</sub></p>
+
+### Run the latest source checkout
+
+The screenshots show the repository version; an installed npm version may differ. Source development requires **Node.js 22+** and **pnpm 11.17.0**.
+
+```sh
+git clone https://github.com/frknaykc/dragons-agent.git
+cd dragons-agent
+pnpm install --frozen-lockfile
+pnpm dragons        # interactive, line-oriented CLI
+pnpm dragons --tui  # full-screen TUI
+pnpm desktop        # Electron desktop client
+```
+
+All three launch commands build first. See the provider setup below before starting a real conversation. Desktop packaging remains a development-distribution milestone, not a signed public installer release.
 
 ## Installation
 
@@ -46,6 +61,14 @@ Use a real key only in your shell or secret manager; never put it in source, a p
 ## Interactive CLI
 
 Run `dragons` without a task to start an interactive session. Run `dragons --help` for the top-level command families and `/help` inside the CLI for local commands.
+
+The TTY startup centers the DRAGON title, motto and provider/workspace metadata. Only the dragon appears inside the red frame, with a continuous gold-to-red gradient. The input row has matching red separators above and below, with model, context and activity status above it. Tool, MCP and skill listings are not startup panels; their existing commands remain available. Redirected/non-TTY output stays plain and omits the banner. The full dragon needs a sufficiently wide terminal; narrower startup artwork is clipped to fit rather than scaled.
+
+<p align="center">
+  <img src="docs/assets/dragons-cli-composer.png" alt="CLI input detail: model and idle status above an input row bounded by two red horizontal separators." width="960">
+</p>
+
+To reproduce the documentation preview without loading credentials or contacting a provider, run `pnpm build && node scripts/preview-cli.mjs` in a native terminal of at least 100 columns × 44 rows. This is a presentation-only fixture, not an interactive agent or live-provider acceptance test. Press Enter to exit. Terminal font and ANSI palette settings affect the appearance.
 
 Useful examples:
 

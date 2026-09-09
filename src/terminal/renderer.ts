@@ -1,5 +1,6 @@
 import type { ToolOperation } from "../tools.js";
-import { DRAGONS_BANNER } from "./banner.js";
+import stringWidth from "string-width";
+import { DRAGONS_ART, DRAGONS_MOTTO, DRAGONS_TITLE } from "./banner.js";
 
 export type ActivityState = "idle" | "thinking" | "reading" | "searching" | "editing" | "running" | "approval" | "cancelled" | "error";
 
@@ -48,7 +49,8 @@ const ANSI = {
   red: "\x1b[31m",
 };
 
-const FIRE_PALETTE = [ANSI.red, ANSI.orange, ANSI.brightYellow];
+const FIRE_GOLD = [255, 185, 45] as const;
+const FIRE_RED = [230, 57, 46] as const;
 
 function truncate(text: string, width: number): string {
   const characters = Array.from(text);
@@ -61,9 +63,48 @@ function style(text: string, sequence: string, color: boolean): string {
   return color ? `${sequence}${text}${ANSI.reset}` : text;
 }
 
-/** Uses only broadly supported ANSI foreground colours when truecolor is unavailable. */
+/** A continuous gold-to-red ramp, rather than repeating color stripes. */
 function fireGradient(text: string, color: boolean): string {
-  return text.split("\n").map((line, index) => style(line, FIRE_PALETTE[index % FIRE_PALETTE.length]!, color)).join("\n");
+  const lines = text.split("\n");
+  return lines.map((line, index) => {
+    const progress = index / Math.max(1, lines.length - 1);
+    const rgb = FIRE_GOLD.map((start, channel) => Math.round(start + (FIRE_RED[channel]! - start) * progress));
+    return style(line, `\x1b[38;2;${rgb.join(";")}m`, color);
+  }).join("\n");
+}
+
+function fitLine(text: string, width: number): string {
+  let result = "";
+  for (const character of text) {
+    if (stringWidth(result + character) > width) break;
+    result += character;
+  }
+  return result;
+}
+
+function centered(text: string, width: number): string {
+  return text.split("\n").map((line) => {
+    const content = fitLine(line.trim(), width);
+    return " ".repeat(Math.max(0, Math.floor((width - stringWidth(content)) / 2))) + content;
+  }).join("\n");
+}
+
+function dragonFrame(width: number, color: boolean): string {
+  const columns = Math.max(4, Math.floor(width));
+  const inner = columns - 4;
+  const art = DRAGONS_ART.split("\n");
+  const artWidth = Math.max(...art.map((line) => stringWidth(line)));
+  const padding = " ".repeat(Math.max(0, Math.floor((inner - artWidth) / 2)));
+  const border = (text: string) => style(text, ANSI.red, color);
+  const painted = fireGradient(art.map((line) => {
+    const content = fitLine(padding + line, inner);
+    return content + " ".repeat(inner - stringWidth(content));
+  }).join("\n"), color).split("\n");
+  return [
+    border(`╭${"─".repeat(columns - 2)}╮`),
+    ...painted.map((line) => `${border("│")} ${line} ${border("│")}`),
+    border(`╰${"─".repeat(columns - 2)}╯`),
+  ].join("\n");
 }
 
 function activityBar(state: ActivityState, frame: number): string {
@@ -145,7 +186,8 @@ export class TerminalRenderer {
   renderStartup(metadata: StartupMetadata): void {
     this.metadata = metadata;
     if (!this.options.isTTY) return;
-    this.options.write(`${fireGradient(DRAGONS_BANNER, this.options.color)}\n${style(`${metadata.provider} · ${metadata.model}`, ANSI.dim, this.options.color)}\n${style(metadata.workingDirectory, ANSI.dim, this.options.color)}\n\n`);
+    const title = centered(DRAGONS_TITLE, this.options.width);
+    this.options.write(`${style(title, ANSI.red, this.options.color)}\n\n${dragonFrame(this.options.width, this.options.color)}\n\n${fireGradient(centered(DRAGONS_MOTTO, this.options.width), this.options.color)}\n${style(centered(`${metadata.provider} · ${metadata.model}`, this.options.width), ANSI.yellow, this.options.color)}\n${style(centered(metadata.workingDirectory, this.options.width), ANSI.dim, this.options.color)}\n\n`);
   }
 
   renderComposer(): void {
@@ -154,11 +196,16 @@ export class TerminalRenderer {
       return;
     }
     const line = this.statusLine();
-    const separator = style(formatSeparator(this.options.width), ANSI.dim, this.options.color);
+    const separator = style(formatSeparator(this.options.width), ANSI.red, this.options.color);
     const identity = style("𓆩 DRAGON 𓆪", ANSI.orange, this.options.color);
     const hint = style("Ask anything, or type / for commands…", ANSI.dim, this.options.color);
     const cursor = style("›", ANSI.brightYellow, this.options.color);
-    this.options.write(`${line}\n${separator}\n  ${identity} ${hint} ${cursor} `);
+    this.options.write(`${line}\n${separator}\n\n${separator}\x1b[1A\r  ${identity} ${hint} ${cursor} `);
+  }
+
+  finishComposer(): void {
+    if (!this.options.isTTY) return;
+    this.options.write(`\r\x1b[2K${style(formatSeparator(this.options.width), ANSI.red, this.options.color)}\n`);
   }
 
   startRun(state: ActivityState = "thinking"): void {
@@ -258,7 +305,7 @@ export class TerminalRenderer {
       sessionElapsedMs: this.now() - this.startedAt,
       runElapsedMs: this.runStartedAt === undefined ? undefined : this.now() - this.runStartedAt,
       width: this.options.width,
-    }), ANSI.dim, this.options.color);
+    }), ANSI.yellow, this.options.color);
   }
 
   private renderTransient(): void {
