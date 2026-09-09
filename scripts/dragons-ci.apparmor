@@ -1,0 +1,8 @@
+# CI-only permission for Chromium's user-namespace sandbox on Ubuntu 24.04+.
+# This exact executable is installed root-owned on an ephemeral native runner.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile dragons-ci /opt/dragons-ci/dragons-agent flags=(unconfined) {
+  userns,
+}
