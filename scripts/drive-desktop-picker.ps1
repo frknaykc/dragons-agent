@@ -41,6 +41,33 @@ public static class PickerFocus {
     UIntPtr result;
     return edit != IntPtr.Zero && SendMessageTimeout(edit, 13, (UIntPtr)text.Capacity, text, 2, 1000, out result) != IntPtr.Zero && text.ToString() == expected;
   }
+  delegate bool EnumWindow(IntPtr handle, IntPtr parameter);
+  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumWindow callback, IntPtr parameter);
+  static string ClassLabel(IntPtr handle) {
+    var text = new StringBuilder(128);
+    GetClassName(handle, text, text.Capacity);
+    switch (text.ToString()) {
+      case "Edit": case "ComboBox": case "ComboBoxEx32": case "ToolbarWindow32":
+      case "DirectUIHWND": case "SysTreeView32": case "Button": case "#32770":
+      case "SysListView32": case "Static": return text.ToString();
+      default: return "other";
+    }
+  }
+  public static string FocusDiagnostic(IntPtr dialog) {
+    uint pid;
+    uint thread = GetWindowThreadProcessId(dialog, out pid);
+    var info = new GuiInfo { Size = Marshal.SizeOf(typeof(GuiInfo)) };
+    bool available = GetGUIThreadInfo(thread, ref info);
+    var counts = new System.Collections.Generic.SortedDictionary<string, int>();
+    int total = 0;
+    EnumChildWindows(dialog, (child, unused) => {
+      string label = ClassLabel(child);
+      if (!counts.ContainsKey(label)) counts[label] = 0;
+      counts[label]++;
+      return ++total < 128;
+    }, IntPtr.Zero);
+    return "gui=" + available + " owned=" + (GetAncestor(info.Focus, 2) == dialog) + " focus=" + ClassLabel(info.Focus) + " children=" + String.Join(",", counts);
+  }
 }
 '@
 try {
@@ -78,7 +105,10 @@ try {
       $edit = [PickerFocus]::FocusedEdit($handle)
       if ($edit -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 100 }
     } until ($edit -ne [IntPtr]::Zero -or [DateTime]::UtcNow -gt $deadline)
-    if ($edit -eq [IntPtr]::Zero) { throw 'Native edit focus unavailable' }
+    if ($edit -eq [IntPtr]::Zero) {
+      Write-Output ('NATIVE_PICKER_DIAGNOSTIC ' + [PickerFocus]::FocusDiagnostic($handle))
+      throw 'Native edit focus unavailable'
+    }
     $escaped = [regex]::Replace($Workspace, '[+^%~(){}\[\]]', { param($m) '{' + $m.Value + '}' })
     [System.Windows.Forms.SendKeys]::SendWait($escaped)
     $stage = 'navigation-path-readback'
