@@ -2,7 +2,9 @@
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stat } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import {
   AgentRunCancelledError,
@@ -16,6 +18,10 @@ import {
   createChatGPTAuthService,
   type ChatGPTAuthService,
 } from "./provider/codex-auth.js";
+import { configureProfileReasoning } from "./reasoning-preferences.js";
+import { readTerminalSecret, type SecretTerminalOutput } from "./cli/secret-input.js";
+import { createApiKeyAuth, isApiKeyProvider, type ApiKeyAuth } from "./provider/api-key-auth.js";
+
 import { createBuiltInProviderRegistry } from "./provider/builtins.js";
 import { DEFAULT_PROVIDER_IDS, type ProviderRegistry } from "./provider/registry.js";
 import { createCodingTools, type AgentTool } from "./tools.js";
@@ -36,6 +42,7 @@ import { loadDragonsConfig, parseDragonsConfig, saveDragonsConfig, type DragonsC
 import { createDragonsRuntime } from "./runtime.js";
 import { connectRemoteRuntime } from "./remote/runtime.js";
 import { runTui, type TuiOutput } from "./tui/terminal.js";
+import { createTuiLocalCommands } from "./tui/local-commands.js";
 import { DRAGONS_VERSION } from "./version.js";
 import {
   compactSessionMessages,
@@ -61,12 +68,31 @@ import {
   createSessionPlanStore,
 } from "./plan.js";
 import { createPlanOrchestrationTools } from "./orchestration.js";
-import { parseCliCommand, providerFrom, type CliCommand, type ProviderName } from "./cli/commands.js";
+import { parseCliCommand as parseBaseCliCommand, providerFrom, type CliCommand, type ProviderName } from "./cli/commands.js";
 import { formatMemorySuggestion, handleInteractiveMemoryCommand, memoryContextFor, runMemoryCommand } from "./cli/memory-commands.js";
 import { handleInteractivePlanCommand, runPlanCommand } from "./cli/plan-commands.js";
 import { handleInteractiveSkillsCommand, runSkillsCommand, writeActiveSkillNotices } from "./cli/skills-commands.js";
+import { SessionCheckpoints, checkpointCommand, isCheckpointCommand } from "./checkpoint.js";
+import { formatSlashHelp, SLASH_COMMANDS } from "./slash-commands.js";
+import { slashChoices } from "./slash-choices.js";
+import { createLineInput, type LineInput } from "./cli/line-input.js";
+import { createDragonsProfileStore, type DragonsProfileStore } from "./profiles.js";
 
-export { parseCliCommand } from "./cli/commands.js";
+type AuthCommand = Extract<CliCommand, { kind: "auth" }> & { provider?: string };
+
+// Auth parsing belongs to this trusted host; keys are never accepted as arguments.
+export function parseCliCommand(arguments_: string[], providerIds: readonly string[] = DEFAULT_PROVIDER_IDS): CliCommand | AuthCommand {
+  const args = arguments_[0] === "--" ? arguments_.slice(1) : arguments_;
+  if (args[0] !== "auth") return parseBaseCliCommand(arguments_, providerIds);
+  const action = args[1];
+  const provider = args[3];
+  if (!["login", "logout", "status"].includes(action ?? "") ||
+      !(args.length === 2 && action === "status" || args.length === 4 && args[2] === "--provider" &&
+        (provider === "chatgpt" || isApiKeyProvider(provider) || provider === "local"))) {
+    throw new Error("Use dragons auth <login|status|logout> --provider <provider>. Never include credentials.");
+  }
+  return { kind: "auth", action: action as AuthCommand["action"], ...(provider && provider !== "chatgpt" ? { provider } : {}) };
+}
 export type { ProviderName } from "./cli/commands.js";
 
 type ModelFactory = { create(provider: ProviderName, model?: string): AgentModel }["create"];
@@ -78,6 +104,9 @@ export type CliDependencies = {
   modelFactory?: ModelFactory;
   /** Registered adapters for this CLI process. Registry metadata never stores credentials or session state. */
   providerRegistry?: ProviderRegistry;
+  apiKeyAuth?: ApiKeyAuth;
+  /** Dedicated terminal output, never the general log/render callback. */
+  secretOutput?: SecretTerminalOutput;
   chatgptAuth?: Pick<ChatGPTAuthService, "login" | "status" | "logout"> & Partial<Pick<ChatGPTAuthService, "credentials">>;
   tools?: AgentTool[];
   input?: NodeJS.ReadableStream;
@@ -88,11 +117,14 @@ export type CliDependencies = {
     inputIsTTY?: boolean;
     outputIsTTY?: boolean;
     columns?: number;
+    resizeSource?: NodeJS.EventEmitter & { columns?: number };
     color?: boolean;
   };
   sessionDirectory?: string;
   sessionStore?: SessionStore;
   configPath?: string;
+  /** Active profile locator; injected only to preserve one profile root through an interactive run. */
+  profileStore?: DragonsProfileStore;
   config?: DragonsConfig;
   /** Dragons-owned skills root. It is never inferred from the project workspace. */
   skillsDirectory?: string;
@@ -172,7 +204,7 @@ function renderEvent(
       arguments: event.arguments,
     });
   }
-  if (event.type === "tool_completed") renderer.renderToolCompleted(event.name, event.result.ok);
+  if (event.type === "tool_completed") renderer.renderToolCompleted(event.name, event.result.ok, event.result.changedPaths, event.result.rollbackCoverage, event.result.lspDiagnostics);
   if (event.type === "agent_cancelled") renderer.renderCancelled();
   if (event.type === "agent_completed") renderer.finishRun();
 }
@@ -230,11 +262,14 @@ function terminalRenderer(
     ? Math.max(1, Math.floor(configuredWidth))
     : 80;
   const color = isTTY && !Object.hasOwn(process.env, "NO_COLOR") && (dependencies.terminal?.color ?? true);
-  return createTerminalRenderer({ write, isTTY, color, width });
+  const resizeSource = dependencies.terminal?.resizeSource ?? (dependencies.terminal?.columns === undefined ? process.stdout : undefined);
+  return createTerminalRenderer({ write, isTTY, color, width, resizeSource });
 }
 
-function providerRegistryFor(dependencies: CliDependencies, localEndpoint?: string): ProviderRegistry {
+function providerRegistryFor(dependencies: CliDependencies, localEndpoint?: string, environmentOnly = false, apiKeySlots?: Partial<Record<import("./provider/api-key-auth.js").ApiKeyProvider, string>>): ProviderRegistry {
   return dependencies.providerRegistry ?? createBuiltInProviderRegistry({
+    apiKeyAuth: dependencies.apiKeyAuth ?? (environmentOnly ? false : undefined),
+    ...(apiKeySlots === undefined ? {} : { apiKeySlots }),
     ...(dependencies.chatgptAuth?.credentials ? { chatgptAuth: { credentials: dependencies.chatgptAuth.credentials } } : {}),
     ...(localEndpoint === undefined ? {} : { localEndpoint }),
   });
@@ -249,7 +284,7 @@ function defaultModel(
   return providers.createModel(provider, { model, write });
 }
 
-/** Child delegation intentionally never reuses the parent model instance or continuation. */
+/** Children/background jobs have no adoption hook: fallback fails closed without isolated identity ownership. */
 function createFreshSubagentModel(dependencies: CliDependencies, providers: ProviderRegistry, provider: ProviderName, model: string | undefined, write: (text: string) => void): AgentModel {
   return dependencies.modelFactory?.(provider, model) ?? defaultModel(
     providers,
@@ -259,10 +294,38 @@ function createFreshSubagentModel(dependencies: CliDependencies, providers: Prov
   );
 }
 
-async function runAuthCommand(command: Extract<CliCommand, { kind: "auth" }>, dependencies: CliDependencies, write: (text: string) => void): Promise<void> {
+async function runAuthCommand(command: AuthCommand, dependencies: CliDependencies, write: (text: string) => void, signal = new AbortController().signal): Promise<void> {
+  const provider = command.provider ?? "chatgpt";
+  if (provider === "local") { write("Local: no authentication required.\n"); return; }
+  if (isApiKeyProvider(provider)) {
+    const auth = dependencies.apiKeyAuth;
+    if (!auth) { write("API-key authentication requires an active profile.\n"); return; }
+    try {
+      if (command.action === "login") {
+        const input = dependencies.input ?? process.stdin;
+        const output = dependencies.secretOutput ?? process.stdout;
+        if (!(input as { isTTY?: boolean }).isTTY || !output.isTTY || !(input as { setRawMode?: unknown }).setRawMode) {
+          write("API-key entry requires a dedicated TTY on stdin and stdout. Never pass keys as arguments or chat text.\n");
+          return;
+        }
+        const saved = await auth.login(provider, (abort) => readTerminalSecret(input, output, abort), signal);
+        write(saved ? `${provider}: API key saved in OS credential storage. Restart Dragons to use the new key; the current runtime is unchanged.\n` : `${provider}: sign-in cancelled.\n`);
+      } else if (command.action === "logout") {
+        await auth.logout(provider);
+        write(`${provider}: saved API key removed. Environment credentials are unchanged. Restart Dragons to clear credentials held by the current runtime.\n`);
+      } else {
+        const saved = Boolean(await auth.credentials(provider));
+        write(`${provider}: ${saved ? "saved API key present in OS credential storage" : "no saved API key"}. Environment credentials are separate; this does not verify provider access.\n`);
+      }
+    } catch {
+      write(`${provider}: API-key ${command.action} failed. Check terminal input and OS credential storage.\n`);
+    }
+    return;
+  }
+  if (provider !== "chatgpt") { write("Unknown authentication provider. Never include credentials.\n"); return; }
   const auth = dependencies.chatgptAuth ?? createChatGPTAuthService({ write });
   if (command.action === "login") {
-    await auth.login();
+    await auth.login({ signal });
     return;
   }
   if (command.action === "logout") {
@@ -409,8 +472,8 @@ async function runInteractiveConversation(
   const input = dependencies.input ?? process.stdin;
   const renderer = terminalRenderer(dependencies, input, write, true);
   const operations = new Map(tools.map((tool) => [tool.name, tool.operation]));
-  const lines = createInterface({ input, crlfDelay: Infinity });
-  const answers = lines[Symbol.asyncIterator]();
+  let lines: LineInput;
+  const answers: AnswerSource = { next: () => lines.next() };
   let activeController: AbortController | undefined;
   let session = initialSession;
   // Plan tools resolve the currently selected session at execution time; no plan is injected into provider continuation or transcript state.
@@ -423,8 +486,38 @@ async function runInteractiveConversation(
   let activeModelName = selectedModel(providers, command.provider, command.model);
   let activeModelInput = command.model;
   let activeModel = model;
+  let activeRunDiagnostics: RuntimeDiagnosticsRun | undefined;
+  const createInteractiveModel = (modelInput: string | undefined): AgentModel =>
+    dependencies.modelFactory?.(activeProvider, modelInput) ?? dependencies.model
+    ?? providers.createModel(activeProvider, { model: activeModelName, write }, async (target) => {
+      // Invalidate before awaiting persistence: failed/cancelled adoption poisons the wrapper.
+      activeModel = undefined;
+      if (!activeController || activeController.signal.aborted) return false;
+      const adopt = (current: DragonsSession): DragonsSession => {
+        if (activeController?.signal.aborted) throw new Error("Fallback identity adoption cancelled.");
+        if (current.workingDirectory !== workingDirectory || current.provider !== activeProvider
+          || current.model !== activeModelName || current.continuation !== undefined) {
+          throw new Error("Fallback identity adoption requires an unchanged fresh session.");
+        }
+        return { ...current, provider: target.provider, model: target.model, continuation: undefined, updatedAt: new Date().toISOString() };
+      };
+      const saved = sessionStore.mutate
+        ? await sessionStore.mutate(session.id, adopt)
+        : await (async () => { const next = adopt(session); await sessionStore.save(next); return next; })();
+      if (!saved) throw new Error("Fallback session disappeared before identity adoption.");
+      session = saved;
+      activeProvider = saved.provider;
+      activeModelName = saved.model;
+      activeModelInput = saved.model;
+      activeRunDiagnostics?.recordIdentityTransition({ provider: saved.provider, model: saved.model });
+      conversationResponseId = undefined;
+      continuationState = undefined;
+      write(`Provider fallback: ${activeProvider} · ${activeModelName} (context sharing explicitly enabled).\n`);
+      return !activeController.signal.aborted;
+    });
   let activeSkillReferences: SkillReference[] = session.skills ?? [];
   // Process-local only: intentionally discarded on resume and process exit.
+  const checkpoints = new SessionCheckpoints(workingDirectory);
   const sessionApprovals = new Set<string>();
   // Tasks and all runtime handles are deliberately process-local, never session state.
   const backgroundTasks = new BackgroundTaskManager({
@@ -453,6 +546,20 @@ async function runInteractiveConversation(
     else lines.close();
   };
 
+  const openInput = (): LineInput => createLineInput({
+    input, write,
+    terminal: (dependencies.terminal?.inputIsTTY ?? Boolean((input as { isTTY?: boolean }).isTTY)) &&
+      (dependencies.terminal?.outputIsTTY ?? Boolean(process.stdout.isTTY)),
+    columns: dependencies.terminal?.columns ?? process.stdout.columns,
+    resizeSource: dependencies.terminal?.resizeSource ?? (dependencies.terminal?.columns === undefined ? process.stdout : undefined),
+    interrupt: cancel,
+    choices: (line) => slashChoices(line, SLASH_COMMANDS.map(({ name }) => name),
+      providers.ids().map((id) => providers.get(id)), activeProvider, activeModelName)
+      .filter(({ value }) => !value.startsWith("/auth status "))
+      .map((choice) => choice.value.startsWith("/login ") && isApiKeyProvider(choice.value.slice(7))
+        ? { ...choice, description: "Masked CLI entry · OS secure store" } : choice),
+  });
+
   renderer.renderStartup({
     provider: providerLabel(providers, activeProvider),
     model: activeModelName,
@@ -460,10 +567,12 @@ async function runInteractiveConversation(
   });
   write(`${resumed ? "Resumed session" : "Session"}: ${session.id}\n`);
   await writeActiveSkillNotices(skillsDirectory, activeSkillReferences, write, workingDirectory);
+  lines = openInput();
   process.on("SIGINT", cancel);
   try {
     for (;;) {
-      renderer.renderComposer();
+      renderer.renderComposer(activeModelName);
+      lines.composer();
       const answer = await answers.next();
       renderer.finishComposer();
       if (answer.done) {
@@ -476,8 +585,74 @@ async function runInteractiveConversation(
         backgroundTasks.cancelForSession(session.id);
         return;
       }
-      if (task === "/help") {
-        write("Slash commands: /help, /status, /diagnostics, /new, /sessions, /resume <id>, /model, /provider, /tasks start <prompt>|show <id>|cancel <id>, /tasks, /jobs start <prompt>|show <id>|cancel <id>|resume <id>|cleanup, /jobs, /skills, /skills list|show|activate|deactivate, /memory list|add|delete, /plan [list|add|update|status|remove], /mcp list|connect|connect-all|status|disconnect, /context, /clear, /exit\n");
+      if (task === "/help" || task.startsWith("/help ")) {
+        write(formatSlashHelp(task.slice("/help".length)));
+        continue;
+      }
+      if (/^\/(login|logout|auth)(?:\s|$)/.test(task)) {
+        const [name, requested, ...extra] = task.split(/\s+/);
+        const provider = requested ?? activeProvider;
+        if (extra.length || !(provider === "chatgpt" || provider === "local" || isApiKeyProvider(provider))) {
+          write("Usage: /login, /logout, or /auth [provider]. Never include credentials.\n");
+          continue;
+        }
+        const action = name === "/login" ? "login" : name === "/logout" ? "logout" : "status";
+        const secretEntry = action === "login" && isApiKeyProvider(provider) &&
+          Boolean((input as { isTTY?: boolean }).isTTY) && Boolean((input as { setRawMode?: unknown }).setRawMode) && Boolean((dependencies.secretOutput ?? process.stdout).isTTY);
+        activeController = new AbortController();
+        // Closing (not just pausing) detaches readline's data listener and drops queued answers.
+        if (secretEntry) lines.close();
+        try { await runAuthCommand({ kind: "auth", action, provider }, dependencies, write, activeController.signal); }
+        catch {
+          // Authentication failures are local command outcomes, not chat or fatal loop errors.
+          // Never reflect an OAuth/backend exception that may contain private details.
+          write(activeController.signal.aborted
+            ? `${provider}: authentication cancelled.\n`
+            : `${provider}: authentication ${action} failed. Check sign-in and OS credential storage.\n`);
+        }
+        finally {
+          activeController = undefined;
+          if (secretEntry && !(input as { readableEnded?: boolean; destroyed?: boolean }).readableEnded && !(input as { destroyed?: boolean }).destroyed) {
+            lines = openInput();
+          }
+        }
+        // Refused piped login must not turn subsequent credential-looking lines into chat.
+        if (action === "login" && isApiKeyProvider(provider) && !secretEntry) return;
+        if (secretEntry && ((input as { readableEnded?: boolean }).readableEnded || (input as { destroyed?: boolean }).destroyed)) return;
+        continue;
+      }
+      if (task === "/profile" || task === "/profile list") {
+        const profiles = dependencies.profileStore ?? createDragonsProfileStore({ configPath: dependencies.configPath });
+        const active = await profiles.active();
+        const names = await profiles.list();
+        write(`Active profile: ${active}\nProfiles: ${names.join(", ")}\n`);
+        continue;
+      }
+      if (task.startsWith("/profile create ")) {
+        const profiles = dependencies.profileStore ?? createDragonsProfileStore({ configPath: dependencies.configPath });
+        const name = task.slice("/profile create ".length).trim();
+        try {
+          await profiles.create(name);
+          write(`Profile created: ${name}\n`);
+        } catch (error: unknown) {
+          write(`${error instanceof Error ? error.message : "Unable to create profile."}\n`);
+        }
+        continue;
+      }
+      if (task.startsWith("/profile select ")) {
+        const profiles = dependencies.profileStore ?? createDragonsProfileStore({ configPath: dependencies.configPath });
+        const name = task.slice("/profile select ".length).trim();
+        try {
+          const selected = await profiles.select(name);
+          write(`Active profile: ${selected.name}. Restart Dragons to open its isolated config, sessions, skills, memory, and credentials.\n`);
+          return;
+        } catch (error: unknown) {
+          write(`${error instanceof Error ? error.message : "Unable to select profile."}\n`);
+        }
+        continue;
+      }
+      if (task === "/profile create" || task === "/profile select" || task.startsWith("/profile")) {
+        write("Use /profile, /profile list, /profile create <name>, or /profile select <name>.\n");
         continue;
       }
       if (task === "/status" || task === "/session") {
@@ -500,6 +675,7 @@ async function runInteractiveConversation(
         conversationResponseId = undefined;
         continuationState = undefined;
         sessionApprovals.clear();
+        checkpoints.clear();
         write(`Session: ${session.id}\n`);
         continue;
       }
@@ -534,11 +710,10 @@ async function runInteractiveConversation(
         activeSkillReferences = saved.skills ?? [];
         // Provider adapters can retain process-local continuation state. A resumed
         // session must receive a fresh adapter before its serialized state is applied.
-        activeModel = dependencies.modelFactory?.(activeProvider, activeModelName)
-          ?? dependencies.model
-          ?? defaultModel(providers, activeProvider, activeModelName, write);
+        activeModel = createInteractiveModel(activeModelName);
         await memoryStore.clearSuggestions();
         sessionApprovals.clear();
+        checkpoints.clear();
         write(`Resumed session: ${session.id}\n`);
         await writeActiveSkillNotices(skillsDirectory, activeSkillReferences, write, workingDirectory);
         continue;
@@ -662,6 +837,16 @@ async function runInteractiveConversation(
         session = skillsCommand.session ?? session;
         continue;
       }
+      if (task === "/reasoning" || task.startsWith("/reasoning ")) {
+        const args = task.split(/\s+/).slice(1);
+        if (args.length > 1) { write("Usage: /reasoning [default|level]\n"); continue; }
+        try {
+          write(`${await providers.reasoning(activeProvider, activeModelName, args[0])}\n`);
+          // Keep serialized continuation, but construct the next run with its new effort.
+          if (args.length) activeModel = undefined;
+        } catch { write("Unable to set reasoning: unsupported level or profile could not be saved.\n"); }
+        continue;
+      }
       if (task === "/model") {
         write(`Model: ${activeModelName}\nUse /model <name> to start a new conversation with that model.\n`);
         continue;
@@ -674,13 +859,14 @@ async function runInteractiveConversation(
         backgroundTasks.cancelForSession(session.id);
         activeModelName = nextModel;
         activeModelInput = nextModel;
-        activeModel = dependencies.modelFactory?.(activeProvider, nextModel) ?? dependencies.model ?? defaultModel(providers, activeProvider, nextModel, write);
+        activeModel = createInteractiveModel(nextModel);
         await memoryStore.clearSuggestions();
         session = await sessionStore.create({ workingDirectory, provider: activeProvider, model: activeModelName });
         activeSkillReferences = [];
         conversationResponseId = undefined;
         continuationState = undefined;
         sessionApprovals.clear();
+        checkpoints.clear();
         write(`Model changed. Started new session: ${session.id}\n`);
         continue;
       }
@@ -700,13 +886,14 @@ async function runInteractiveConversation(
         activeProvider = nextProvider;
         activeModelName = nextModel;
         activeModelInput = configuredModel;
-        activeModel = dependencies.modelFactory?.(activeProvider, nextModel) ?? dependencies.model ?? defaultModel(providers, activeProvider, nextModel, write);
+        activeModel = createInteractiveModel(nextModel);
         await memoryStore.clearSuggestions();
         session = await sessionStore.create({ workingDirectory, provider: activeProvider, model: activeModelName });
         activeSkillReferences = [];
         conversationResponseId = undefined;
         continuationState = undefined;
         sessionApprovals.clear();
+        checkpoints.clear();
         write(`Provider changed. Started new session: ${session.id}\n`);
         continue;
       }
@@ -735,7 +922,7 @@ async function runInteractiveConversation(
         catch (error: unknown) { write(`${error instanceof Error ? error.message : "Unable to disconnect MCP server."}\n`); }
         continue;
       }
-      if (task.startsWith("/")) {
+      if (task.startsWith("/") && !isCheckpointCommand(task)) {
         write(`Unknown slash command: ${task}. Run /help.\n`);
         continue;
       }
@@ -754,6 +941,15 @@ async function runInteractiveConversation(
         conversationResponseId = current.continuation?.responseId;
         continuationState = current.continuation?.providerState;
         activeSkillReferences = current.skills ?? [];
+        if (isCheckpointCommand(task)) {
+          const local = checkpointCommand(task, checkpoints);
+          for (const tool of local.tools) operations.set(tool.name, tool.operation);
+          await runAgent({ task, ...local, workingDirectory, checkpoints, maxTurns: 2, signal: controller.signal,
+            authorize: createAuthorizer(answers, (request) => { lines.approval(); renderer.renderApproval(request); }, controller.signal),
+            onEvent: (event) => renderEvent(event, renderer, operations),
+          });
+          continue;
+        }
         const skills = await createSkillsContext(skillsDirectory, activeSkillReferences, workingDirectory);
         const memory = await memoryContextFor(memoryStore, workingDirectory, task);
         const projectContext = await discoverProjectContext(workingDirectory);
@@ -764,7 +960,7 @@ async function runInteractiveConversation(
           workingDirectory,
           onSuggestion: (suggestion) => { write(formatMemorySuggestion(suggestion, true)); return true; },
         });
-        const authorize = createAuthorizer(answers, (request) => renderer.renderApproval(request), controller.signal);
+        const authorize = createAuthorizer(answers, (request) => { lines.approval(); renderer.renderApproval(request); }, controller.signal);
         const subagent = createSubagentTool({
           createModel: () => createFreshSubagentModel(dependencies, providers, activeProvider, activeModelName, write),
           tools: [...tools, suggestionTool],
@@ -797,12 +993,14 @@ async function runInteractiveConversation(
         operations.set(subagent.name, subagent.operation);
         operations.set(parallelSubagents.name, parallelSubagents.operation);
         for (const tool of orchestrationTools) operations.set(tool.name, tool.operation);
-        activeModel ??= dependencies.modelFactory?.(activeProvider, activeModelInput) ?? dependencies.model ?? defaultModel(providers, activeProvider, activeModelName, write);
+        activeModel ??= createInteractiveModel(activeModelInput);
         const runDiagnostics = diagnostics.start({ sessionId: session.id, provider: activeProvider, model: activeModelName });
+        activeRunDiagnostics = runDiagnostics;
         const result = await runAgent({
           task,
           model: activeModel,
           tools: runTools,
+          lsp: dependencies.config?.lsp,
           workingDirectory,
           projectContext,
           skills,
@@ -811,6 +1009,7 @@ async function runInteractiveConversation(
           conversationResponseId,
           continuationState,
           sessionApprovals,
+          checkpoints,
           authorize,
           onEvent: (event) => renderEvent(event, renderer, operations),
           maxTurns: dependencies.config?.maxTurns,
@@ -881,8 +1080,62 @@ export async function main(
     return;
   }
   if (arguments_.length === 1 && (arguments_[0] === "--help" || arguments_[0] === "-h")) {
-    write(`Usage: dragons [--provider ${configuredProviderIds.join("|")}] [--model <model>] [task]\n\nRun without a task for interactive mode. Use --tui for the full-screen runtime client; --tui --resume <id> continues a saved session. Commands: auth, config, session, skills, memory, plan, mcp.\n`);
+    write(`Usage: dragons [--provider ${configuredProviderIds.join("|")}] [--model <model>] [task]\n\nRun without a task for interactive mode. Use --tui for the full-screen runtime client; --tui --resume <id> continues a saved session. Commands: auth, profile, config, session, skills, memory, plan, mcp.\n`);
     return;
+  }
+  const initialCommand = parseCliCommand(arguments_, configuredProviderIds);
+  if (initialCommand.kind === "profile") {
+    const profiles = createDragonsProfileStore({ configPath: dependencies.configPath });
+    if (initialCommand.action === "show") {
+      const name = await profiles.active();
+      write(`Active profile: ${name}\n`);
+      return;
+    }
+    if (initialCommand.action === "list") {
+      const active = await profiles.active();
+      for (const name of await profiles.list()) write(`${name === active ? "*" : " "} ${name}\n`);
+      return;
+    }
+    if (!("name" in initialCommand)) throw new Error("Invalid profile command.");
+    const paths = initialCommand.action === "select" ? await profiles.select(initialCommand.name) : await profiles.create(initialCommand.name);
+    write(initialCommand.action === "select" ? `Active profile: ${paths.name}\n` : `Created profile: ${paths.name}\n`);
+    return;
+  }
+  let profiles = dependencies.profileStore;
+  if (!profiles) {
+    try { profiles = createDragonsProfileStore({ configPath: dependencies.configPath }); }
+    catch (error: unknown) {
+      // Preserve headless missing-key diagnostics when no state root is available.
+      // Only path discovery is optional: active-profile reads below must fail closed.
+      if (!(error instanceof Error) || error.message !== "Unable to determine a home directory for Dragons config.") throw error;
+    }
+  }
+  let tuiAuthNotice: ((text: string) => void) | undefined;
+  let tuiAuthSignal: AbortSignal | undefined;
+  if (profiles) {
+    const profile = profiles.paths(await profiles.active());
+    dependencies = {
+      ...dependencies,
+      apiKeyAuth: dependencies.apiKeyAuth ?? createApiKeyAuth(profile.name),
+      configPath: profile.configPath,
+      sessionDirectory: dependencies.sessionDirectory ?? profile.sessionDirectory,
+      skillsDirectory: dependencies.skillsDirectory ?? profile.skillsDirectory,
+      memoryDirectory: dependencies.memoryDirectory ?? profile.memoryDirectory,
+      backgroundJobsDirectory: dependencies.backgroundJobsDirectory ?? profile.backgroundJobsDirectory,
+      chatgptAuth: dependencies.chatgptAuth ?? createChatGPTAuthService({
+        write: initialCommand.kind === "tui" ? (text) => tuiAuthNotice?.(text) : write,
+        credentialPath: join(dirname(profile.configPath), "auth.json"),
+        nativeCredentialAccount: profile.credentialAccount,
+        ...(initialCommand.kind === "tui" ? {
+          fetchImpl: ((input, init) => fetch(input, {
+            ...init,
+            signal: tuiAuthSignal && init?.signal ? AbortSignal.any([tuiAuthSignal, init.signal]) : tuiAuthSignal ?? init?.signal,
+          })) as typeof fetch,
+          sleep: async (milliseconds: number) => { await delay(milliseconds, undefined, { signal: tuiAuthSignal }); },
+        } : {}),
+      }),
+      profileStore: profiles,
+    };
   }
   let config = dependencies.config ? parseDragonsConfig(dependencies.config, configuredProviderIds) : {};
   if (!dependencies.config) {
@@ -891,8 +1144,9 @@ export async function main(
       if (!(error instanceof Error) || !error.message.startsWith("Unable to determine a home directory")) throw error;
     }
   }
-  const providers = providerRegistryFor(dependencies, config.localEndpoint);
-  let parsedCommand = parseCliCommand(arguments_, providers.ids());
+  const providers = providerRegistryFor(dependencies, config.localEndpoint, !profiles, config.apiKeySlots);
+  configureProfileReasoning(providers, config, dependencies.configPath);
+  let parsedCommand = initialCommand;
   if (parsedCommand.kind === "run") {
     const providerExplicit = arguments_.includes("--provider");
     const modelExplicit = arguments_.includes("--model");
@@ -927,6 +1181,7 @@ export async function main(
           shellTimeoutMilliseconds: config.shellTimeoutMilliseconds,
         }),
         mcpManager: dependencies.mcpManager ?? new McpClientManager(config.mcpServers ?? []),
+        lsp: config.lsp,
         diagnostics: dependencies.diagnostics,
         memoryStore: memoryStoreFor(dependencies),
         skillsDirectory: skillsDirectoryFor(dependencies),
@@ -935,7 +1190,16 @@ export async function main(
         maxTurns: config.maxTurns,
         contextBudgetChars: config.contextBudgetChars,
       });
-      await runTui(runtime, { input, output, ...(parsedCommand.resume ? { resume: parsedCommand.resume } : { provider, model }) });
+      await runTui(runtime, { input, output,
+        localCommands: createTuiLocalCommands({
+          apiKeyAuth: dependencies.apiKeyAuth,
+          reasoning: providers.reasoning.bind(providers),
+          auth: dependencies.chatgptAuth!, profiles: profiles ?? createDragonsProfileStore({ configPath: dependencies.configPath }),
+          sessions: sessionStoreFor(dependencies, providers),
+          authNotices: (notice, signal) => { tuiAuthNotice = notice; tuiAuthSignal = signal; },
+        }),
+        ...(parsedCommand.resume ? { resume: parsedCommand.resume } : { provider, model }),
+      });
     } catch {
       // Boot errors can contain host paths/provider credentials. Never print arbitrary exceptions.
       throw new Error("Unable to open TUI. Check provider configuration, session ID/workspace, and terminal availability.");
@@ -1058,14 +1322,18 @@ export async function main(
     await runInteractiveConversation(command, { ...dependencies, config }, providers, write, dependencies.model, tools, workingDirectory, skillsDirectoryFor(dependencies), memoryStoreFor(dependencies), store, session, Boolean(resumedSession), mcp, diagnostics);
     return;
   }
-  const model = dependencies.model
+  let plainRunDiagnostics: RuntimeDiagnosticsRun | undefined;
+  // Plain runs have no saved session; adopt their process-local identity before target I/O.
+  const createPlainModel = (): AgentModel => dependencies.model
     ?? dependencies.modelFactory?.(command.provider, command.model)
-    ?? defaultModel(
-      providers,
-      command.provider,
-      command.model,
-      write,
-    );
+    ?? providers.createModel(command.provider, { model: command.model, write }, async (target) => {
+      if (controller.signal.aborted) return false;
+      command = { ...command, provider: target.provider, model: target.model };
+      plainRunDiagnostics?.recordIdentityTransition(target);
+      write(`Provider fallback: ${target.provider} · ${target.model} (context sharing explicitly enabled).\n`);
+      return !controller.signal.aborted;
+    });
+  const model = createPlainModel();
   if (command.provider === "chatgpt") write("ChatGPT Subscription (Experimental)\n");
   const input = dependencies.input ?? process.stdin;
   const renderer = terminalRenderer(dependencies, input, write, false);
@@ -1100,10 +1368,12 @@ export async function main(
     operations.set(subagent.name, subagent.operation);
     operations.set(parallelSubagents.name, parallelSubagents.operation);
     const runDiagnostics = diagnostics.start({ provider: command.provider, model: selectedModel(providers, command.provider, command.model) });
+    plainRunDiagnostics = runDiagnostics;
     await runAgent({
       task: command.prompt,
       model,
       tools: runTools,
+      lsp: config.lsp,
       workingDirectory,
       projectContext,
       memory,

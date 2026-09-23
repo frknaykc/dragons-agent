@@ -10,6 +10,7 @@ export type ViewState = {
   scroll: number;
   panel: "conversation" | "activity";
   allowSelected: boolean;
+  choices?: readonly string[];
 };
 
 /** The terminal adapter alone owns escape sequences. Even status and user text are untrusted. */
@@ -78,7 +79,8 @@ export function renderScreen(state: TuiState, view: ViewState, columns: number, 
   ] : [
     `${state.error ? `Error: ${state.error}` : `${view.panel} | Tab: switch view | PgUp/PgDn: scroll | Ctrl+R: refresh`}`,
     `> ${draftWindow(view, Math.max(0, width - 2))}`,
-    "Enter: send | Esc/Ctrl+C: cancel | Ctrl+D: exit",
+    ...(view.choices ?? []).slice(0, Math.max(0, Math.min(5, height - 9))),
+    view.choices?.length ? "↑/↓: select | Enter/Tab: complete | Esc: dismiss" : "Enter: send | Esc/Ctrl+C: cancel | Ctrl+D: exit",
   ];
   if (height < 9 || width < 24) {
     // No invisible approval choice can be selected in this mode (adapter enforces it).

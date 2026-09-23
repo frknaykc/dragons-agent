@@ -11,6 +11,7 @@ import { classifyProviderError, retryProviderRequest } from "../retry.js";
 import type { AgentTool } from "../tools.js";
 import {
   classifyProviderHttpFailure,
+  ProviderRequestFailureBoundary,
   providerCompatibilityError,
   ProviderCompatibilityError,
   type ProviderCompatibilityKind,
@@ -309,211 +310,219 @@ export function createOpenRouterAgentModel(options: OpenRouterAgentModelOptions 
 
   return {
     async respond(request: AgentRequest, onTextDelta?: AgentTextDeltaHandler): Promise<AgentResponse> {
-      let resumed = false;
-      if (!initialized) {
-        const restored = restoreConversation(request.continuationState);
-        if (restored) {
-          messages.splice(0, messages.length, ...restored);
-          resumed = true;
-          hasUncommittedRestoredConversation = true;
-        }
-        initialized = true;
-      }
-
-      let nextMessages = [...messages];
-      if (request.previousResponseId) {
-        if (!lastResponseId || request.previousResponseId !== lastResponseId || lastToolCalls.length === 0
-          || request.toolOutputs.length !== lastToolCalls.length
-          || new Set(request.toolOutputs.map((output) => output.callId)).size !== request.toolOutputs.length) {
-          throw providerCompatibilityError("openrouter", "protocol_drift");
-        }
-        const expected = new Map(lastToolCalls.map((call) => [call.callId, call]));
-        if (request.toolOutputs.some((output) => !expected.has(output.callId))) throw providerCompatibilityError("openrouter", "protocol_drift");
-        const toolMessages = request.toolOutputs.map((output) => ({
-          role: "tool" as const,
-          tool_call_id: output.callId,
-          content: output.output,
-        }));
-        if (serializedCharacterCount(toolMessages) > MAX_CURRENT_TURN_CHARACTERS) throw providerCompatibilityError("openrouter", "invalid_request");
-        nextMessages.push(...toolMessages);
-      } else {
-        if (serializedCharacterCount(request.task) > MAX_CURRENT_TURN_CHARACTERS) throw providerCompatibilityError("openrouter", "invalid_request");
-        const message = { role: "user" as const, content: request.task };
-        if (request.conversationResponseId || resumed || hasUncommittedRestoredConversation) nextMessages.push(message);
-        else nextMessages = [message];
-      }
-      nextMessages = boundConversation(nextMessages, MAX_CURRENT_TURN_CHARACTERS);
-
-      const body: Record<string, unknown> = {
-        model,
-        messages: nextMessages,
-        stream: true,
-        stream_options: { include_usage: true },
-        parallel_tool_calls: false,
-      };
-      if (request.tools.length > 0) body.tools = request.tools.map(toTool);
-      const instructions = formatAdvisoryContextForInstructions(request);
-      if (instructions) body.messages = [{ role: "system", content: instructions }, ...nextMessages];
-
-      let response: Response;
+      const failure = new ProviderRequestFailureBoundary();
       try {
-        response = await retryProviderRequest(async () => {
-          const candidate = await fetchImpl(endpointFor(parsedBaseUrl.toString()), {
-            method: "POST",
-            headers: {
-              ...(apiKey === undefined ? {} : { authorization: `Bearer ${apiKey}` }),
-              "content-type": "application/json",
-              accept: "text/event-stream",
-            },
-            body: JSON.stringify(body),
-            signal: request.signal,
-          });
-          if (candidate.status === 429 || candidate.status >= 500 || candidate.status === 408 || candidate.status === 409 || candidate.status === 425) {
-            await candidate.body?.cancel();
-            throw providerCompatibilityError("openrouter", classifyProviderHttpFailure(candidate.status), candidate.status);
+        let resumed = false;
+        if (!initialized) {
+          const restored = restoreConversation(request.continuationState);
+          if (restored) {
+            messages.splice(0, messages.length, ...restored);
+            resumed = true;
+            hasUncommittedRestoredConversation = true;
           }
-          return candidate;
-        }, { signal: request.signal, onRetry: request.onProviderRetry });
-      } catch (error: unknown) {
-        if (request.signal?.aborted) throw error;
-        throw safeProviderError(request, error);
-      }
-      if (!response.ok) {
-        const kind = openRouterFailureKind(response.status, await boundedErrorBody(response));
-        recordProviderDiagnostic(request, kind);
-        throw providerCompatibilityError("openrouter", kind, response.status);
-      }
+          initialized = true;
+        }
 
-      let responseId = "";
-      let text = "";
-      let inputTokens: number | undefined;
-      let outputTokens: number | undefined;
-      let totalTokens: number | undefined;
-      let finished = false;
-      let finishReason = "";
-      let sawChoice = false;
-      let modelTurnCharacters = 0;
-      let toolArgumentCharacters = 0;
-      const partialCalls = new Map<number, PartialToolCall>();
-      try {
-        const sawDone = await parseSse(response, (chunk) => {
-          const usage = chunk.usage;
-          if (usage !== undefined) {
-            if (!isRecord(usage)) throw providerCompatibilityError("openrouter", "malformed_response");
-            inputTokens = usageNumber(usage.prompt_tokens) ?? inputTokens;
-            outputTokens = usageNumber(usage.completion_tokens) ?? outputTokens;
-            totalTokens = usageNumber(usage.total_tokens) ?? totalTokens;
-          }
-          const choices = chunk.choices;
-          if (finished) {
-            if (choices === undefined || (Array.isArray(choices) && choices.length === 0)) return;
+        let nextMessages = [...messages];
+        if (request.previousResponseId) {
+          if (!lastResponseId || request.previousResponseId !== lastResponseId || lastToolCalls.length === 0
+            || request.toolOutputs.length !== lastToolCalls.length
+            || new Set(request.toolOutputs.map((output) => output.callId)).size !== request.toolOutputs.length) {
             throw providerCompatibilityError("openrouter", "protocol_drift");
           }
-          if (!Array.isArray(choices) || choices.length !== 1 || !isRecord(choices[0])) throw providerCompatibilityError("openrouter", "malformed_response");
-          const choice = choices[0];
-          if (choice.index !== 0 || !isRecord(choice.delta)) throw providerCompatibilityError("openrouter", "malformed_response");
-          const id = chunk.id;
-          if (!boundedNonEmptyString(id)) throw providerCompatibilityError("openrouter", "malformed_response");
-          if (responseId && responseId !== id) throw providerCompatibilityError("openrouter", "protocol_drift");
-          responseId = id;
-          sawChoice = true;
-          if (choice.delta.content !== undefined && choice.delta.content !== null) {
-            if (typeof choice.delta.content !== "string") throw providerCompatibilityError("openrouter", "malformed_response");
-            const length = serializedCharacterCount({ content: choice.delta.content });
-            if (modelTurnCharacters + length > MAX_CURRENT_TURN_CHARACTERS) throw providerCompatibilityError("openrouter", "malformed_response");
-            modelTurnCharacters += length;
-            text += choice.delta.content;
-            onTextDelta?.(choice.delta.content);
-          }
-          if (choice.delta.tool_calls !== undefined) {
-            if (!Array.isArray(choice.delta.tool_calls) || choice.delta.tool_calls.length > MAX_TOOL_CALLS_PER_RESPONSE) throw providerCompatibilityError("openrouter", "malformed_response");
-            for (const rawCall of choice.delta.tool_calls) {
-              if (!isRecord(rawCall)) throw providerCompatibilityError("openrouter", "malformed_response");
-              const index = rawCall.index;
-              if (typeof index !== "number" || !Number.isSafeInteger(index) || index < 0 || index >= MAX_TOOL_CALLS_PER_RESPONSE) throw providerCompatibilityError("openrouter", "malformed_response");
-              const partial = partialCalls.get(index) ?? { arguments: "" };
-              if (rawCall.id !== undefined) {
-                if (!boundedNonEmptyString(rawCall.id) || (partial.id !== undefined && partial.id !== rawCall.id)) throw providerCompatibilityError("openrouter", "protocol_drift");
-                partial.id = rawCall.id;
-              }
-              if (rawCall.type !== undefined) {
-                if (rawCall.type !== "function" || (partial.type !== undefined && partial.type !== rawCall.type)) throw providerCompatibilityError("openrouter", "protocol_drift");
-                partial.type = rawCall.type;
-              }
-              if (rawCall.function !== undefined) {
-                if (!isRecord(rawCall.function)) throw providerCompatibilityError("openrouter", "malformed_response");
-                if (rawCall.function.name !== undefined) {
-                  if (!boundedNonEmptyString(rawCall.function.name) || (partial.name !== undefined && partial.name !== rawCall.function.name)) throw providerCompatibilityError("openrouter", "protocol_drift");
-                  partial.name = rawCall.function.name;
-                }
-                if (rawCall.function.arguments !== undefined) {
-                  if (typeof rawCall.function.arguments !== "string" || partial.arguments.length + rawCall.function.arguments.length > MAX_TOOL_ARGUMENT_CHARACTERS) throw providerCompatibilityError("openrouter", "malformed_response");
-                  if (modelTurnCharacters + toolArgumentCharacters + rawCall.function.arguments.length > MAX_CURRENT_TURN_CHARACTERS) throw providerCompatibilityError("openrouter", "malformed_response");
-                  partial.arguments += rawCall.function.arguments;
-                  toolArgumentCharacters += rawCall.function.arguments.length;
-                }
-              }
-              partialCalls.set(index, partial);
+          const expected = new Map(lastToolCalls.map((call) => [call.callId, call]));
+          if (request.toolOutputs.some((output) => !expected.has(output.callId))) throw providerCompatibilityError("openrouter", "protocol_drift");
+          const toolMessages = request.toolOutputs.map((output) => ({
+            role: "tool" as const,
+            tool_call_id: output.callId,
+            content: output.output,
+          }));
+          if (serializedCharacterCount(toolMessages) > MAX_CURRENT_TURN_CHARACTERS) throw providerCompatibilityError("openrouter", "invalid_request");
+          nextMessages.push(...toolMessages);
+        } else {
+          if (serializedCharacterCount(request.task) > MAX_CURRENT_TURN_CHARACTERS) throw providerCompatibilityError("openrouter", "invalid_request");
+          const message = { role: "user" as const, content: request.task };
+          if (request.conversationResponseId || resumed || hasUncommittedRestoredConversation) nextMessages.push(message);
+          else nextMessages = [message];
+        }
+        nextMessages = boundConversation(nextMessages, MAX_CURRENT_TURN_CHARACTERS);
+
+        const body: Record<string, unknown> = {
+          model,
+          messages: nextMessages,
+          stream: true,
+          stream_options: { include_usage: true },
+          parallel_tool_calls: false,
+        };
+        if (request.tools.length > 0) body.tools = request.tools.map(toTool);
+        const instructions = formatAdvisoryContextForInstructions(request);
+        if (instructions) body.messages = [{ role: "system", content: instructions }, ...nextMessages];
+
+        let response: Response;
+        try {
+          response = await retryProviderRequest(async () => {
+            failure.beginAttempt();
+            const candidate = await fetchImpl(endpointFor(parsedBaseUrl.toString()), {
+              method: "POST",
+              headers: {
+                ...(apiKey === undefined ? {} : { authorization: `Bearer ${apiKey}` }),
+                "content-type": "application/json",
+                accept: "text/event-stream",
+              },
+              body: JSON.stringify(body),
+              signal: request.signal,
+            });
+            if (!candidate.ok) failure.httpFailure(candidate.status, candidate.headers.get("retry-after"));
+            if (candidate.status === 429 || candidate.status >= 500 || candidate.status === 408 || candidate.status === 409 || candidate.status === 425) {
+              await candidate.body?.cancel();
+              throw providerCompatibilityError("openrouter", classifyProviderHttpFailure(candidate.status), candidate.status);
             }
-          }
-          if (choice.finish_reason !== null && choice.finish_reason !== undefined) {
-            if (!boundedNonEmptyString(choice.finish_reason)) throw providerCompatibilityError("openrouter", "malformed_response");
-            finishReason = choice.finish_reason;
-            finished = true;
-          }
-        }, request.signal);
-        if (!sawDone) throw providerCompatibilityError("openrouter", "malformed_response");
+            return candidate;
+          }, { signal: request.signal, onRetry: request.onProviderRetry });
+        } catch (error: unknown) {
+          if (request.signal?.aborted) throw error;
+          throw safeProviderError(request, error);
+        }
+        if (!response.ok) {
+          const kind = openRouterFailureKind(response.status, await boundedErrorBody(response));
+          recordProviderDiagnostic(request, kind);
+          throw providerCompatibilityError("openrouter", kind, response.status);
+        }
+        failure.streamStarted();
+
+        let responseId = "";
+        let text = "";
+        let inputTokens: number | undefined;
+        let outputTokens: number | undefined;
+        let totalTokens: number | undefined;
+        let finished = false;
+        let finishReason = "";
+        let sawChoice = false;
+        let modelTurnCharacters = 0;
+        let toolArgumentCharacters = 0;
+        const partialCalls = new Map<number, PartialToolCall>();
+        try {
+          const sawDone = await parseSse(response, (chunk) => {
+            const usage = chunk.usage;
+            if (usage !== undefined) {
+              if (!isRecord(usage)) throw providerCompatibilityError("openrouter", "malformed_response");
+              inputTokens = usageNumber(usage.prompt_tokens) ?? inputTokens;
+              outputTokens = usageNumber(usage.completion_tokens) ?? outputTokens;
+              totalTokens = usageNumber(usage.total_tokens) ?? totalTokens;
+            }
+            const choices = chunk.choices;
+            if (finished) {
+              if (choices === undefined || (Array.isArray(choices) && choices.length === 0)) return;
+              throw providerCompatibilityError("openrouter", "protocol_drift");
+            }
+            if (!Array.isArray(choices) || choices.length !== 1 || !isRecord(choices[0])) throw providerCompatibilityError("openrouter", "malformed_response");
+            const choice = choices[0];
+            if (choice.index !== 0 || !isRecord(choice.delta)) throw providerCompatibilityError("openrouter", "malformed_response");
+            const id = chunk.id;
+            if (!boundedNonEmptyString(id)) throw providerCompatibilityError("openrouter", "malformed_response");
+            if (responseId && responseId !== id) throw providerCompatibilityError("openrouter", "protocol_drift");
+            responseId = id;
+            sawChoice = true;
+            if (choice.delta.content !== undefined && choice.delta.content !== null) {
+              if (typeof choice.delta.content !== "string") throw providerCompatibilityError("openrouter", "malformed_response");
+              const length = serializedCharacterCount({ content: choice.delta.content });
+              if (modelTurnCharacters + length > MAX_CURRENT_TURN_CHARACTERS) throw providerCompatibilityError("openrouter", "malformed_response");
+              modelTurnCharacters += length;
+              text += choice.delta.content;
+              onTextDelta?.(choice.delta.content);
+            }
+            if (choice.delta.tool_calls !== undefined) {
+              if (!Array.isArray(choice.delta.tool_calls) || choice.delta.tool_calls.length > MAX_TOOL_CALLS_PER_RESPONSE) throw providerCompatibilityError("openrouter", "malformed_response");
+              for (const rawCall of choice.delta.tool_calls) {
+                if (!isRecord(rawCall)) throw providerCompatibilityError("openrouter", "malformed_response");
+                const index = rawCall.index;
+                if (typeof index !== "number" || !Number.isSafeInteger(index) || index < 0 || index >= MAX_TOOL_CALLS_PER_RESPONSE) throw providerCompatibilityError("openrouter", "malformed_response");
+                const partial = partialCalls.get(index) ?? { arguments: "" };
+                if (rawCall.id !== undefined) {
+                  if (!boundedNonEmptyString(rawCall.id) || (partial.id !== undefined && partial.id !== rawCall.id)) throw providerCompatibilityError("openrouter", "protocol_drift");
+                  partial.id = rawCall.id;
+                }
+                if (rawCall.type !== undefined) {
+                  if (rawCall.type !== "function" || (partial.type !== undefined && partial.type !== rawCall.type)) throw providerCompatibilityError("openrouter", "protocol_drift");
+                  partial.type = rawCall.type;
+                }
+                if (rawCall.function !== undefined) {
+                  if (!isRecord(rawCall.function)) throw providerCompatibilityError("openrouter", "malformed_response");
+                  if (rawCall.function.name !== undefined) {
+                    if (!boundedNonEmptyString(rawCall.function.name) || (partial.name !== undefined && partial.name !== rawCall.function.name)) throw providerCompatibilityError("openrouter", "protocol_drift");
+                    partial.name = rawCall.function.name;
+                  }
+                  if (rawCall.function.arguments !== undefined) {
+                    if (typeof rawCall.function.arguments !== "string" || partial.arguments.length + rawCall.function.arguments.length > MAX_TOOL_ARGUMENT_CHARACTERS) throw providerCompatibilityError("openrouter", "malformed_response");
+                    if (modelTurnCharacters + toolArgumentCharacters + rawCall.function.arguments.length > MAX_CURRENT_TURN_CHARACTERS) throw providerCompatibilityError("openrouter", "malformed_response");
+                    partial.arguments += rawCall.function.arguments;
+                    toolArgumentCharacters += rawCall.function.arguments.length;
+                  }
+                }
+                partialCalls.set(index, partial);
+              }
+            }
+            if (choice.finish_reason !== null && choice.finish_reason !== undefined) {
+              if (!boundedNonEmptyString(choice.finish_reason)) throw providerCompatibilityError("openrouter", "malformed_response");
+              finishReason = choice.finish_reason;
+              finished = true;
+            }
+          }, request.signal);
+          if (!sawDone) throw providerCompatibilityError("openrouter", "malformed_response");
+        } catch (error: unknown) {
+          if (request.signal?.aborted) throw error;
+          throw safeProviderError(request, error);
+        }
+
+        if (!sawChoice || !finished || !responseId) {
+          recordProviderDiagnostic(request, "malformed_response");
+          throw providerCompatibilityError("openrouter", "malformed_response");
+        }
+        const toolCalls: ToolCall[] = [];
+        const persistedToolCalls: OpenRouterToolCall[] = [];
+        const pendingCalls: PendingToolCall[] = [];
+        for (const [index, partial] of [...partialCalls.entries()].sort(([left], [right]) => left - right)) {
+          if (!partial.id || partial.type !== "function" || !partial.name || !parsedArguments(partial.arguments)) throw providerCompatibilityError("openrouter", "malformed_response");
+          if (pendingCalls.some((call) => call.callId === partial.id)) throw providerCompatibilityError("openrouter", "protocol_drift");
+          const toolCall = { id: partial.id, type: "function" as const, function: { name: partial.name, arguments: partial.arguments } };
+          const length = serializedCharacterCount(toolCall);
+          if (modelTurnCharacters + length > MAX_CURRENT_TURN_CHARACTERS) throw providerCompatibilityError("openrouter", "malformed_response");
+          modelTurnCharacters += length;
+          persistedToolCalls.push(toolCall);
+          pendingCalls.push({ callId: partial.id, name: partial.name });
+          toolCalls.push({ callId: partial.id, name: partial.name, arguments: partial.arguments });
+        }
+        if ((toolCalls.length > 0 && finishReason !== "tool_calls")
+          || (toolCalls.length === 0 && finishReason === "tool_calls")) {
+          throw providerCompatibilityError("openrouter", "protocol_drift");
+        }
+
+        nextMessages.push({
+          role: "assistant",
+          content: text,
+          ...(persistedToolCalls.length === 0 ? {} : { tool_calls: persistedToolCalls }),
+        });
+        const persistedMessages = boundConversation(nextMessages);
+        messages.splice(0, messages.length, ...persistedMessages);
+        hasUncommittedRestoredConversation = false;
+        lastToolCalls = pendingCalls;
+        lastResponseId = responseId;
+        const usage: AgentUsage = {
+          ...(inputTokens === undefined ? {} : { inputTokens }),
+          ...(outputTokens === undefined ? {} : { outputTokens }),
+          ...(totalTokens === undefined ? {} : { totalTokens }),
+        };
+        return {
+          responseId,
+          text,
+          textWasStreamed: true,
+          toolCalls,
+          ...(Object.keys(usage).length === 0 ? {} : { usage }),
+          continuationState: continuationState(persistedMessages),
+        };
       } catch (error: unknown) {
-        if (request.signal?.aborted) throw error;
-        throw safeProviderError(request, error);
+        throw failure.finish(error, request.signal?.aborted);
       }
-
-      if (!sawChoice || !finished || !responseId) {
-        recordProviderDiagnostic(request, "malformed_response");
-        throw providerCompatibilityError("openrouter", "malformed_response");
-      }
-      const toolCalls: ToolCall[] = [];
-      const persistedToolCalls: OpenRouterToolCall[] = [];
-      const pendingCalls: PendingToolCall[] = [];
-      for (const [index, partial] of [...partialCalls.entries()].sort(([left], [right]) => left - right)) {
-        if (!partial.id || partial.type !== "function" || !partial.name || !parsedArguments(partial.arguments)) throw providerCompatibilityError("openrouter", "malformed_response");
-        if (pendingCalls.some((call) => call.callId === partial.id)) throw providerCompatibilityError("openrouter", "protocol_drift");
-        const toolCall = { id: partial.id, type: "function" as const, function: { name: partial.name, arguments: partial.arguments } };
-        const length = serializedCharacterCount(toolCall);
-        if (modelTurnCharacters + length > MAX_CURRENT_TURN_CHARACTERS) throw providerCompatibilityError("openrouter", "malformed_response");
-        modelTurnCharacters += length;
-        persistedToolCalls.push(toolCall);
-        pendingCalls.push({ callId: partial.id, name: partial.name });
-        toolCalls.push({ callId: partial.id, name: partial.name, arguments: partial.arguments });
-      }
-      if ((toolCalls.length > 0 && finishReason !== "tool_calls")
-        || (toolCalls.length === 0 && finishReason === "tool_calls")) {
-        throw providerCompatibilityError("openrouter", "protocol_drift");
-      }
-
-      nextMessages.push({
-        role: "assistant",
-        content: text,
-        ...(persistedToolCalls.length === 0 ? {} : { tool_calls: persistedToolCalls }),
-      });
-      const persistedMessages = boundConversation(nextMessages);
-      messages.splice(0, messages.length, ...persistedMessages);
-      hasUncommittedRestoredConversation = false;
-      lastToolCalls = pendingCalls;
-      lastResponseId = responseId;
-      const usage: AgentUsage = {
-        ...(inputTokens === undefined ? {} : { inputTokens }),
-        ...(outputTokens === undefined ? {} : { outputTokens }),
-        ...(totalTokens === undefined ? {} : { totalTokens }),
-      };
-      return {
-        responseId,
-        text,
-        textWasStreamed: true,
-        toolCalls,
-        ...(Object.keys(usage).length === 0 ? {} : { usage }),
-        continuationState: continuationState(persistedMessages),
-      };
     },
   };
 }

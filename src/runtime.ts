@@ -1,3 +1,4 @@
+import { lspApprovalFromArguments, type LspApproval } from "./lsp-approval.js";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 
@@ -39,7 +40,9 @@ import {
 } from "./session-store.js";
 import { createSkillsContext, getDragonsSkillsDirectory } from "./skills.js";
 import { createSubagentTool } from "./subagents.js";
+import { SessionCheckpoints, checkpointCommand, isCheckpointCommand } from "./checkpoint.js";
 import { createCodingTools, type AgentTool } from "./tools.js";
+import { toolMutationWarning } from "./tool-mutation-warning.js";
 import { RuntimeTextRedactor } from "./runtime-redaction.js";
 
 const MAX_RUNTIME_INPUT_CHARACTERS = 64_000;
@@ -93,6 +96,8 @@ export type RuntimeProvider = {
   defaultModel: string;
   credentialRequirement: "api-key" | "oauth" | "none";
   capabilities: ProviderCapabilities;
+  reasoningModels?: ProviderDescriptor["reasoningModels"];
+  modelCatalogue?: ProviderDescriptor["modelCatalogue"];
 };
 
 /** A client-safe session summary. It never contains transcript bodies or provider continuation state. */
@@ -157,8 +162,9 @@ export type RuntimeEvent =
     allowed?: boolean;
     ok?: boolean;
     output?: string;
+    mutationWarning?: string;
   }
-  | { type: "approval_requested"; runId: string; sessionId: string; approvalId: string; toolName: string; operation: "WRITE" | "EXECUTE" }
+  | { type: "approval_requested"; runId: string; sessionId: string; approvalId: string; toolName: string; operation: "WRITE" | "EXECUTE"; lspApproval?: LspApproval }
   | { type: "memory_suggestion"; runId: string; sessionId: string; suggestionId: string; scope: "USER" | "PROJECT"; body: string; reason?: string }
   | { type: "event_stream_truncated"; runId: string; sessionId: string }
   | { type: "run_completed"; runId: string; sessionId: string; result: RuntimeRunResult }
@@ -241,6 +247,7 @@ export type CancelRuntimeBackgroundTask = {
 
 /** Trusted-host dependencies; none are returned from the client-facing runtime surface. */
 export type DragonsRuntimeOptions = {
+  lsp?: import("./lsp-diagnostics.js").LspConfig;
   workingDirectory: string;
   providerRegistry?: ProviderRegistry;
   sessionStore?: SessionStore;
@@ -356,6 +363,8 @@ function publicProvider(provider: ProviderDescriptor): RuntimeProvider {
     id: provider.id,
     label: provider.label,
     defaultModel: provider.defaultModel,
+    ...(provider.reasoningModels ? { reasoningModels: structuredClone(provider.reasoningModels) } : {}),
+    ...(provider.modelCatalogue ? { modelCatalogue: [...provider.modelCatalogue] } : {}),
     credentialRequirement: provider.credentialRequirement,
     capabilities: {
       streaming: provider.capabilities.streaming,
@@ -444,6 +453,7 @@ class DragonsRuntimeCore implements DragonsRuntime {
   private readonly pendingMcpConnections = new Set<Promise<RuntimeMcpConnection>>();
   private disposalCompletion?: Promise<void>;
   /** Process-local only: `runAgent()` owns the scope keys and never persists this set. */
+  private readonly checkpointsBySession = new Map<string, SessionCheckpoints>();
   private readonly sessionApprovalsBySession = new Map<string, Set<string>>();
   private disposed = false;
 
@@ -462,6 +472,7 @@ class DragonsRuntimeCore implements DragonsRuntime {
     private readonly maxTurns: number | undefined,
     private readonly contextBudgetChars: number | undefined,
     private readonly createRunId: () => string,
+    private readonly lsp: import("./lsp-diagnostics.js").LspConfig | undefined,
   ) {}
 
   providers(): RuntimeProvider[] {
@@ -624,6 +635,8 @@ class DragonsRuntimeCore implements DragonsRuntime {
 
       const runId = this.createRunId();
       if (!runId || this.activeRuns.has(runId)) throw new Error("Unable to allocate a unique runtime run ID.");
+      // Reserve reachable history before publishing a run or allowing any mutation.
+      const checkpoints = this.admitCheckpointHistory(session.id);
       const queue = new AsyncEventQueue<RuntimeEvent>(DEFAULT_MAX_RUNTIME_QUEUED_EVENTS);
       const controller = new AbortController();
       const active: ActiveRun = { controller, queue, pendingApprovals: new Map(), completion: Promise.resolve(undefined as never), eventStreamTruncated: false, textRedactor: new RuntimeTextRedactor() };
@@ -632,7 +645,7 @@ class DragonsRuntimeCore implements DragonsRuntime {
       this.enqueueRuntimeEvent(active, { type: "run_started", runId, sessionId: session.id, provider: session.provider, model: session.model });
 
       const releaseExecution = release;
-      active.completion = this.executeRun(runId, session, content, controller.signal, active)
+      active.completion = this.executeRun(runId, session, content, controller.signal, active, checkpoints)
         // Cleanup must settle before terminal success/failure and share their safe error boundary.
         .finally(async () => { await releaseExecution?.(); })
         .then((result) => {
@@ -745,6 +758,30 @@ class DragonsRuntimeCore implements DragonsRuntime {
     if (this.mcpManager) await Promise.allSettled([...this.runtimeMcpConnectionIds].map((id) => this.releaseMcpConnection(id)));
     await this.rejectPendingMemorySuggestions();
     this.sessionApprovalsBySession.clear();
+    for (const history of this.checkpointsBySession.values()) history.clear();
+    this.checkpointsBySession.clear();
+  }
+
+  private admitCheckpointHistory(sessionId: string): SessionCheckpoints {
+    const existing = this.checkpointsBySession.get(sessionId);
+    if (existing) return existing;
+
+    // Pending admissions pin histories too: storage acquisition/loading can yield
+    // before the session becomes active. Choose a victim before inserting so a
+    // new run can never evict its own recorder and mutate an unreachable history.
+    let victim: string | undefined;
+    if (this.checkpointsBySession.size >= 16) {
+      victim = [...this.checkpointsBySession.keys()].find((id) =>
+        !this.activeRunIdsBySession.has(id) && !this.pendingAdmissions.has(id));
+      if (victim === undefined) throw new Error("Runtime checkpoint history limit reached: all retained histories are busy. Retry after a run completes.");
+    }
+    const history = new SessionCheckpoints(this.workingDirectory);
+    if (victim !== undefined) {
+      this.checkpointsBySession.get(victim)!.clear();
+      this.checkpointsBySession.delete(victim);
+    }
+    this.checkpointsBySession.set(sessionId, history);
+    return history;
   }
 
   private async executeRun(
@@ -753,7 +790,15 @@ class DragonsRuntimeCore implements DragonsRuntime {
     content: string,
     signal: AbortSignal,
     active: ActiveRun,
+    checkpoints: SessionCheckpoints,
   ): Promise<RuntimeRunResult> {
+    if (isCheckpointCommand(content)) {
+      const local = checkpointCommand(content, checkpoints);
+      return publicResult(await runAgent({ task: content, ...local, workingDirectory: this.workingDirectory, checkpoints, signal, maxTurns: 2,
+        authorize: (request) => this.requestAuthorization(runId, session.id, request, signal, active),
+        onEvent: (event) => this.forwardAgentEvent(event, runId, session.id, active, new Map(local.tools.map((tool) => [tool.name, tool.operation]))),
+      }));
+    }
     const planStore = createSessionPlanStore(this.sessionStore, session.id);
     const [skills, projectContext, projectScope, planTasks] = await Promise.all([
       createSkillsContext(this.skillsDirectory, session.skills ?? [], this.workingDirectory),
@@ -765,7 +810,29 @@ class DragonsRuntimeCore implements DragonsRuntime {
     const memory = createMemoryContext(retrieveRelevantMemories(memories, content, projectScope));
     const provider = this.providerRegistry.get(session.provider);
     const plan: DragonsPlan = { version: 1, tasks: planTasks };
-    const createModel = () => this.providerRegistry.createModel(provider.id, { model: session.model });
+    // Children deliberately have no adoption hook: they cannot change the parent session identity.
+    const createModel = () => this.providerRegistry.createModel(session.provider, { model: session.model });
+    const createParentModel = () => this.providerRegistry.createModel(session.provider, { model: session.model }, async (target) => {
+      if (signal.aborted || this.disposed) return false;
+      const adopt = (current: DragonsSession): DragonsSession => {
+        if (signal.aborted || this.disposed) throw new Error("Fallback identity adoption cancelled.");
+        if (current.provider !== session.provider || current.model !== session.model || current.continuation !== undefined) {
+          throw new Error("Fallback identity adoption requires an unchanged fresh session.");
+        }
+        const { continuation: _old, ...fresh } = current;
+        return { ...fresh, provider: target.provider, model: target.model, updatedAt: new Date().toISOString() };
+      };
+      const saved = this.sessionStore.mutate
+        ? await this.sessionStore.mutate(session.id, adopt)
+        : await (async () => { const next = adopt(session); await this.sessionStore.save(next); return next; })();
+      if (!saved) throw new Error("Fallback session disappeared before identity adoption.");
+      session = saved;
+      runDiagnostics.recordIdentityTransition({ provider: saved.provider, model: saved.model });
+      // Durable identity first, visible transition second, target request only after both.
+      this.enqueueRuntimeEvent(active, { type: "assistant_delta", runId, sessionId: session.id,
+        text: `Provider fallback: ${target.provider} · ${target.model} (context sharing explicitly enabled).\n` });
+      return !signal.aborted && !this.disposed;
+    });
     const memorySuggestionTool = createMemorySuggestionTool({
       store: this.memoryStore,
       workingDirectory: this.workingDirectory,
@@ -822,8 +889,9 @@ class DragonsRuntimeCore implements DragonsRuntime {
     const runDiagnostics = this.diagnostics.start({ sessionId: session.id, provider: session.provider, model: session.model });
     const result = await runAgent({
       task: content,
-      model: createModel(),
+      model: createParentModel(),
       tools: runTools,
+      lsp: this.lsp,
       workingDirectory: this.workingDirectory,
       projectContext,
       skills,
@@ -835,6 +903,7 @@ class DragonsRuntimeCore implements DragonsRuntime {
       contextBudgetChars: this.contextBudgetChars,
       signal,
       sessionApprovals,
+      checkpoints,
       authorize: (request) => this.requestAuthorization(runId, session.id, request, signal, active),
       onEvent: (event) => this.forwardAgentEvent(event, runId, session.id, active, toolOperations),
       diagnostics: runDiagnostics,
@@ -986,6 +1055,7 @@ class DragonsRuntimeCore implements DragonsRuntime {
         phase: "completed",
         ok: event.result.ok,
         output: boundedClientText(event.result.output),
+        ...(toolMutationWarning(event.result) ? { mutationWarning: toolMutationWarning(event.result) } : {}),
       });
     }
   }
@@ -1000,6 +1070,8 @@ class DragonsRuntimeCore implements DragonsRuntime {
     const operation = request.operation;
     if (operation === "READ") return true;
     if (signal.aborted) return false;
+    const lspApproval = request.name === "lsp_diagnostics_start" ? lspApprovalFromArguments(request.arguments) : undefined;
+    if (request.name === "lsp_diagnostics_start" && (operation !== "EXECUTE" || !lspApproval)) return false;
     const approvalId = randomUUID();
     return new Promise<ToolAuthorizationDecision>((resolve) => {
       const settle = (decision: ToolAuthorizationDecision): void => {
@@ -1023,6 +1095,7 @@ class DragonsRuntimeCore implements DragonsRuntime {
         approvalId,
         toolName: request.name,
         operation,
+        ...(lspApproval ? { lspApproval } : {}),
       });
     });
   }
@@ -1092,6 +1165,7 @@ export async function createDragonsRuntime(options: DragonsRuntimeOptions): Prom
     options.maxTurns,
     options.contextBudgetChars,
     options.createRunId ?? randomUUID,
+    options.lsp,
   );
   // TypeScript private fields are ordinary JS properties: never return the core instance.
   return Object.freeze({

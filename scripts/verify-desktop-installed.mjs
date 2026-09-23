@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { createDragonsRuntime } from '../dist/runtime.js';
 import { createProviderRegistry } from '../dist/provider/registry.js';
-import { runOutcome } from './desktop-acceptance.mjs';
+import { runOutcome } from '../tests/acceptance/desktop-acceptance.mjs';
 import { createSessionStore } from '../dist/session-store.js';
 import { createSharedRuntimeHost } from '../dist/shared-runtime.js';
 import { startRemoteServer } from '../dist/remote/server.js';

@@ -8,6 +8,8 @@ export type CliCommand =
   | { kind: "tui"; provider?: ProviderName; model?: string; resume?: string }
   | { kind: "run"; provider: ProviderName; model?: string; prompt?: string }
   | { kind: "auth"; action: "login" | "status" | "logout" }
+  | { kind: "profile"; action: "show" | "list" }
+  | { kind: "profile"; action: "create" | "select"; name: string }
   | { kind: "config"; action: "show" }
   | { kind: "config"; action: "set-provider"; provider: ProviderName }
   | { kind: "config"; action: "set-model"; provider: ProviderName; model: string }
@@ -213,6 +215,14 @@ export function parseCliCommand(arguments_: string[], providerIds: readonly Prov
     if (forwardedArguments[1] === "set-local-endpoint" && forwardedArguments[2]?.trim() && forwardedArguments.length === 3) return { kind: "config", action: "set-local-endpoint", endpoint: forwardedArguments[2].trim() };
     if (forwardedArguments[1] === "reset" && (forwardedArguments[2] === "provider" || forwardedArguments[2] === "model") && forwardedArguments.length === 3) return { kind: "config", action: "reset", target: forwardedArguments[2] };
     throw new Error("Use dragons config show, set-provider <provider>, set-model <provider> <model>, set-local-endpoint <url>, or reset <provider|model>.");
+  }
+  if (forwardedArguments[0] === "profile") {
+    if ((forwardedArguments.length === 1 || forwardedArguments[1] === "show") && forwardedArguments.length <= 2) return { kind: "profile", action: "show" };
+    if (forwardedArguments[1] === "list" && forwardedArguments.length === 2) return { kind: "profile", action: "list" };
+    if ((forwardedArguments[1] === "create" || forwardedArguments[1] === "select") && forwardedArguments[2] && forwardedArguments.length === 3) {
+      return { kind: "profile", action: forwardedArguments[1], name: forwardedArguments[2] };
+    }
+    throw new Error("Use dragons profile [show|list|create <name>|select <name>].");
   }
   if (forwardedArguments[0] !== "auth") return parseRunCommand(forwardedArguments, providerIds);
   const action = forwardedArguments[1];

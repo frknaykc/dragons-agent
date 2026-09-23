@@ -12,11 +12,23 @@
 <header><div><small>LOCAL RUNTIME / DESKTOP FOUNDATION</small><h1>Dragons Agent</h1></div><span id="status" role="status">Starting</span></header>
 <section aria-label="Session setup" class="setup">
 <label>Provider<select id="provider"><option value="">Host default</option></select></label>
-<label>Model<input id="model" maxlength="256" placeholder="Provider default"></label>
+<label>Model<input id="model" list="model-options" maxlength="256" placeholder="Provider default" aria-describedby="model-help"><datalist id="model-options"></datalist></label>
 <button id="create">New session</button>
 <label>Session ID<input id="resume-id" maxlength="128" placeholder="Saved session ID"></label>
 <button id="resume">Resume</button>
 <button id="refresh">Refresh status</button>
+</section>
+<p id="model-help" class="setup-help">Known models, not verified access. Type a custom ID. New session applies provider/model without signing in.</p>
+<section class="reasoning-setup" aria-label="Attached session reasoning">
+<label>Session reasoning<select id="reasoning" disabled aria-describedby="reasoning-status"></select></label>
+<button id="apply-reasoning" disabled>Apply reasoning</button>
+<p id="reasoning-status" role="status">Create or resume a session to choose reasoning for its next run.</p>
+</section>
+<section class="setup" aria-label="Desktop updates">
+<p id="update-status" role="status">Update status unavailable.</p>
+<button id="update-check" disabled>Check update</button>
+<button id="update-prepare" disabled>Prepare candidate</button>
+<button id="update-cancel" disabled>Cancel update operation</button>
 </section>
 <p id="session">Create or resume a session. Credentials are configured on the trusted host, never in this window.</p>
 <main>

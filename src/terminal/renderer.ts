@@ -1,4 +1,6 @@
-import type { ToolOperation } from "../tools.js";
+import { formatLspApproval, lspApprovalFromArguments } from "../lsp-approval.js";
+import { toolMutationWarning } from "../tool-mutation-warning.js";
+import type { ToolOperation, ToolResult } from "../tools.js";
 import stringWidth from "string-width";
 import { DRAGONS_ART, DRAGONS_MOTTO, DRAGONS_TITLE } from "./banner.js";
 
@@ -9,6 +11,7 @@ export type TerminalRendererOptions = {
   isTTY: boolean;
   color: boolean;
   width: number;
+  resizeSource?: NodeJS.EventEmitter & { columns?: number };
   now?: () => number;
 };
 
@@ -53,10 +56,9 @@ const FIRE_GOLD = [255, 185, 45] as const;
 const FIRE_RED = [230, 57, 46] as const;
 
 function truncate(text: string, width: number): string {
-  const characters = Array.from(text);
-  if (characters.length <= width) return text;
+  if (stringWidth(text) <= width) return text;
   if (width <= 1) return "…";
-  return `${characters.slice(0, width - 1).join("")}…`;
+  return `${fitLine(text, width - 1)}…`;
 }
 
 function style(text: string, sequence: string, color: boolean): string {
@@ -161,10 +163,12 @@ export function formatApproval(presentation: ApprovalPresentation, width: number
   const usableWidth = Math.max(28, Math.floor(width));
   const title = " Permission required ";
   const top = `╭─${title}${"─".repeat(Math.max(1, usableWidth - title.length - 3))}╮`;
-  const summary = conciseArgument(presentation.arguments);
+  const scope = presentation.name === "lsp_diagnostics_start" ? lspApprovalFromArguments(presentation.arguments) : undefined;
+  if (presentation.name === "lsp_diagnostics_start" && !scope) return "LSP approval unavailable: scope cannot be safely displayed. Denied.\n";
+  const summary = scope ? formatLspApproval(scope) : conciseArgument(presentation.arguments);
   const lines = [top, `│ ${presentation.operation} · ${presentation.name}`];
   if (summary) lines.push(`│ ${summary}`);
-  lines.push(`╰${"─".repeat(Math.max(1, usableWidth - 2))}╯`, "Allow once? [y]  Allow matching scope for session? [session]  Deny? [N] ");
+  lines.push(`╰${"─".repeat(Math.max(1, usableWidth - 2))}╯`, scope ? "One document, one process. Allow once? [y]  Deny? [N] " : "Allow once? [y]  Allow matching scope for session? [session]  Deny? [N] ");
   return lines.join("\n");
 }
 
@@ -176,36 +180,50 @@ export class TerminalRenderer {
   private runStartedAt: number | undefined;
   private timer: NodeJS.Timeout | undefined;
   private transientVisible = false;
+  private transientCells = 0;
   private metadata: StartupMetadata | undefined;
 
   constructor(private readonly options: TerminalRendererOptions) {
     this.now = options.now ?? Date.now;
     this.startedAt = this.now();
+    if (options.isTTY) options.resizeSource?.on("resize", this.resize);
   }
+
+  private get width(): number {
+    const width = this.options.resizeSource?.columns ?? this.options.width;
+    return Number.isFinite(width) && width >= 1 ? Math.floor(width) : 80;
+  }
+
+  private readonly resize = (): void => {
+    if (!this.transientVisible) return;
+    this.clearTransient();
+    this.renderTransient();
+  };
 
   renderStartup(metadata: StartupMetadata): void {
     this.metadata = metadata;
     if (!this.options.isTTY) return;
-    const title = centered(DRAGONS_TITLE, this.options.width);
-    this.options.write(`${style(title, ANSI.red, this.options.color)}\n\n${dragonFrame(this.options.width, this.options.color)}\n\n${fireGradient(centered(DRAGONS_MOTTO, this.options.width), this.options.color)}\n${style(centered(`${metadata.provider} · ${metadata.model}`, this.options.width), ANSI.yellow, this.options.color)}\n${style(centered(metadata.workingDirectory, this.options.width), ANSI.dim, this.options.color)}\n\n`);
+    const title = centered(DRAGONS_TITLE, this.width);
+    this.options.write(`${style(title, ANSI.red, this.options.color)}\n\n${dragonFrame(this.width, this.options.color)}\n\n${fireGradient(centered(DRAGONS_MOTTO, this.width), this.options.color)}\n${style(centered(`${metadata.provider} · ${metadata.model}`, this.width), ANSI.yellow, this.options.color)}\n${style(centered(metadata.workingDirectory, this.width), ANSI.dim, this.options.color)}\n\n`);
   }
 
-  renderComposer(): void {
+  renderComposer(model?: string): void {
+    if (this.metadata && model !== undefined) this.metadata = { ...this.metadata, model };
     if (!this.options.isTTY) {
       this.options.write("> ");
       return;
     }
     const line = this.statusLine();
-    const separator = style(formatSeparator(this.options.width), ANSI.red, this.options.color);
+    const separator = style(formatSeparator(this.width), ANSI.red, this.options.color);
     const identity = style("𓆩 DRAGON 𓆪", ANSI.orange, this.options.color);
-    const hint = style("Ask anything, or type / for commands…", ANSI.dim, this.options.color);
+    const hint = style(fitLine("Ask anything, or type / for commands…", Math.max(0, this.width - stringWidth("  𓆩 DRAGON 𓆪  › ") - 1)), ANSI.dim, this.options.color);
     const cursor = style("›", ANSI.brightYellow, this.options.color);
     this.options.write(`${line}\n${separator}\n\n${separator}\x1b[1A\r  ${identity} ${hint} ${cursor} `);
   }
 
   finishComposer(): void {
     if (!this.options.isTTY) return;
-    this.options.write(`\r\x1b[2K${style(formatSeparator(this.options.width), ANSI.red, this.options.color)}\n`);
+    this.options.write(`\r\x1b[2K${style(formatSeparator(this.width), ANSI.red, this.options.color)}\n`);
   }
 
   startRun(state: ActivityState = "thinking"): void {
@@ -253,8 +271,11 @@ export class TerminalRenderer {
     this.setActivity(state);
   }
 
-  renderToolCompleted(name: string, ok: boolean): void {
+  renderToolCompleted(name: string, ok: boolean, changedPaths?: string[], rollbackCoverage?: ToolResult["rollbackCoverage"], lspDiagnostics?: string): void {
     this.stopTransient();
+    if (lspDiagnostics) this.options.write(`\n${lspDiagnostics}\n`);
+    const warning = toolMutationWarning({ ok, changedPaths, rollbackCoverage });
+    if (warning) this.options.write(`\n${warning}\n`);
     if (!this.options.isTTY) {
       this.options.write(`\n${formatToolCompletion(name, ok)}\n`);
       return;
@@ -267,11 +288,16 @@ export class TerminalRenderer {
   renderApproval(presentation: ApprovalPresentation): void {
     this.stopTransient();
     this.state = "approval";
+    if (!this.options.isTTY && presentation.name === "lsp_diagnostics_start") {
+      const scope = lspApprovalFromArguments(presentation.arguments);
+      this.options.write(scope ? `\n? Allow EXECUTE lsp_diagnostics_start\n${formatLspApproval(scope)}\nOne document, one process. [y/N] ` : "LSP approval unavailable: scope cannot be safely displayed. Denied.\n");
+      return;
+    }
     if (!this.options.isTTY) {
       this.options.write(`\n? Allow ${presentation.operation} ${presentation.name} with ${presentation.arguments}? [y/N] `);
       return;
     }
-    this.options.write(`\n${style(formatApproval(presentation, this.options.width), ANSI.yellow, this.options.color)}`);
+    this.options.write(`\n${style(formatApproval(presentation, this.width), ANSI.yellow, this.options.color)}`);
   }
 
   renderCancelled(): void {
@@ -295,6 +321,7 @@ export class TerminalRenderer {
 
   dispose(): void {
     this.stopTransient();
+    this.options.resizeSource?.removeListener("resize", this.resize);
   }
 
   private statusLine(): string {
@@ -304,20 +331,29 @@ export class TerminalRenderer {
       frame: this.frame,
       sessionElapsedMs: this.now() - this.startedAt,
       runElapsedMs: this.runStartedAt === undefined ? undefined : this.now() - this.runStartedAt,
-      width: this.options.width,
+      width: Math.max(1, this.width - 1),
     }), ANSI.yellow, this.options.color);
   }
 
   private renderTransient(): void {
     if (!this.options.isTTY || this.runStartedAt === undefined) return;
-    this.options.write(`\r\x1b[2K${this.statusLine()}`);
+    const line = this.statusLine();
+    this.options.write(`\r\x1b[2K${line}`);
+    this.transientCells = stringWidth(line);
     this.transientVisible = true;
   }
 
   private stopTransient(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    if (this.transientVisible && this.options.isTTY) this.options.write("\r\x1b[2K");
+    this.clearTransient();
+  }
+
+  private clearTransient(): void {
+    if (this.transientVisible && this.options.isTTY) {
+      const rows = Math.floor(Math.max(0, this.transientCells - 1) / this.width);
+      this.options.write(rows ? `\r\x1b[${rows}A\x1b[0J` : "\r\x1b[2K");
+    }
     this.transientVisible = false;
   }
 }

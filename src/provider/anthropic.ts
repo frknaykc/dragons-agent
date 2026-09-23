@@ -11,6 +11,7 @@ import { retryProviderRequest } from "../retry.js";
 import type { AgentTool } from "../tools.js";
 import {
   classifyProviderHttpFailure,
+  ProviderRequestFailureBoundary,
   providerCompatibilityError,
   ProviderCompatibilityError,
   type ProviderCompatibilityKind,
@@ -242,184 +243,192 @@ export function createAnthropicAgentModel(options: AnthropicAgentModelOptions = 
 
   return {
     async respond(request: AgentRequest, onTextDelta?: AgentTextDeltaHandler): Promise<AgentResponse> {
-      let resumed = false;
-      if (!initialized) {
-        const restored = restoreConversation(request.continuationState);
-        if (restored) {
-          messages.splice(0, messages.length, ...restored);
-          resumed = true;
-          hasUncommittedRestoredConversation = true;
-        }
-        initialized = true;
-      }
-      const nextMessages = [...messages];
-      if (request.previousResponseId) {
-        const expected = new Set(lastToolCalls.map((call) => call.callId));
-        if (request.toolOutputs.length !== lastToolCalls.length
-          || request.toolOutputs.some((output) => !expected.has(output.callId))
-          || new Set(request.toolOutputs.map((output) => output.callId)).size !== request.toolOutputs.length) {
-          throw providerCompatibilityError("anthropic", "protocol_drift");
-        }
-        nextMessages.push({ role: "user", content: request.toolOutputs.map((output) => ({ type: "tool_result", tool_use_id: output.callId, content: output.output })) });
-      } else if (request.conversationResponseId || resumed || hasUncommittedRestoredConversation) {
-        nextMessages.push({ role: "user", content: request.task });
-      } else {
-        nextMessages.splice(0, nextMessages.length, { role: "user", content: request.task });
-      }
-
-      const instructions = formatAdvisoryContextForInstructions(request);
-      const body: Record<string, unknown> = {
-        model,
-        max_tokens: maxTokens,
-        messages: nextMessages,
-        tools: request.tools.map(toTool),
-        stream: true,
-      };
-      if (instructions) body.system = instructions;
-      let response: Response;
+      const failure = new ProviderRequestFailureBoundary();
       try {
-        response = await retryProviderRequest(async () => {
-          const candidate = await fetchImpl(baseUrl, {
-            method: "POST",
-            headers: {
-              "x-api-key": apiKey,
-              "anthropic-version": ANTHROPIC_VERSION,
-              "content-type": "application/json",
-              accept: "text/event-stream",
-            },
-            body: JSON.stringify(body),
-            signal: request.signal,
-          });
-          const kind = classifyProviderHttpFailure(candidate.status);
-          if (kind === "rate_limit" || kind === "transient") {
-            await candidate.body?.cancel();
-            throw providerCompatibilityError("anthropic", kind, candidate.status);
+        let resumed = false;
+        if (!initialized) {
+          const restored = restoreConversation(request.continuationState);
+          if (restored) {
+            messages.splice(0, messages.length, ...restored);
+            resumed = true;
+            hasUncommittedRestoredConversation = true;
           }
-          return candidate;
-        }, { signal: request.signal, onRetry: request.onProviderRetry });
-      } catch (error: unknown) {
-        if (request.signal?.aborted) throw error;
-        throw safeProviderError(request, error);
-      }
-      if (!response.ok) {
-        const kind = classifyProviderHttpFailure(response.status);
-        recordProviderDiagnostic(request, kind);
-        throw providerCompatibilityError("anthropic", kind, response.status);
-      }
-
-      let responseId = "";
-      let text = "";
-      let inputTokens: number | undefined;
-      let outputTokens: number | undefined;
-      let stopReason: string | undefined;
-      let stopped = false;
-      let messageStarted = false;
-      const blocks = new Map<number, ActiveBlock>();
-      const orderedBlocks: AnthropicContentBlock[] = [];
-      const toolCalls: ToolCall[] = [];
-      const callIds = new Set<string>();
-      try {
-        await parseSse(response, (event) => {
-          const type = event.type;
-          if (type === "ping") return;
-          if (stopped) throw providerCompatibilityError("anthropic", "protocol_drift");
-          if (type === "error") throw providerCompatibilityError("anthropic", streamedErrorKind(event.error));
-          if (type === "message_start") {
-            if (messageStarted) throw providerCompatibilityError("anthropic", "protocol_drift");
-            const message = event.message;
-            if (!isRecord(message) || !boundedNonEmptyString(message.id)) throw providerCompatibilityError("anthropic", "malformed_response");
-            responseId = message.id;
-            inputTokens = usageNumber(isRecord(message.usage) ? message.usage.input_tokens : undefined);
-            messageStarted = true;
-            return;
-          }
-          if (!messageStarted) throw providerCompatibilityError("anthropic", "protocol_drift");
-          if (type === "content_block_start") {
-            const index = event.index;
-            const content = event.content_block;
-            if (!Number.isSafeInteger(index) || (index as number) < 0 || (index as number) >= 64 || !isRecord(content) || blocks.has(index as number)) {
-              throw providerCompatibilityError("anthropic", "malformed_response");
-            }
-            if (content.type === "text") {
-              blocks.set(index as number, { type: "text", text: typeof content.text === "string" ? content.text : "" });
-              return;
-            }
-            if (content.type === "tool_use" && boundedNonEmptyString(content.id) && boundedNonEmptyString(content.name) && isRecord(content.input)) {
-              blocks.set(index as number, { type: "tool_use", id: content.id, name: content.name, initialInput: content.input, partialInput: "" });
-              return;
-            }
+          initialized = true;
+        }
+        const nextMessages = [...messages];
+        if (request.previousResponseId) {
+          const expected = new Set(lastToolCalls.map((call) => call.callId));
+          if (request.toolOutputs.length !== lastToolCalls.length
+            || request.toolOutputs.some((output) => !expected.has(output.callId))
+            || new Set(request.toolOutputs.map((output) => output.callId)).size !== request.toolOutputs.length) {
             throw providerCompatibilityError("anthropic", "protocol_drift");
           }
-          if (type === "content_block_delta") {
-            const index = event.index;
-            const delta = event.delta;
-            const block = typeof index === "number" ? blocks.get(index) : undefined;
-            if (!block || !isRecord(delta)) throw providerCompatibilityError("anthropic", "malformed_response");
-            if (block.type === "text" && delta.type === "text_delta" && typeof delta.text === "string") {
-              block.text += delta.text;
-              text += delta.text;
-              onTextDelta?.(delta.text);
+          nextMessages.push({ role: "user", content: request.toolOutputs.map((output) => ({ type: "tool_result", tool_use_id: output.callId, content: output.output })) });
+        } else if (request.conversationResponseId || resumed || hasUncommittedRestoredConversation) {
+          nextMessages.push({ role: "user", content: request.task });
+        } else {
+          nextMessages.splice(0, nextMessages.length, { role: "user", content: request.task });
+        }
+
+        const instructions = formatAdvisoryContextForInstructions(request);
+        const body: Record<string, unknown> = {
+          model,
+          max_tokens: maxTokens,
+          messages: nextMessages,
+          tools: request.tools.map(toTool),
+          stream: true,
+        };
+        if (instructions) body.system = instructions;
+        let response: Response;
+        try {
+          response = await retryProviderRequest(async () => {
+            failure.beginAttempt();
+            const candidate = await fetchImpl(baseUrl, {
+              method: "POST",
+              headers: {
+                "x-api-key": apiKey,
+                "anthropic-version": ANTHROPIC_VERSION,
+                "content-type": "application/json",
+                accept: "text/event-stream",
+              },
+              body: JSON.stringify(body),
+              signal: request.signal,
+            });
+            if (!candidate.ok) failure.httpFailure(candidate.status, candidate.headers.get("retry-after"));
+            const kind = classifyProviderHttpFailure(candidate.status);
+            if (kind === "rate_limit" || kind === "transient") {
+              await candidate.body?.cancel();
+              throw providerCompatibilityError("anthropic", kind, candidate.status);
+            }
+            return candidate;
+          }, { signal: request.signal, onRetry: () => { failure.beginAttempt(); request.onProviderRetry?.(); } });
+        } catch (error: unknown) {
+          if (request.signal?.aborted) throw error;
+          throw safeProviderError(request, error);
+        }
+        if (!response.ok) {
+          const kind = classifyProviderHttpFailure(response.status);
+          recordProviderDiagnostic(request, kind);
+          throw providerCompatibilityError("anthropic", kind, response.status);
+        }
+        failure.streamStarted();
+
+        let responseId = "";
+        let text = "";
+        let inputTokens: number | undefined;
+        let outputTokens: number | undefined;
+        let stopReason: string | undefined;
+        let stopped = false;
+        let messageStarted = false;
+        const blocks = new Map<number, ActiveBlock>();
+        const orderedBlocks: AnthropicContentBlock[] = [];
+        const toolCalls: ToolCall[] = [];
+        const callIds = new Set<string>();
+        try {
+          await parseSse(response, (event) => {
+            const type = event.type;
+            if (type === "ping") return;
+            if (stopped) throw providerCompatibilityError("anthropic", "protocol_drift");
+            if (type === "error") throw providerCompatibilityError("anthropic", streamedErrorKind(event.error));
+            if (type === "message_start") {
+              if (messageStarted) throw providerCompatibilityError("anthropic", "protocol_drift");
+              const message = event.message;
+              if (!isRecord(message) || !boundedNonEmptyString(message.id)) throw providerCompatibilityError("anthropic", "malformed_response");
+              responseId = message.id;
+              inputTokens = usageNumber(isRecord(message.usage) ? message.usage.input_tokens : undefined);
+              messageStarted = true;
               return;
             }
-            if (block.type === "tool_use" && delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
-              block.partialInput += delta.partial_json;
-              if (block.partialInput.length > MAX_TOOL_INPUT_CHARACTERS) throw providerCompatibilityError("anthropic", "malformed_response");
+            if (!messageStarted) throw providerCompatibilityError("anthropic", "protocol_drift");
+            if (type === "content_block_start") {
+              const index = event.index;
+              const content = event.content_block;
+              if (!Number.isSafeInteger(index) || (index as number) < 0 || (index as number) >= 64 || !isRecord(content) || blocks.has(index as number)) {
+                throw providerCompatibilityError("anthropic", "malformed_response");
+              }
+              if (content.type === "text") {
+                blocks.set(index as number, { type: "text", text: typeof content.text === "string" ? content.text : "" });
+                return;
+              }
+              if (content.type === "tool_use" && boundedNonEmptyString(content.id) && boundedNonEmptyString(content.name) && isRecord(content.input)) {
+                blocks.set(index as number, { type: "tool_use", id: content.id, name: content.name, initialInput: content.input, partialInput: "" });
+                return;
+              }
+              throw providerCompatibilityError("anthropic", "protocol_drift");
+            }
+            if (type === "content_block_delta") {
+              const index = event.index;
+              const delta = event.delta;
+              const block = typeof index === "number" ? blocks.get(index) : undefined;
+              if (!block || !isRecord(delta)) throw providerCompatibilityError("anthropic", "malformed_response");
+              if (block.type === "text" && delta.type === "text_delta" && typeof delta.text === "string") {
+                block.text += delta.text;
+                text += delta.text;
+                onTextDelta?.(delta.text);
+                return;
+              }
+              if (block.type === "tool_use" && delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+                block.partialInput += delta.partial_json;
+                if (block.partialInput.length > MAX_TOOL_INPUT_CHARACTERS) throw providerCompatibilityError("anthropic", "malformed_response");
+                return;
+              }
+              throw providerCompatibilityError("anthropic", "protocol_drift");
+            }
+            if (type === "content_block_stop") {
+              const index = event.index;
+              const block = typeof index === "number" ? blocks.get(index) : undefined;
+              if (!block) throw providerCompatibilityError("anthropic", "malformed_response");
+              blocks.delete(index as number);
+              if (block.type === "text") {
+                orderedBlocks.push({ type: "text", text: block.text });
+                return;
+              }
+              const input = parsedToolInput(block);
+              if (callIds.has(block.id)) throw providerCompatibilityError("anthropic", "protocol_drift");
+              callIds.add(block.id);
+              orderedBlocks.push({ type: "tool_use", id: block.id, name: block.name, input });
+              toolCalls.push({ callId: block.id, name: block.name, arguments: JSON.stringify(input) });
               return;
             }
+            if (type === "message_delta") {
+              if (!isRecord(event.delta) || (event.delta.stop_reason !== "end_turn" && event.delta.stop_reason !== "tool_use")) {
+                throw providerCompatibilityError("anthropic", "malformed_response");
+              }
+              stopReason = event.delta.stop_reason;
+              outputTokens = usageNumber(isRecord(event.usage) ? event.usage.output_tokens : undefined);
+              return;
+            }
+            if (type === "message_stop") { stopped = true; return; }
             throw providerCompatibilityError("anthropic", "protocol_drift");
-          }
-          if (type === "content_block_stop") {
-            const index = event.index;
-            const block = typeof index === "number" ? blocks.get(index) : undefined;
-            if (!block) throw providerCompatibilityError("anthropic", "malformed_response");
-            blocks.delete(index as number);
-            if (block.type === "text") {
-              orderedBlocks.push({ type: "text", text: block.text });
-              return;
-            }
-            const input = parsedToolInput(block);
-            if (callIds.has(block.id)) throw providerCompatibilityError("anthropic", "protocol_drift");
-            callIds.add(block.id);
-            orderedBlocks.push({ type: "tool_use", id: block.id, name: block.name, input });
-            toolCalls.push({ callId: block.id, name: block.name, arguments: JSON.stringify(input) });
-            return;
-          }
-          if (type === "message_delta") {
-            if (!isRecord(event.delta) || (event.delta.stop_reason !== "end_turn" && event.delta.stop_reason !== "tool_use")) {
-              throw providerCompatibilityError("anthropic", "malformed_response");
-            }
-            stopReason = event.delta.stop_reason;
-            outputTokens = usageNumber(isRecord(event.usage) ? event.usage.output_tokens : undefined);
-            return;
-          }
-          if (type === "message_stop") { stopped = true; return; }
-          throw providerCompatibilityError("anthropic", "protocol_drift");
-        }, request.signal);
+          }, request.signal);
+        } catch (error: unknown) {
+          if (request.signal?.aborted) throw error;
+          throw safeProviderError(request, error);
+        }
+        if (!responseId || !stopped || blocks.size > 0 || !stopReason || (toolCalls.length > 0 && stopReason !== "tool_use") || (toolCalls.length === 0 && stopReason === "tool_use")) {
+          recordProviderDiagnostic(request, "malformed_response");
+          throw providerCompatibilityError("anthropic", "malformed_response");
+        }
+        nextMessages.push({ role: "assistant", content: orderedBlocks });
+        const persistedMessages = boundConversation(nextMessages);
+        messages.splice(0, messages.length, ...persistedMessages);
+        hasUncommittedRestoredConversation = false;
+        lastToolCalls = toolCalls;
+        const usage: AgentUsage = {
+          ...(inputTokens === undefined ? {} : { inputTokens }),
+          ...(outputTokens === undefined ? {} : { outputTokens }),
+        };
+        return {
+          responseId,
+          text,
+          textWasStreamed: true,
+          toolCalls,
+          ...(Object.keys(usage).length === 0 ? {} : { usage }),
+          continuationState: continuationState(persistedMessages),
+        };
       } catch (error: unknown) {
-        if (request.signal?.aborted) throw error;
-        throw safeProviderError(request, error);
+        throw failure.finish(error, request.signal?.aborted);
       }
-      if (!responseId || !stopped || blocks.size > 0 || !stopReason || (toolCalls.length > 0 && stopReason !== "tool_use") || (toolCalls.length === 0 && stopReason === "tool_use")) {
-        recordProviderDiagnostic(request, "malformed_response");
-        throw providerCompatibilityError("anthropic", "malformed_response");
-      }
-      nextMessages.push({ role: "assistant", content: orderedBlocks });
-      const persistedMessages = boundConversation(nextMessages);
-      messages.splice(0, messages.length, ...persistedMessages);
-      hasUncommittedRestoredConversation = false;
-      lastToolCalls = toolCalls;
-      const usage: AgentUsage = {
-        ...(inputTokens === undefined ? {} : { inputTokens }),
-        ...(outputTokens === undefined ? {} : { outputTokens }),
-      };
-      return {
-        responseId,
-        text,
-        textWasStreamed: true,
-        toolCalls,
-        ...(Object.keys(usage).length === 0 ? {} : { usage }),
-        continuationState: continuationState(persistedMessages),
-      };
     },
   };
 }

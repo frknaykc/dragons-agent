@@ -2,8 +2,9 @@ import { MAX_DRAFT, terminalText } from "./screen.js";
 
 export type InputAction =
   | { type: "insert"; text: string }
-  | { type: "enter" | "backspace" | "delete" | "left" | "right" | "home" | "end" | "tab" | "pageup" | "pagedown" | "cancel" | "interrupt" | "quit" | "refresh" };
+  | { type: "enter" | "backspace" | "delete" | "up" | "down" | "left" | "right" | "home" | "end" | "tab" | "pageup" | "pagedown" | "cancel" | "interrupt" | "quit" | "refresh" };
 const SEQUENCES: Record<string, InputAction["type"]> = {
+  "\x1b[A": "up", "\x1b[B": "down",
   "\x1b[D": "left", "\x1b[C": "right", "\x1b[H": "home", "\x1b[F": "end",
   "\x1bOH": "home", "\x1bOF": "end", "\x1b[1~": "home", "\x1b[4~": "end",
   "\x1b[3~": "delete", "\x1b[5~": "pageup", "\x1b[6~": "pagedown",

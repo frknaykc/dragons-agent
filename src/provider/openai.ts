@@ -1,3 +1,4 @@
+import { openAIReasoning, type ReasoningLevel } from "./reasoning.js";
 import OpenAI from "openai";
 import type {
   FunctionTool,
@@ -14,6 +15,7 @@ import { formatAdvisoryContextForInstructions } from "../advisory-context.js";
 import type { AgentTool } from "../tools.js";
 import { classifyProviderError, retryProviderRequest } from "../retry.js";
 import {
+  ProviderRequestFailureBoundary,
   providerCompatibilityError,
   ProviderCompatibilityError,
   type ProviderCompatibilityKind,
@@ -21,8 +23,8 @@ import {
 
 export const DEFAULT_OPENAI_MODEL = "gpt-4.1-mini";
 
-function createClient(): OpenAI {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
+function createClient(storedKey?: string): OpenAI {
+  const apiKey = storedKey ?? process.env.OPENAI_API_KEY?.trim();
 
   if (!apiKey) {
     throw new Error(
@@ -32,7 +34,12 @@ function createClient(): OpenAI {
 
   // Dragons owns the single bounded pre-stream retry policy; SDK retries would
   // otherwise be invisible to M22/M33 accounting and can multiply attempts.
-  return new OpenAI({ apiKey, maxRetries: 0 });
+  const baseURL = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+  try {
+    const endpoint = new URL(baseURL);
+    if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error();
+  } catch { throw new Error("OpenAI endpoint must be an HTTPS URL without credentials, query, or fragment."); }
+  return new OpenAI({ apiKey, baseURL, maxRetries: 0, fetchOptions: { redirect: "error" } });
 }
 
 function toFunctionTool(tool: AgentTool): FunctionTool {
@@ -103,79 +110,88 @@ function isCriticalUnknownOpenAIStreamEvent(type: string): boolean {
   return /(?:completed|function_call|tool_call|output_item\.done)/.test(type);
 }
 
-export function createOpenAIAgentModel(model = DEFAULT_OPENAI_MODEL): AgentModel {
-  const client = createClient();
+export function createOpenAIAgentModel(model = DEFAULT_OPENAI_MODEL, reasoning?: ReasoningLevel, apiKey?: string): AgentModel {
+  const effort = openAIReasoning(model, reasoning);
+  const client = createClient(apiKey);
 
   return {
     async respond(
       request: AgentRequest,
       onTextDelta?: AgentTextDeltaHandler,
     ): Promise<AgentResponse> {
-      const previousResponseId = request.previousResponseId
-        ?? continuationResponseId(request.continuationState)
-        ?? request.conversationResponseId;
-      let stream;
+      const failure = new ProviderRequestFailureBoundary();
       try {
-        stream = await retryProviderRequest(() => client.responses.create({
-          model,
-          input: request.previousResponseId ? toolOutputInput(request) : request.task,
-          instructions: formatAdvisoryContextForInstructions(request),
-          previous_response_id: previousResponseId,
-          tools: request.tools.map(toFunctionTool),
-          // M11 requires ordered authorization and execution.
-          parallel_tool_calls: false,
-          stream: true,
-        }, { signal: request.signal }), { signal: request.signal, onRetry: request.onProviderRetry });
-      } catch (error: unknown) {
-        if (request.signal?.aborted) throw error;
-        throw safeProviderError(request, error);
-      }
-      const toolCalls: AgentResponse["toolCalls"] = [];
-      const completedCallIds = new Set<string>();
-      let responseId = "";
-      let text = "";
-
-      try {
-        for await (const event of stream) {
-          if (request.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-          if (event.type === "response.output_text.delta") {
-            text += event.delta;
-            onTextDelta?.(event.delta);
-            continue;
-          }
-          if (event.type === "response.output_item.done" && event.item.type === "function_call") {
-            const call = validatedToolCall(event.item.call_id, event.item.name, event.item.arguments);
-            if (completedCallIds.has(call.callId)) throw providerCompatibilityError("openai", "protocol_drift");
-            completedCallIds.add(call.callId);
-            toolCalls.push(call);
-            continue;
-          }
-          if (event.type === "response.completed") {
-            responseId = event.response.id;
-            continue;
-          }
-          if (event.type === "response.failed") throw providerCompatibilityError("openai", "transient");
-          if (isIgnorableOpenAIStreamEvent(event.type)) continue;
-          if (isCriticalUnknownOpenAIStreamEvent(event.type)) throw providerCompatibilityError("openai", "protocol_drift");
-          recordProviderDiagnostic(request, "protocol_drift");
+        const previousResponseId = request.previousResponseId
+          ?? continuationResponseId(request.continuationState)
+          ?? request.conversationResponseId;
+        let stream;
+        try {
+          stream = await retryProviderRequest(() => client.responses.create({
+            model,
+            ...(effort ? { reasoning: effort } : {}),
+            input: request.previousResponseId ? toolOutputInput(request) : request.task,
+            instructions: formatAdvisoryContextForInstructions(request),
+            previous_response_id: previousResponseId,
+            tools: request.tools.map(toFunctionTool),
+            // M11 requires ordered authorization and execution.
+            parallel_tool_calls: false,
+            stream: true,
+          }, { signal: request.signal }), { signal: request.signal, onRetry: request.onProviderRetry });
+        } catch (error: unknown) {
+          if (error instanceof OpenAI.APIError) failure.httpFailure(error.status, error.headers?.get("retry-after"));
+          if (request.signal?.aborted) throw error;
+          throw safeProviderError(request, error);
         }
+        failure.streamStarted();
+        const toolCalls: AgentResponse["toolCalls"] = [];
+        const completedCallIds = new Set<string>();
+        let responseId = "";
+        let text = "";
+
+        try {
+          for await (const event of stream) {
+            if (request.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+            if (event.type === "response.output_text.delta") {
+              text += event.delta;
+              onTextDelta?.(event.delta);
+              continue;
+            }
+            if (event.type === "response.output_item.done" && event.item.type === "function_call") {
+              const call = validatedToolCall(event.item.call_id, event.item.name, event.item.arguments);
+              if (completedCallIds.has(call.callId)) throw providerCompatibilityError("openai", "protocol_drift");
+              completedCallIds.add(call.callId);
+              toolCalls.push(call);
+              continue;
+            }
+            if (event.type === "response.completed") {
+              responseId = event.response.id;
+              continue;
+            }
+            if (event.type === "response.failed") throw providerCompatibilityError("openai", "transient");
+            if (isIgnorableOpenAIStreamEvent(event.type)) continue;
+            if (isCriticalUnknownOpenAIStreamEvent(event.type)) throw providerCompatibilityError("openai", "protocol_drift");
+            recordProviderDiagnostic(request, "protocol_drift");
+          }
+        } catch (error: unknown) {
+          if (request.signal?.aborted) throw error;
+          throw safeProviderError(request, error);
+        }
+
+        if (!responseId) {
+          recordProviderDiagnostic(request, "malformed_response");
+          throw providerCompatibilityError("openai", "malformed_response");
+        }
+
+        return {
+          responseId,
+          text,
+          textWasStreamed: true,
+          toolCalls,
+          continuationState: { kind: "openai-responses", previousResponseId: responseId },
+        };
       } catch (error: unknown) {
-        if (request.signal?.aborted) throw error;
-        throw safeProviderError(request, error);
+        throw failure.finish(error, request.signal?.aborted);
       }
-
-      if (!responseId) {
-        recordProviderDiagnostic(request, "malformed_response");
-        throw providerCompatibilityError("openai", "malformed_response");
-      }
-
-      return {
-        responseId,
-        text,
-        textWasStreamed: true,
-        toolCalls,
-        continuationState: { kind: "openai-responses", previousResponseId: responseId },
-      };
     },
   };
 }

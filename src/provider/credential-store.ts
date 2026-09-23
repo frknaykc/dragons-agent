@@ -25,6 +25,8 @@ export type CodexCredentialStore = {
   remove(): Promise<void>;
   /** Deliberately non-secret storage label for status output. */
   storageDescription(): Promise<string>;
+  /** Native availability without parsing an old payload (explicit login replacement). */
+  probe?(): Promise<void>;
 };
 
 export type NativeCredentialEntry = {
@@ -81,30 +83,41 @@ function nativeStorageDescription(platform = process.platform): string {
 /** Native OS credential store for the single Dragons-owned ChatGPT credential payload. */
 export function createNativeCodexCredentialStore(options: {
   entry?: NativeCredentialEntry;
+  /** A Dragons-owned account label; profile names are namespaced here, never in credential payloads. */
+  account?: string;
   platform?: NodeJS.Platform;
 } = {}): CodexCredentialStore {
-  const entry = options.entry ?? new AsyncEntry(DRAGONS_CREDENTIAL_SERVICE, DRAGONS_CHATGPT_CREDENTIAL_ACCOUNT);
+  let entry = options.entry;
+  let usable = false;
+  const native = () => entry ??= new AsyncEntry(DRAGONS_CREDENTIAL_SERVICE, options.account ?? DRAGONS_CHATGPT_CREDENTIAL_ACCOUNT);
+  const read = async () => {
+    try {
+      const payload = await native().getPassword();
+      usable = true;
+      return payload ?? undefined;
+    } catch {
+      if (!usable) throw new NativeCredentialStoreUnavailableError();
+      throw new Error("Native credential storage could not read ChatGPT Subscription credentials.");
+    }
+  };
   const storage = nativeStorageDescription(options.platform);
   return {
     async load(): Promise<CodexCredentials | undefined> {
-      let payload: string | undefined;
-      try {
-        payload = (await entry.getPassword()) ?? undefined;
-      } catch {
-        throw new NativeCredentialStoreUnavailableError();
-      }
+      const payload = await read();
       return payload === undefined ? undefined : parseStoredCredentials(payload, "Native Dragons ChatGPT credential");
     },
+    async probe(): Promise<void> { await read(); },
     async save(credentials: CodexCredentials): Promise<void> {
       try {
-        await entry.setPassword(serializeCredentials(credentials));
+        await native().setPassword(serializeCredentials(credentials));
+        usable = true;
       } catch {
         throw new Error("Native credential storage could not save ChatGPT Subscription credentials.");
       }
     },
     async remove(): Promise<void> {
       try {
-        await entry.deletePassword();
+        await native().deletePassword();
       } catch {
         throw new Error("Native credential storage could not remove ChatGPT Subscription credentials.");
       }
@@ -161,7 +174,13 @@ export function createMigratingCodexCredentialStore(
   native: CodexCredentialStore,
   legacy: CodexCredentialStore,
 ): CodexCredentialStore {
-  return {
+  let pending: Promise<unknown> = Promise.resolve();
+  const serialize = <T>(action: () => Promise<T>): Promise<T> => {
+    const result = pending.then(action);
+    pending = result.catch(() => {});
+    return result;
+  };
+  const operations: CodexCredentialStore = {
     async load(): Promise<CodexCredentials | undefined> {
       const stored = await native.load();
       if (stored) {
@@ -199,6 +218,14 @@ export function createMigratingCodexCredentialStore(
     },
     async storageDescription(): Promise<string> { return native.storageDescription(); },
   };
+  // A migration read writes native state and deletes legacy state. Queue the
+  // entire operation, not its nested steps, to avoid both races and deadlocks.
+  return {
+    load: () => serialize(() => operations.load()),
+    save: (credentials) => serialize(() => operations.save(credentials)),
+    remove: () => serialize(() => operations.remove()),
+    storageDescription: () => serialize(() => operations.storageDescription()),
+  };
 }
 
 /**
@@ -210,27 +237,40 @@ export function createLoginReplacementCodexCredentialStore(
   native: CodexCredentialStore,
   legacy: CodexCredentialStore,
 ): CodexCredentialStore {
+  let selected: "native" | "legacy" | undefined;
   return {
     async load(): Promise<CodexCredentials | undefined> { return native.load(); },
     async save(credentials: CodexCredentials): Promise<void> {
+      if (!selected) {
+        try {
+          if (native.probe) await native.probe();
+          else await native.load();
+          selected = "native";
+        } catch (error) {
+          // A corrupt old payload can be explicitly replaced, but only an
+          // initially unavailable backend permits the existing file fallback.
+          selected = error instanceof NativeCredentialStoreUnavailableError ? "legacy" : "native";
+        }
+      }
+      if (selected === "legacy") {
+        await legacy.save(credentials);
+        const verified = await legacy.load();
+        if (!verified || !sameCredentials(credentials, verified)) throw new Error("Unable to replace Dragons ChatGPT credentials in secure storage.");
+        return;
+      }
       try {
         await native.save(credentials);
         const verified = await native.load();
         if (!verified || !sameCredentials(credentials, verified)) throw new Error("Native credential verification failed.");
         await legacy.remove();
-      } catch (error: unknown) {
-        if (!(error instanceof NativeCredentialStoreUnavailableError)) {
-          throw new Error("Unable to replace Dragons ChatGPT credentials in secure storage.");
-        }
-        await legacy.save(credentials);
-        const verified = await legacy.load();
-        if (!verified || !sameCredentials(credentials, verified)) {
-          throw new Error("Unable to replace Dragons ChatGPT credentials in secure storage.");
-        }
+      } catch {
+        throw new Error("Unable to replace Dragons ChatGPT credentials in secure storage.");
       }
     },
     async remove(): Promise<void> { await legacy.remove(); },
-    async storageDescription(): Promise<string> { return native.storageDescription(); },
+    async storageDescription(): Promise<string> {
+      return selected === "legacy" ? "secure file fallback (native credential storage unavailable)" : native.storageDescription();
+    },
   };
 }
 

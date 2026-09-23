@@ -1,10 +1,13 @@
-import type { AgentTool, ToolOperation, ToolResult } from "./tools.js";
+import { lspApprovalFromArguments } from "./lsp-approval.js";
+import { collectLspDiagnostics, lspMatches, parseLspConfig, type LspConfig } from "./lsp-diagnostics.js";
+import { isCheckpointFileTool, type AgentTool, type ToolOperation, type ToolResult } from "./tools.js";
 import { discoverProjectContext, type ProjectContext } from "./project-context.js";
 import { compactContextText, DEFAULT_CONTEXT_BUDGET_CHARS } from "./context-budget.js";
 import type { SkillsContext } from "./skills.js";
 import type { MemoryContext } from "./memory.js";
 import type { DragonsPlan } from "./plan.js";
 import type { ProviderDiagnosticKind, RuntimeDiagnosticsRun } from "./diagnostics.js";
+import { SessionCheckpoints } from "./checkpoint.js";
 import { RunChangeTracker } from "./change-review.js";
 
 export type ToolCall = {
@@ -103,6 +106,10 @@ export type AgentRunOptions = {
   signal?: AbortSignal;
   /** Runtime-only recorder; callers own its in-memory lifecycle and persistence is forbidden. */
   diagnostics?: RuntimeDiagnosticsRun;
+  /** Process-local session history; never provider-visible or persisted. */
+  checkpoints?: SessionCheckpoints;
+  /** Explicit host configuration; each process requires separate EXECUTE approval. */
+  lsp?: LspConfig;
 };
 
 export type ToolAuthorizationRequest = {
@@ -223,8 +230,30 @@ async function executeToolCall(
       const input = parseToolCallArguments(toolCall.arguments);
       result = typeof input === "object" && input !== null && "ok" in input
         ? (input as ToolResult)
-        : await tool.execute(input, { signal: options.signal, onTimeout: () => { timeoutEvidence = true; }, changeTracker });
+        : await tool.execute(input, { signal: options.signal, onTimeout: () => { timeoutEvidence = true; }, changeTracker, checkpoints: tool.operation === "WRITE" && isCheckpointFileTool(tool) ? options.checkpoints : undefined });
       changeTracker?.record(result.changedPaths);
+      if (result.ok && isCheckpointFileTool(tool) && options.lsp && options.workingDirectory) {
+        const reports: string[] = [];
+        const paths = [...new Set(result.changedPaths ?? [])].filter((path) => lspMatches(options.lsp!, path));
+        for (const path of paths.slice(0, 4)) {
+          throwIfCancelled(options);
+          const startup: ToolAuthorizationRequest = { name: "lsp_diagnostics_start", operation: "EXECUTE",
+            arguments: JSON.stringify({ command: options.lsp.command, args: options.lsp.args, path }) };
+          if (!lspApprovalFromArguments(startup.arguments)) {
+            reports.push("LSP: approval scope cannot be safely displayed; diagnostics skipped.");
+            continue;
+          }
+          emit(options, { type: "authorization_requested", ...startup });
+          // Deliberately do not reuse WRITE or session approvals. One approval, one process.
+          const approval = await options.authorize?.(startup);
+          throwIfCancelled(options);
+          const permitted = approval === true || approval === "session";
+          emit(options, { type: "authorization_completed", name: startup.name, operation: "EXECUTE", allowed: permitted });
+          reports.push(permitted ? await collectLspDiagnostics(options.lsp, options.workingDirectory, path, options.signal) : "LSP: EXECUTE denied; diagnostics skipped.");
+        }
+        if (paths.length > 4) reports.push("LSP: additional changed documents skipped (4 document limit).");
+        if (reports.length) { const lspDiagnostics = reports.join("\n").slice(0, 16384); result = { ...result, lspDiagnostics, output: `${result.output}\n${lspDiagnostics}` }; }
+      }
       throwIfCancelled(options);
     }
     }
@@ -236,6 +265,7 @@ async function executeToolCall(
 }
 
 export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult> {
+  options = { ...options, ...(options.lsp ? { lsp: parseLspConfig(options.lsp) } : {}), checkpoints: options.checkpoints ?? (options.workingDirectory ? new SessionCheckpoints(options.workingDirectory) : undefined) };
   const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
   const maxToolCalls = options.maxToolCalls;
   if (maxToolCalls !== undefined && (!Number.isSafeInteger(maxToolCalls) || maxToolCalls < 1)) throw new Error("Agent maxToolCalls must be a positive integer.");

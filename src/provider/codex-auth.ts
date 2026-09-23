@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { spawn } from "node:child_process";
 import {
   createLegacyCodexCredentialStore,
@@ -107,6 +108,8 @@ export type CodexOAuthClientOptions = {
   sleep?: (milliseconds: number) => Promise<void>;
   openBrowser?: (url: string) => boolean;
   write?: (text: string) => void;
+  /** Service-owned serialized commit; standalone clients retain direct store saves. */
+  commitCredentials?: (credentials: CodexCredentials) => Promise<void>;
 };
 
 function defaultOpenBrowser(url: string): boolean {
@@ -129,18 +132,22 @@ export function createCodexOAuthClient(options: CodexOAuthClientOptions) {
   const write = options.write ?? ((text: string) => process.stdout.write(text));
 
   return {
-    async login(): Promise<CodexCredentials> {
+    async login({ signal }: { signal?: AbortSignal } = {}): Promise<CodexCredentials> {
+      signal?.throwIfAborted();
       let deviceResponse: Response;
       try {
         deviceResponse = await fetchImpl(`${CODEX_AUTH_BASE_URL}/api/accounts/deviceauth/usercode`, {
           method: "POST",
+          redirect: "error",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ client_id: CODEX_OAUTH_CLIENT_ID }),
+          signal,
         });
       } catch {
         throw new Error("Unable to start ChatGPT Subscription login.");
       }
       const device = await parseJson(deviceResponse, "Codex device authorization");
+      signal?.throwIfAborted();
       const userCode = requireString(device, "user_code", "Codex device authorization");
       const deviceAuthId = requireString(device, "device_auth_id", "Codex device authorization");
       const interval = typeof device.interval === "number" && Number.isFinite(device.interval)
@@ -155,19 +162,24 @@ export function createCodexOAuthClient(options: CodexOAuthClientOptions) {
 
       const deadline = now().getTime() + 15 * 60 * 1_000;
       while (now().getTime() < deadline) {
-        await sleep(interval * 1_000);
+        if (options.sleep) await sleep(interval * 1_000);
+        else await delay(interval * 1_000, undefined, { signal });
+        signal?.throwIfAborted();
         let response: Response;
         try {
           response = await fetchImpl(`${CODEX_AUTH_BASE_URL}/api/accounts/deviceauth/token`, {
             method: "POST",
+            redirect: "error",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ device_auth_id: deviceAuthId, user_code: userCode }),
+            signal,
           });
         } catch {
           throw new Error("Unable to continue ChatGPT Subscription login.");
         }
         if (response.status === 403 || response.status === 404) continue;
         const authorization = await parseJson(response, "Codex device authorization polling");
+        signal?.throwIfAborted();
         const authorizationCode = requireString(authorization, "authorization_code", "Codex device authorization polling");
         const codeVerifier = requireString(authorization, "code_verifier", "Codex device authorization polling");
         const body = new URLSearchParams({
@@ -180,7 +192,9 @@ export function createCodexOAuthClient(options: CodexOAuthClientOptions) {
         let tokenResponse: Response;
         try {
           tokenResponse = await fetchImpl(CODEX_OAUTH_TOKEN_URL, {
+            signal,
             method: "POST",
+            redirect: "error",
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body,
           });
@@ -191,7 +205,8 @@ export function createCodexOAuthClient(options: CodexOAuthClientOptions) {
           await parseJson(tokenResponse, "Codex token exchange"),
           now,
         );
-        await options.store.save(credentials);
+        signal?.throwIfAborted();
+        await (options.commitCredentials ? options.commitCredentials(credentials) : options.store.save(credentials));
         write("✓ Signed in\n");
         return credentials;
       }
@@ -211,6 +226,15 @@ export function createCodexCredentialManager(options: CodexCredentialManagerOpti
   const now = options.now ?? (() => new Date());
   let refreshInFlight: Promise<CodexCredentials> | undefined;
   let generation = 0;
+  let mutations: Promise<unknown> = Promise.resolve();
+  const mutate = <T>(action: () => Promise<T>): Promise<T> => {
+    const result = mutations.then(action);
+    mutations = result.catch(() => {});
+    return result;
+  };
+  const checkGeneration = (expected: number) => {
+    if (generation !== expected) throw new Error("ChatGPT Subscription credentials changed during refresh. Retry the request.");
+  };
 
   async function refresh(credentials: CodexCredentials, expectedGeneration: number): Promise<CodexCredentials> {
     const body = new URLSearchParams({
@@ -222,6 +246,7 @@ export function createCodexCredentialManager(options: CodexCredentialManagerOpti
     try {
       response = await fetchImpl(CODEX_OAUTH_TOKEN_URL, {
         method: "POST",
+        redirect: "error",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body,
       });
@@ -230,7 +255,7 @@ export function createCodexCredentialManager(options: CodexCredentialManagerOpti
     }
     if (!response.ok) {
       if (response.status === 400 || response.status === 401 || response.status === 403) {
-        await options.store.remove();
+        await mutate(async () => { checkGeneration(expectedGeneration); await options.store.remove(); });
         throw new Error("ChatGPT Subscription login is required. Run dragons auth login --provider chatgpt.");
       }
       throw new Error(`ChatGPT Subscription credential refresh returned HTTP ${response.status}.`);
@@ -242,20 +267,25 @@ export function createCodexCredentialManager(options: CodexCredentialManagerOpti
       credentials.accountId,
       credentials.tokenType,
     );
-    if (generation !== expectedGeneration) {
-      throw new Error("ChatGPT Subscription credentials changed during refresh. Retry the request.");
-    }
+    checkGeneration(expectedGeneration);
     try {
-      await options.store.save(refreshed);
+      await mutate(async () => { checkGeneration(expectedGeneration); await options.store.save(refreshed); });
     } catch {
       throw new Error("Unable to save refreshed ChatGPT Subscription credentials to secure storage. Run dragons auth login --provider chatgpt.");
     }
+    checkGeneration(expectedGeneration);
     return refreshed;
   }
 
   return {
     async getValidCredentials(): Promise<CodexCredentials> {
-      const credentials = await options.store.load();
+      const expectedGeneration = generation;
+      // load() may migrate legacy credentials, so it is a mutation too.
+      const credentials = await mutate(async () => {
+        checkGeneration(expectedGeneration);
+        return options.store.load();
+      });
+      checkGeneration(expectedGeneration);
       if (!credentials) {
         throw new Error("ChatGPT Subscription login is required. Run dragons auth login --provider chatgpt.");
       }
@@ -264,20 +294,50 @@ export function createCodexCredentialManager(options: CodexCredentialManagerOpti
         return credentials;
       }
       if (!refreshInFlight) {
-        const expectedGeneration = generation;
-        refreshInFlight = refresh(credentials, expectedGeneration).finally(() => {
-          refreshInFlight = undefined;
+        const attempt = refresh(credentials, expectedGeneration).finally(() => {
+          if (refreshInFlight === attempt) refreshInFlight = undefined;
         });
+        refreshInFlight = attempt;
       }
       return refreshInFlight;
     },
-    invalidate(): void { generation += 1; },
+    invalidate(): void { generation += 1; refreshInFlight = undefined; },
+    beginLogin(store: CodexCredentialStore, signal?: AbortSignal): (credentials: CodexCredentials) => Promise<void> {
+      const expectedGeneration = ++generation;
+      refreshInFlight = undefined;
+      // Do not hold the storage queue while waiting for the OAuth network/user.
+      return async (credentials) => {
+        await mutate(async () => {
+          checkGeneration(expectedGeneration);
+          signal?.throwIfAborted();
+          await store.save(credentials);
+        });
+        checkGeneration(expectedGeneration);
+        signal?.throwIfAborted();
+      };
+    },
+    async status(): Promise<{ authenticated: boolean; expiresAt?: string; storage?: string }> {
+      const expectedGeneration = generation;
+      const status = await mutate(async () => {
+        checkGeneration(expectedGeneration);
+        const saved = await options.store.load();
+        const storage = await options.store.storageDescription();
+        return saved ? { authenticated: true, expiresAt: saved.expiresAt, storage } : { authenticated: false, storage };
+      });
+      checkGeneration(expectedGeneration);
+      return status;
+    },
+    async removeCredentials(): Promise<void> {
+      generation += 1;
+      refreshInFlight = undefined;
+      await mutate(() => options.store.remove());
+    },
   };
 }
 
 export type ChatGPTAuthService = {
   credentials: { getValidCredentials(): Promise<CodexCredentials> };
-  login(): Promise<void>;
+  login(options?: { signal?: AbortSignal }): Promise<void>;
   status(): Promise<{ authenticated: boolean; expiresAt?: string; storage?: string }>;
   logout(): Promise<void>;
 };
@@ -291,6 +351,8 @@ export type ChatGPTAuthServiceOptions = {
   legacyCredentialStore?: CodexCredentialStore;
   /** Legacy Dragons-owned path used only for one-time migration/fallback. */
   credentialPath?: string;
+  /** Profile-bound native credential account namespace; never credential data. */
+  nativeCredentialAccount?: string;
   fetchImpl?: typeof fetch;
   now?: () => Date;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -301,24 +363,21 @@ export type ChatGPTAuthServiceOptions = {
 export function createChatGPTAuthService(options: ChatGPTAuthServiceOptions = {}): ChatGPTAuthService {
   const legacy = options.legacyCredentialStore
     ?? createLegacyCodexCredentialStore(options.credentialPath ?? getDragonsChatGPTCredentialPath());
-  const native = options.nativeCredentialStore ?? createNativeCodexCredentialStore();
+  const native = options.nativeCredentialStore ?? createNativeCodexCredentialStore({ account: options.nativeCredentialAccount });
   const store = options.credentialStore ?? createPreferredCodexCredentialStore(native, legacy);
   const loginStore = options.credentialStore ?? createLoginReplacementCodexCredentialStore(native, legacy);
-  const oauth = createCodexOAuthClient({ ...options, store: loginStore });
   const credentials = createCodexCredentialManager({ store, fetchImpl: options.fetchImpl, now: options.now });
   return {
     credentials,
-    async login(): Promise<void> {
-      credentials.invalidate();
-      await oauth.login();
+    async login(loginOptions: { signal?: AbortSignal } = {}): Promise<void> {
+      loginOptions.signal?.throwIfAborted();
+      const commitCredentials = credentials.beginLogin(loginStore, loginOptions.signal);
+      const oauth = createCodexOAuthClient({ ...options, store: loginStore, commitCredentials });
+      await oauth.login(loginOptions);
     },
-    async status(): Promise<{ authenticated: boolean; expiresAt?: string; storage?: string }> {
-      const saved = await store.load();
-      const storage = await store.storageDescription();
-      return saved ? { authenticated: true, expiresAt: saved.expiresAt, storage } : { authenticated: false, storage };
-    },
+    status: () => credentials.status(),
     async logout(): Promise<void> {
-      await store.remove();
+      await credentials.removeCredentials();
     },
   };
 }

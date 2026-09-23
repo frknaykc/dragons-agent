@@ -9,6 +9,9 @@ import {
   type RuntimeStatus,
 } from "../runtime.js";
 import { observeRuntimeRun } from "../runtime-observation.js";
+import { formatProviderList, slashChoices } from "../slash-choices.js";
+import { formatSlashHelp } from "../slash-commands.js";
+import type { TuiLocalCommands } from "./local-commands.js";
 
 export type TuiState = {
   session?: RuntimeSession;
@@ -40,8 +43,15 @@ export class TuiController {
   private closing?: Promise<void>;
   private submission?: Submission;
   private refreshVersion = 0;
+  private readonly lifecycle = new AbortController();
+  private localController?: AbortController;
+  public exitRequested = false;
 
-  constructor(private readonly runtime: DragonsRuntime, private readonly onChange: () => void = () => {}) {}
+  constructor(private readonly runtime: DragonsRuntime, private readonly onChange: () => void = () => {}, private readonly localCommands?: TuiLocalCommands) {}
+
+  choices(input: string) {
+    return slashChoices(input, ["/help", "/status", "/new", "/resume", "/clear", "/exit", "/provider", "/model", "/context", "/diagnostics", "/mcp", "/tasks", ...(this.localCommands?.names ?? [])], this.runtime.providers(), this.state.session?.provider, this.state.session?.model);
+  }
 
   async initialize(options: { resume?: string; provider?: string; model?: string } = {}): Promise<void> {
     if (this.closed || this.state.session) return;
@@ -71,7 +81,117 @@ export class TuiController {
 
   async submit(content: string): Promise<void> {
     this.attachObservation();
-    if (this.closed || this.state.busy || !content.trim()) return;
+    if (this.closed || this.exitRequested || this.state.busy || !content.trim()) return;
+    const command = content.trim();
+    if (command.startsWith("/")) {
+      const [name, ...args] = command.split(/\s+/);
+      if (this.localCommands?.names.includes(name!) || ["/provider", "/model", "/context", "/diagnostics", "/tasks", "/mcp"].includes(name!)) {
+        await this.localOperation(async (signal) => {
+          if (this.localCommands?.names.includes(name!)) {
+            const result = await this.localCommands.execute(command, {
+              signal,
+              session: this.state.session,
+              notice: (text) => { if (!signal.aborted) { this.message("notice", text); this.changed(); } },
+            });
+            if (result?.exit && !signal.aborted) this.exitRequested = true;
+            return;
+          }
+          if (name === "/provider" || name === "/model") {
+            if (args.length > 1) { this.message("notice", `Usage: ${name} [${name === "/provider" ? "id" : "name"}]`); return; }
+            if (!args.length) {
+              this.message("notice", name === "/provider"
+                ? formatProviderList(this.runtime.providers(), this.state.session?.provider)
+                : `Model: ${this.state.session?.model ?? "none"}`);
+            } else {
+              const session = await this.runtime.createSession(name === "/provider" ? { provider: args[0] } : { provider: this.state.session?.provider, model: args[0] });
+              if (this.closed) return;
+              this.state.session = session;
+              this.state.messages = []; this.state.activity = []; this.state.background = [];
+              this.state.status = undefined; this.state.approval = undefined; this.submission = undefined;
+              this.message("notice", "New session started with the selected provider/model.");
+              await this.refresh();
+            }
+          } else if (name === "/context" || name === "/diagnostics") {
+            if (args.length) { this.message("notice", `Usage: ${name}`); return; }
+            await this.refresh();
+            if (this.closed) return;
+            const status = this.state.status;
+            this.message("notice", !status ? "No runtime status available." : name === "/context"
+              ? `Context: ${status.contextCharacters} / ${status.contextBudgetChars} characters`
+              : JSON.stringify(status.recentDiagnostics, null, 2));
+          } else if (name === "/mcp") {
+            if (!args.length || (args.length === 1 && ["list", "status"].includes(args[0]!))) {
+              this.message("notice", this.runtime.mcpStatus().map((s) => `${s.id}: ${s.state} (${s.toolCount} tools)`).join("\n") || "No MCP servers configured.");
+            } else if (args.length === 2 && ["connect", "disconnect"].includes(args[0]!)) {
+              if (args[0] === "connect") await this.runtime.connectMcp(args[1]!);
+              else await this.runtime.disconnectMcp(args[1]!);
+              if (!this.closed) this.message("notice", "MCP connection updated.");
+            } else this.message("notice", "Usage: /mcp [list|status|connect <id>|disconnect <id>]");
+          } else if (name === "/tasks") {
+            const sessionId = this.state.session?.id;
+            if (!sessionId) { this.message("notice", "No active session."); return; }
+            if (!args.length || args.join(" ") === "list") {
+              const tasks = await this.runtime.listBackgroundTasks(sessionId);
+              if (!this.closed) this.message("notice", tasks.map((task) => `${task.id}: ${task.state}`).join("\n") || "No background tasks.");
+            } else if (args.length === 2 && args[0] === "cancel") {
+              const cancelled = await this.runtime.cancelBackgroundTask({ sessionId, taskId: args[1]! });
+              if (!this.closed) this.message("notice", cancelled ? "Background task cancelled." : "No cancellable task found.");
+            } else this.message("notice", "Usage: /tasks [list|cancel <id>]");
+          }
+        });
+      } else if (command === "/exit" || command === "/quit") {
+        this.exitRequested = true;
+      } else if (command === "/clear") {
+        this.state.messages = [];
+        this.message("notice", "Display cleared; saved conversation is unchanged. Use /new to start fresh.");
+      } else if (name === "/resume" && args.length !== 1) {
+        this.message("notice", "Usage: /resume <id>");
+      } else if (command === "/help" || command.startsWith("/help ")) {
+        this.message("notice", formatSlashHelp(command.slice(5), ["/help", "/status", "/new", "/resume", "/clear", "/exit", "/provider", "/model", "/context", "/diagnostics", "/mcp", "/tasks", ...(this.localCommands?.names ?? [])]));
+      } else if (command === "/new" || command === "/reset" || command.startsWith("/resume ")) {
+        const previous = this.state.session;
+        this.state.busy = true;
+        this.state.error = undefined;
+        this.refreshVersion += 1;
+        this.pending = Promise.resolve().then(async () => {
+          try {
+            if (this.closed) return;
+            const session = command.startsWith("/resume ")
+              ? await this.runtime.resumeSession(command.slice(8).trim())
+              : await this.runtime.createSession({ provider: previous?.provider, model: previous?.model });
+            if (this.closed) return;
+            this.state.session = session;
+            this.state.messages = [];
+            this.state.activity = [];
+            this.state.background = [];
+            this.state.status = undefined;
+            this.state.approval = undefined;
+            this.submission = undefined;
+            this.message("notice", command.startsWith("/resume ")
+              ? "Session resumed. The prior transcript is not available through the runtime API."
+              : "New session started.");
+            await this.refresh();
+          } catch {
+            if (!this.closed) this.state.error = "Unable to change session. Check the session ID, workspace, provider, and model.";
+          } finally {
+            if (!this.closed) { this.state.busy = false; this.attachObservation(); this.changed(); }
+          }
+        });
+        this.changed();
+        await this.pending;
+      } else if (command === "/status" || command === "/session") {
+        await this.localOperation(() => this.refresh());
+        if (this.closed) return;
+        const session = this.state.session;
+        this.message("notice", session
+          ? `Session: ${session.id}\nProvider: ${session.provider}\nModel: ${session.model}`
+          : "No active session.");
+      } else {
+        this.message("notice", "This command is not available in this TUI. Run /help for supported local commands.");
+      }
+      this.changed();
+      return;
+    }
     if (!this.state.session) {
       this.state.error = "Initialize a session before starting a run.";
       this.changed();
@@ -110,6 +230,12 @@ export class TuiController {
   }
 
   cancel(): boolean {
+    if (this.localController) {
+      if (this.localController.signal.aborted) return false;
+      this.localController.abort();
+      this.changed();
+      return true;
+    }
     const submission = this.submission;
     if (!submission || submission.observing || !this.current(submission) || submission.cancelled || submission.ended) return false;
     submission.cancelled = true;
@@ -145,6 +271,7 @@ export class TuiController {
   async close(): Promise<void> {
     if (this.closing) return this.closing;
     this.closed = true;
+    this.lifecycle.abort();
     this.refreshVersion += 1;
     if (this.submission) {
       this.submission.cancelled = true;
@@ -163,12 +290,31 @@ export class TuiController {
     return this.closing;
   }
 
+  private async localOperation(operation: (signal: AbortSignal) => Promise<void>): Promise<void> {
+    const controller = new AbortController();
+    this.localController = controller;
+    const signal = AbortSignal.any([this.lifecycle.signal, controller.signal]);
+    this.state.busy = true;
+    this.state.error = undefined;
+    this.refreshVersion += 1;
+    this.pending = Promise.resolve().then(async () => {
+      try { if (!signal.aborted) await operation(signal); }
+      catch { if (!signal.aborted) this.state.error = "Unable to complete local command. Check arguments and configuration."; }
+      finally {
+        this.localController = undefined;
+        if (!this.closed) { this.state.busy = false; this.changed(); }
+      }
+    });
+    this.changed();
+    await this.pending;
+  }
+
   private current(submission: Submission): boolean {
     return !this.closed && this.submission === submission && this.state.session?.id === submission.sessionId;
   }
 
   private attachObservation(): void {
-    if (this.closed || this.state.busy || !this.state.session) return;
+    if (this.closed || this.exitRequested || this.state.busy || !this.state.session) return;
     const handle = observeRuntimeRun(this.runtime, this.state.session.id);
     if (!handle) return;
     const submission: Submission = { sessionId: handle.sessionId, handle, cancelled: false, ended: false, observing: true };
@@ -239,6 +385,13 @@ export class TuiController {
         this.activity(`${event.toolName} ${event.operation ?? ""}: ${event.phase}${event.allowed === undefined ? "" : event.allowed ? " (allowed)" : " (denied)"}${event.ok === undefined ? "" : event.ok ? " (ok)" : " (failed)"}${event.output ? `\n${event.output}` : ""}`);
         break;
       case "approval_requested":
+        if (event.toolName === "lsp_diagnostics_start") {
+          // This optional screen cannot display the complete bounded scope. Never offer a blind approval.
+          const denied = this.runtime.resolveAuthorization({ runId: event.runId, approvalId: event.approvalId, decision: "deny" });
+          this.message("notice", "LSP startup denied: use CLI or Desktop to review the complete execution scope.");
+          if (!denied) this.cancel();
+          break;
+        }
         this.state.approval = event;
         break;
       case "memory_suggestion": {

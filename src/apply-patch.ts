@@ -1,8 +1,9 @@
-import { readFile } from "node:fs/promises";
+import { dirname, basename } from "node:path";
+import { SessionCheckpoints } from "./checkpoint.js";
 
 type Hunk = { oldStart: number; oldCount: number; lines: string[] };
-type FilePatch = { oldPath?: string; newPath: string; hunks: Hunk[] };
-export type PreparedPatch = { path: string; resolvedPath: string; content: string; hunks: number };
+type FilePatch = { oldPath?: string; newPath: string; deleted?: boolean; hunks: Hunk[] };
+export type PreparedPatch = { path: string; resolvedPath: string; content: string; source?: string | null; deleted?: boolean; hunks: number };
 
 function pathFromHeader(value: string): string | undefined {
   const trimmed = value.trim();
@@ -19,6 +20,8 @@ function parseRange(value: string): [number, number] | undefined {
 
 export function parseUnifiedPatch(patch: string): FilePatch[] | string {
   const lines = patch.replace(/\r\n/g, "\n").split("\n");
+  // A terminal newline terminates the last diff line; it is not an empty hunk line.
+  if (lines.at(-1) === "") lines.pop();
   const files: FilePatch[] = [];
   let index = 0;
   while (index < lines.length && lines[index] === "") index += 1;
@@ -28,15 +31,17 @@ export function parseUnifiedPatch(patch: string): FilePatch[] | string {
     if (!oldHeader?.startsWith("--- ") || !newHeader?.startsWith("+++ ")) return "Malformed patch file headers.";
     const oldPath = pathFromHeader(oldHeader.slice(4));
     const newPath = pathFromHeader(newHeader.slice(4));
-    if (!newPath) return "Patch deletion is not supported.";
-    if (oldPath && oldPath !== newPath) return "Patch rename is not supported.";
-    const file: FilePatch = { oldPath, newPath, hunks: [] };
+    const deleted = newHeader.slice(4).trim() === "/dev/null";
+    if ((!newPath && !deleted) || (deleted && !oldPath)) return "Malformed patch target.";
+    if (!deleted && oldPath && oldPath !== newPath) return "Patch rename is not supported.";
+    const file: FilePatch = { oldPath, newPath: newPath ?? oldPath!, deleted, hunks: [] };
     while (index < lines.length && !lines[index]?.startsWith("--- ")) {
       const header = lines[index++];
       const match = /^@@ -(\d+(?:,\d+)?) \+(\d+(?:,\d+)?) @@(?:.*)?$/.exec(header ?? "");
       if (!match) return "Malformed patch hunk header.";
       const oldRange = parseRange(match[1]!);
-      if (!oldRange) return "Malformed patch hunk range.";
+      const newRange = parseRange(match[2]!);
+      if (!oldRange || !newRange || [...oldRange, ...newRange].some((value) => !Number.isSafeInteger(value))) return "Malformed patch hunk range.";
       const hunk: Hunk = { oldStart: oldRange[0], oldCount: oldRange[1], lines: [] };
       while (index < lines.length && !lines[index]?.startsWith("@@ ") && !lines[index]?.startsWith("--- ")) {
         const line = lines[index++]!;
@@ -46,6 +51,8 @@ export function parseUnifiedPatch(patch: string): FilePatch[] | string {
       if (!hunk.lines.length) return "Patch hunk has no lines.";
       const oldLines = hunk.lines.filter((line) => line[0] !== "+").length;
       if (oldLines !== hunk.oldCount) return "Patch hunk context count does not match its header.";
+      const newLines = hunk.lines.filter((line) => line[0] !== "-").length;
+      if (newLines !== newRange[1]) return "Patch hunk replacement count does not match its header.";
       file.hunks.push(hunk);
     }
     if (!file.hunks.length) return "Patch file has no hunks.";
@@ -57,6 +64,7 @@ export function parseUnifiedPatch(patch: string): FilePatch[] | string {
 export async function preparePatch(
   patch: string,
   resolveWritable: (path: string) => Promise<string | { output: string }>,
+  readText?: (path: string) => string,
 ): Promise<PreparedPatch[] | string> {
   const parsed = parseUnifiedPatch(patch);
   if (typeof parsed === "string") return parsed;
@@ -65,7 +73,10 @@ export async function preparePatch(
     const resolved = await resolveWritable(file.newPath);
     if (typeof resolved !== "string") return resolved.output;
     let source = "";
-    try { source = await readFile(resolved, "utf8"); }
+    try {
+      source = readText ? readText(file.newPath) : new SessionCheckpoints(dirname(resolved)).readText(basename(resolved));
+      if (file.oldPath === undefined) return `Patch creation target already exists: ${file.newPath}.`;
+    }
     catch (error: unknown) {
       if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")) return error instanceof Error ? error.message : "Unable to read patch target.";
       if (file.oldPath !== undefined) return `Patch target is missing: ${file.newPath}.`;
@@ -84,7 +95,9 @@ export async function preparePatch(
       result = sourceLines.join("\n");
       offset += replacement.length - oldLines.length;
     }
-    prepared.push({ path: file.newPath, resolvedPath: resolved, content: result, hunks: file.hunks.length });
+    if (file.deleted && result !== "") return "Deletion patch must remove the complete file.";
+    if (prepared.some((entry) => entry.resolvedPath === resolved)) return "Duplicate patch target.";
+    prepared.push({ path: file.newPath, resolvedPath: resolved, content: result, source: file.oldPath === undefined ? null : source, deleted: file.deleted, hunks: file.hunks.length });
   }
   return prepared;
 }

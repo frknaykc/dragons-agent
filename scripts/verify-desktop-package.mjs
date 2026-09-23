@@ -4,6 +4,10 @@ import { listPackage, extractFile, statFile } from '@electron/asar';
 import { pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
 
+// Keep an explicit security allowlist; builder-derived fixtures detect packaging drift.
+const desktopAssets = ['desktop/main.mjs', 'desktop/preload.cjs', 'desktop/index.html', 'desktop/renderer.js', 'desktop/style.css',
+  'desktop/secret-prompt.mjs', 'desktop/secret-preload.cjs', 'desktop/secret.html', 'desktop/secret.js'];
+
 export function auditDesktopArchive(archive) {
   const files = listPackage(archive).map((name) => name.replaceAll('\\', '/').replace(/^\//, ''));
   for (const file of files) {
@@ -17,10 +21,10 @@ export function auditDesktopArchive(archive) {
       assert.equal(file === 'desktop' || file === 'dist' || file === 'node_modules' || file.startsWith('dist/'), true, 'Unexpected first-party directory');
       continue;
     }
-    assert.equal(file === 'LICENSE' || file === 'package.json' || /^desktop\/(main\.mjs|preload\.cjs|index\.html|renderer\.js|style\.css)$/.test(file) || /^dist\/.*\.js$/.test(file), true, 'Unexpected first-party desktop file');
+    assert.equal(file === 'LICENSE' || file === 'package.json' || desktopAssets.includes(file) || /^dist\/.*\.js$/.test(file), true, 'Unexpected first-party desktop file');
     assert.equal(/\.test\.js$|^dist\/(acceptance-|provider-acceptance|live-smoke|chatgpt-stream-trace|mcp-mock-server|mcp-official-sdk-server)/.test(file), false, 'Test/acceptance fixture in desktop archive');
   }
-  for (const file of ['desktop/main.mjs', 'desktop/preload.cjs', 'desktop/index.html', 'desktop/renderer.js', 'desktop/style.css', 'dist/runtime.js', 'dist/desktop/host.js', 'dist/desktop/workspace.js', 'dist/remote/runtime.js', 'node_modules/@napi-rs/keyring/index.js']) {
+  for (const file of [...desktopAssets, 'dist/runtime.js', 'dist/desktop/host.js', 'dist/desktop/workspace.js', 'dist/remote/runtime.js', 'node_modules/@napi-rs/keyring/index.js']) {
     assert.equal(files.includes(file), true, `Missing packaged runtime component: ${file}`);
   }
   const prefix = `node_modules/@napi-rs/keyring-${process.platform}-${process.arch}`;

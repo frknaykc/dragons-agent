@@ -11,6 +11,7 @@ import { classifyProviderError, retryProviderRequest } from "../retry.js";
 import type { AgentTool } from "../tools.js";
 import {
   classifyProviderHttpFailure,
+  ProviderRequestFailureBoundary,
   providerCompatibilityError,
   ProviderCompatibilityError,
   type ProviderCompatibilityKind,
@@ -253,179 +254,187 @@ export function createGeminiAgentModel(options: GeminiAgentModelOptions = {}): A
 
   return {
     async respond(request: AgentRequest, onTextDelta?: AgentTextDeltaHandler): Promise<AgentResponse> {
-      let resumed = false;
-      if (!initialized) {
-        const restored = restoreConversation(request.continuationState);
-        if (restored) {
-          contents.splice(0, contents.length, ...restored);
-          resumed = true;
-          hasUncommittedRestoredConversation = true;
-        }
-        initialized = true;
-      }
-      let nextContents = [...contents];
-      if (request.previousResponseId) {
-        if (lastToolCalls.length === 0 || request.previousResponseId !== `gemini-${responseSequence}`) {
-          throw providerCompatibilityError("gemini", "protocol_drift");
-        }
-        const expected = new Map(lastToolCalls.map((call) => [call.callId, call]));
-        if (request.toolOutputs.length !== lastToolCalls.length
-          || request.toolOutputs.some((output) => !expected.has(output.callId))
-          || new Set(request.toolOutputs.map((output) => output.callId)).size !== request.toolOutputs.length) {
-          throw providerCompatibilityError("gemini", "protocol_drift");
-        }
-        const responseParts = request.toolOutputs.map((output) => {
-          const call = expected.get(output.callId)!;
-          return {
-            functionResponse: {
-              ...(call.providerCallId === undefined ? {} : { id: call.providerCallId }),
-              name: call.name,
-              response: { output: output.output },
-            },
-          };
-        });
-        if (serializedCharacterCount(responseParts) > MAX_CURRENT_TURN_CHARACTERS) {
-          throw providerCompatibilityError("gemini", "invalid_request");
-        }
-        nextContents.push({
-          role: "user",
-          parts: responseParts,
-        });
-      } else if (request.conversationResponseId || resumed || hasUncommittedRestoredConversation) {
-        if (serializedCharacterCount(request.task) > MAX_CURRENT_TURN_CHARACTERS) throw providerCompatibilityError("gemini", "invalid_request");
-        nextContents.push({ role: "user", parts: [{ text: request.task }] });
-      } else {
-        if (serializedCharacterCount(request.task) > MAX_CURRENT_TURN_CHARACTERS) throw providerCompatibilityError("gemini", "invalid_request");
-        nextContents.splice(0, nextContents.length, { role: "user", parts: [{ text: request.task }] });
-      }
-      nextContents = reserveConversationSpace(nextContents);
-
-      const body: Record<string, unknown> = {
-        contents: nextContents,
-        tools: [{ functionDeclarations: request.tools.map(toTool) }],
-      };
-      const instructions = formatAdvisoryContextForInstructions(request);
-      if (instructions) body.systemInstruction = { parts: [{ text: instructions }] };
-      let response: Response;
+      const failure = new ProviderRequestFailureBoundary();
       try {
-        response = await retryProviderRequest(async () => {
-          const candidate = await fetchImpl(endpointFor(baseUrl, model), {
-            method: "POST",
-            headers: {
-              "x-goog-api-key": apiKey,
-              "content-type": "application/json",
-              accept: "text/event-stream",
-            },
-            body: JSON.stringify(body),
-            signal: request.signal,
+        let resumed = false;
+        if (!initialized) {
+          const restored = restoreConversation(request.continuationState);
+          if (restored) {
+            contents.splice(0, contents.length, ...restored);
+            resumed = true;
+            hasUncommittedRestoredConversation = true;
+          }
+          initialized = true;
+        }
+        let nextContents = [...contents];
+        if (request.previousResponseId) {
+          if (lastToolCalls.length === 0 || request.previousResponseId !== `gemini-${responseSequence}`) {
+            throw providerCompatibilityError("gemini", "protocol_drift");
+          }
+          const expected = new Map(lastToolCalls.map((call) => [call.callId, call]));
+          if (request.toolOutputs.length !== lastToolCalls.length
+            || request.toolOutputs.some((output) => !expected.has(output.callId))
+            || new Set(request.toolOutputs.map((output) => output.callId)).size !== request.toolOutputs.length) {
+            throw providerCompatibilityError("gemini", "protocol_drift");
+          }
+          const responseParts = request.toolOutputs.map((output) => {
+            const call = expected.get(output.callId)!;
+            return {
+              functionResponse: {
+                ...(call.providerCallId === undefined ? {} : { id: call.providerCallId }),
+                name: call.name,
+                response: { output: output.output },
+              },
+            };
           });
-          const kind = classifyProviderHttpFailure(candidate.status);
-          if (kind === "rate_limit" || kind === "transient") {
-            await candidate.body?.cancel();
-            throw providerCompatibilityError("gemini", kind, candidate.status);
+          if (serializedCharacterCount(responseParts) > MAX_CURRENT_TURN_CHARACTERS) {
+            throw providerCompatibilityError("gemini", "invalid_request");
           }
-          return candidate;
-        }, { signal: request.signal, onRetry: request.onProviderRetry });
-      } catch (error: unknown) {
-        if (request.signal?.aborted) throw error;
-        throw safeProviderError(request, error);
-      }
-      if (!response.ok) {
-        const kind = classifyProviderHttpFailure(response.status);
-        recordProviderDiagnostic(request, kind);
-        throw providerCompatibilityError("gemini", kind, response.status);
-      }
+          nextContents.push({
+            role: "user",
+            parts: responseParts,
+          });
+        } else if (request.conversationResponseId || resumed || hasUncommittedRestoredConversation) {
+          if (serializedCharacterCount(request.task) > MAX_CURRENT_TURN_CHARACTERS) throw providerCompatibilityError("gemini", "invalid_request");
+          nextContents.push({ role: "user", parts: [{ text: request.task }] });
+        } else {
+          if (serializedCharacterCount(request.task) > MAX_CURRENT_TURN_CHARACTERS) throw providerCompatibilityError("gemini", "invalid_request");
+          nextContents.splice(0, nextContents.length, { role: "user", parts: [{ text: request.task }] });
+        }
+        nextContents = reserveConversationSpace(nextContents);
 
-      let text = "";
-      let inputTokens: number | undefined;
-      let outputTokens: number | undefined;
-      let totalTokens: number | undefined;
-      let finished = false;
-      let sawCandidate = false;
-      const modelParts: GeminiPart[] = [];
-      const toolCalls: ToolCall[] = [];
-      const pendingCalls: PendingFunctionCall[] = [];
-      const providerCallIds = new Set<string>();
-      const anonymousFunctionNames = new Set<string>();
-      let modelTurnCharacters = 0;
-      try {
-        await parseSse(response, (chunk) => {
-          if (finished) throw providerCompatibilityError("gemini", "protocol_drift");
-          if (chunk.error !== undefined) throw providerCompatibilityError("gemini", streamedErrorKind(chunk.error));
-          const usage = chunk.usageMetadata;
-          if (usage !== undefined) {
-            if (!isRecord(usage)) throw providerCompatibilityError("gemini", "malformed_response");
-            inputTokens = usageNumber(usage.promptTokenCount) ?? inputTokens;
-            outputTokens = usageNumber(usage.candidatesTokenCount) ?? outputTokens;
-            totalTokens = usageNumber(usage.totalTokenCount) ?? totalTokens;
-          }
-          if (chunk.candidates === undefined) return;
-          if (!Array.isArray(chunk.candidates) || chunk.candidates.length !== 1 || !isRecord(chunk.candidates[0])) throw providerCompatibilityError("gemini", "malformed_response");
-          const candidate = chunk.candidates[0];
-          if (candidate.index !== undefined && candidate.index !== 0) throw providerCompatibilityError("gemini", "protocol_drift");
-          sawCandidate = true;
-          if (candidate.finishReason !== undefined) {
-            if (!boundedNonEmptyString(candidate.finishReason)) throw providerCompatibilityError("gemini", "malformed_response");
-            finished = true;
-          }
-          if (candidate.content === undefined) return;
-          if (!isGeminiContent(candidate.content) || candidate.content.role !== "model") throw providerCompatibilityError("gemini", "malformed_response");
-          for (const part of candidate.content.parts) {
-            const partCharacters = serializedCharacterCount(part);
-            if (modelParts.length >= MAX_MODEL_PARTS || modelTurnCharacters + partCharacters > MAX_CURRENT_TURN_CHARACTERS) {
-              throw providerCompatibilityError("gemini", "malformed_response");
+        const body: Record<string, unknown> = {
+          contents: nextContents,
+          tools: [{ functionDeclarations: request.tools.map(toTool) }],
+        };
+        const instructions = formatAdvisoryContextForInstructions(request);
+        if (instructions) body.systemInstruction = { parts: [{ text: instructions }] };
+        let response: Response;
+        try {
+          response = await retryProviderRequest(async () => {
+            failure.beginAttempt();
+            const candidate = await fetchImpl(endpointFor(baseUrl, model), {
+              method: "POST",
+              headers: {
+                "x-goog-api-key": apiKey,
+                "content-type": "application/json",
+                accept: "text/event-stream",
+              },
+              body: JSON.stringify(body),
+              signal: request.signal,
+            });
+            if (!candidate.ok) failure.httpFailure(candidate.status, candidate.headers.get("retry-after"));
+            const kind = classifyProviderHttpFailure(candidate.status);
+            if (kind === "rate_limit" || kind === "transient") {
+              await candidate.body?.cancel();
+              throw providerCompatibilityError("gemini", kind, candidate.status);
             }
-            if (part.text !== undefined) {
-              text += part.text;
-              onTextDelta?.(part.text);
+            return candidate;
+          }, { signal: request.signal, onRetry: request.onProviderRetry });
+        } catch (error: unknown) {
+          if (request.signal?.aborted) throw error;
+          throw safeProviderError(request, error);
+        }
+        if (!response.ok) {
+          const kind = classifyProviderHttpFailure(response.status);
+          recordProviderDiagnostic(request, kind);
+          throw providerCompatibilityError("gemini", kind, response.status);
+        }
+        failure.streamStarted();
+
+        let text = "";
+        let inputTokens: number | undefined;
+        let outputTokens: number | undefined;
+        let totalTokens: number | undefined;
+        let finished = false;
+        let sawCandidate = false;
+        const modelParts: GeminiPart[] = [];
+        const toolCalls: ToolCall[] = [];
+        const pendingCalls: PendingFunctionCall[] = [];
+        const providerCallIds = new Set<string>();
+        const anonymousFunctionNames = new Set<string>();
+        let modelTurnCharacters = 0;
+        try {
+          await parseSse(response, (chunk) => {
+            if (finished) throw providerCompatibilityError("gemini", "protocol_drift");
+            if (chunk.error !== undefined) throw providerCompatibilityError("gemini", streamedErrorKind(chunk.error));
+            const usage = chunk.usageMetadata;
+            if (usage !== undefined) {
+              if (!isRecord(usage)) throw providerCompatibilityError("gemini", "malformed_response");
+              inputTokens = usageNumber(usage.promptTokenCount) ?? inputTokens;
+              outputTokens = usageNumber(usage.candidatesTokenCount) ?? outputTokens;
+              totalTokens = usageNumber(usage.totalTokenCount) ?? totalTokens;
+            }
+            if (chunk.candidates === undefined) return;
+            if (!Array.isArray(chunk.candidates) || chunk.candidates.length !== 1 || !isRecord(chunk.candidates[0])) throw providerCompatibilityError("gemini", "malformed_response");
+            const candidate = chunk.candidates[0];
+            if (candidate.index !== undefined && candidate.index !== 0) throw providerCompatibilityError("gemini", "protocol_drift");
+            sawCandidate = true;
+            if (candidate.finishReason !== undefined) {
+              if (!boundedNonEmptyString(candidate.finishReason)) throw providerCompatibilityError("gemini", "malformed_response");
+              finished = true;
+            }
+            if (candidate.content === undefined) return;
+            if (!isGeminiContent(candidate.content) || candidate.content.role !== "model") throw providerCompatibilityError("gemini", "malformed_response");
+            for (const part of candidate.content.parts) {
+              const partCharacters = serializedCharacterCount(part);
+              if (modelParts.length >= MAX_MODEL_PARTS || modelTurnCharacters + partCharacters > MAX_CURRENT_TURN_CHARACTERS) {
+                throw providerCompatibilityError("gemini", "malformed_response");
+              }
+              if (part.text !== undefined) {
+                text += part.text;
+                onTextDelta?.(part.text);
+                modelParts.push(structuredClone(part));
+                modelTurnCharacters += partCharacters;
+                continue;
+              }
+              const call = part.functionCall;
+              if (!call) throw providerCompatibilityError("gemini", "protocol_drift");
+              const serializedArguments = JSON.stringify(call.args);
+              if (serializedArguments.length > MAX_FUNCTION_ARGUMENT_CHARACTERS) throw providerCompatibilityError("gemini", "malformed_response");
+              if ((call.id !== undefined && providerCallIds.has(call.id)) || (call.id === undefined && anonymousFunctionNames.has(call.name))) {
+                throw providerCompatibilityError("gemini", "protocol_drift");
+              }
+              if (call.id !== undefined) providerCallIds.add(call.id);
+              else anonymousFunctionNames.add(call.name);
+              const callId = call.id ?? `gemini-call-${responseSequence + 1}-${toolCalls.length + 1}`;
               modelParts.push(structuredClone(part));
               modelTurnCharacters += partCharacters;
-              continue;
+              toolCalls.push({ callId, name: call.name, arguments: serializedArguments });
+              pendingCalls.push({ callId, name: call.name, ...(call.id === undefined ? {} : { providerCallId: call.id }) });
             }
-            const call = part.functionCall;
-            if (!call) throw providerCompatibilityError("gemini", "protocol_drift");
-            const serializedArguments = JSON.stringify(call.args);
-            if (serializedArguments.length > MAX_FUNCTION_ARGUMENT_CHARACTERS) throw providerCompatibilityError("gemini", "malformed_response");
-            if ((call.id !== undefined && providerCallIds.has(call.id)) || (call.id === undefined && anonymousFunctionNames.has(call.name))) {
-              throw providerCompatibilityError("gemini", "protocol_drift");
-            }
-            if (call.id !== undefined) providerCallIds.add(call.id);
-            else anonymousFunctionNames.add(call.name);
-            const callId = call.id ?? `gemini-call-${responseSequence + 1}-${toolCalls.length + 1}`;
-            modelParts.push(structuredClone(part));
-            modelTurnCharacters += partCharacters;
-            toolCalls.push({ callId, name: call.name, arguments: serializedArguments });
-            pendingCalls.push({ callId, name: call.name, ...(call.id === undefined ? {} : { providerCallId: call.id }) });
-          }
-        }, request.signal);
-      } catch (error: unknown) {
-        if (request.signal?.aborted) throw error;
-        throw safeProviderError(request, error);
-      }
-      if (!sawCandidate || !finished || modelParts.length === 0) {
-        recordProviderDiagnostic(request, "malformed_response");
-        throw providerCompatibilityError("gemini", "malformed_response");
-      }
+          }, request.signal);
+        } catch (error: unknown) {
+          if (request.signal?.aborted) throw error;
+          throw safeProviderError(request, error);
+        }
+        if (!sawCandidate || !finished || modelParts.length === 0) {
+          recordProviderDiagnostic(request, "malformed_response");
+          throw providerCompatibilityError("gemini", "malformed_response");
+        }
 
-      nextContents.push({ role: "model", parts: modelParts });
-      const persistedContents = boundConversation(nextContents);
-      contents.splice(0, contents.length, ...persistedContents);
-      hasUncommittedRestoredConversation = false;
-      lastToolCalls = pendingCalls;
-      responseSequence += 1;
-      const usage: AgentUsage = {
-        ...(inputTokens === undefined ? {} : { inputTokens }),
-        ...(outputTokens === undefined ? {} : { outputTokens }),
-        ...(totalTokens === undefined ? {} : { totalTokens }),
-      };
-      return {
-        responseId: `gemini-${responseSequence}`,
-        text,
-        textWasStreamed: true,
-        toolCalls,
-        ...(Object.keys(usage).length === 0 ? {} : { usage }),
-        continuationState: continuationState(persistedContents),
-      };
+        nextContents.push({ role: "model", parts: modelParts });
+        const persistedContents = boundConversation(nextContents);
+        contents.splice(0, contents.length, ...persistedContents);
+        hasUncommittedRestoredConversation = false;
+        lastToolCalls = pendingCalls;
+        responseSequence += 1;
+        const usage: AgentUsage = {
+          ...(inputTokens === undefined ? {} : { inputTokens }),
+          ...(outputTokens === undefined ? {} : { outputTokens }),
+          ...(totalTokens === undefined ? {} : { totalTokens }),
+        };
+        return {
+          responseId: `gemini-${responseSequence}`,
+          text,
+          textWasStreamed: true,
+          toolCalls,
+          ...(Object.keys(usage).length === 0 ? {} : { usage }),
+          continuationState: continuationState(persistedContents),
+        };
+      } catch (error: unknown) {
+        throw failure.finish(error, request.signal?.aborted);
+      }
     },
   };
 }

@@ -1,8 +1,9 @@
-import { execFile, spawn } from "node:child_process";
-import { readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { lstat, readdir, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
+import { readOnlyGit } from "./read-only-git.js";
 import { dirname, relative, resolve, sep } from "node:path";
-import { promisify } from "node:util";
 
+import { SessionCheckpoints, type FileMutation } from "./checkpoint.js";
 import { preparePatch } from "./apply-patch.js";
 import { formatChangeReview, RunChangeTracker } from "./change-review.js";
 import { portablePath } from "./platform-path.js";
@@ -15,7 +16,14 @@ export type ToolResult = {
   output: string;
   /** Runtime-only mutation evidence. Providers receive only output. */
   changedPaths?: string[];
+  /** Bounded, redacted language-server report for presentation. */
+  lspDiagnostics?: string;
+  /** Non-secret runtime presentation metadata; never raw tool output. */
+  rollbackCoverage?: { kind: "unsupported"; reason: "structural" | "nested" | "platform" | "unavailable" };
 };
+
+const checkpointFileTools = new WeakSet<AgentTool>();
+export function isCheckpointFileTool(tool: AgentTool): boolean { return checkpointFileTools.has(tool); }
 
 export type ToolOperation = "READ" | "WRITE" | "EXECUTE";
 
@@ -39,6 +47,7 @@ export type ToolExecutionOptions = {
   onTimeout?: () => void;
   /** Process-local current-run evidence; never provider-visible or persisted. */
   changeTracker?: RunChangeTracker;
+  checkpoints?: SessionCheckpoints;
 };
 
 export type CodingToolOptions = {
@@ -58,7 +67,6 @@ const MAX_SEARCH_RESULTS = 100;
 export const DEFAULT_MAX_TOOL_OUTPUT_BYTES = 65_536;
 export const DEFAULT_SHELL_TIMEOUT_MILLISECONDS = 60_000;
 export const DEFAULT_MAX_SHELL_OUTPUT_BYTES = 1_048_576;
-const execFileAsync = promisify(execFile);
 
 function boundOutput(result: ToolResult, maxBytes: number): ToolResult {
   const bytes = Buffer.from(result.output, "utf8");
@@ -66,6 +74,36 @@ function boundOutput(result: ToolResult, maxBytes: number): ToolResult {
   const marker = `[output truncated at ${maxBytes} bytes]`;
   const available = Math.max(0, maxBytes - Buffer.byteLength(`\n${marker}`));
   return { ...result, output: `${bytes.subarray(0, available).toString("utf8")}\n${marker}` };
+}
+
+async function checkpointWrite(
+  history: SessionCheckpoints | undefined, mutations: FileMutation[], maxBytes: number,
+  legacy: (attempt: (path: string) => void) => Promise<ToolResult>,
+): Promise<ToolResult> {
+  const eligibility = history?.classify(mutations);
+  if (eligibility?.kind === "rejected") return eligibility.result;
+  // Never retry a covered mutation failure through the legacy path.
+  if (eligibility?.kind === "covered") return history!.mutate(mutations);
+  const rollbackCoverage: NonNullable<ToolResult["rollbackCoverage"]> = {
+    kind: "unsupported", reason: eligibility?.reason ?? "unavailable",
+  };
+  // Record before each mutating syscall: a throwing write may already have truncated
+  // or partially changed its target. Never include not-yet-attempted batch members.
+  const attempted: string[] = [];
+  const attempt = (path: string) => {
+    const bounded = path.slice(0, 512);
+    if (attempted.length < 32) attempted.push(bounded);
+    else attempted[31] = bounded; // Always retain the currently attempted target.
+  };
+  let result: ToolResult;
+  try { result = await legacy(attempt); }
+  catch (error: unknown) {
+    result = { ok: false, output: `Write failed; attempted paths may have changed; inspect before retrying. ${errorMessage(error)}`, changedPaths: attempted };
+  }
+  // Keep successful no-history tool output compatible; metadata still describes
+  // the absence of recovery coverage to runtime presentation consumers.
+  const warning = history || !result.ok ? `Warning: outside rollback coverage (${rollbackCoverage.reason}); no checkpoint captured.\n` : "";
+  return boundOutput({ ...result, rollbackCoverage, output: `${warning}${result.output}` }, maxBytes);
 }
 
 function isToolInput(input: unknown): input is ToolInput {
@@ -153,6 +191,14 @@ async function resolveWritableWorkspacePath(
       if (!isNodeError(error, "ENOENT")) {
         return { ok: false, output: errorMessage(error) };
       }
+      // realpath also reports ENOENT for a dangling symlink, not just an absent file.
+      try {
+        if ((await lstat(candidate)).isSymbolicLink()) {
+          return { ok: false, output: "Cannot write through a dangling symlink." };
+        }
+      } catch (entryError: unknown) {
+        if (!isNodeError(entryError, "ENOENT")) throw entryError;
+      }
     }
 
     return candidate;
@@ -179,10 +225,9 @@ function toolError(error: unknown): ToolResult {
 
 async function readGit(workspace: string, arguments_: string[], maxBytes: number): Promise<ToolResult> {
   try {
-    const { stdout: root } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd: workspace, encoding: "utf8", maxBuffer: maxBytes });
-    if (await realpath(root.trim()) !== workspace) return { ok: false, output: "Git repository root must be the working directory." };
-    const { stdout, stderr } = await execFileAsync("git", arguments_, { cwd: workspace, encoding: "utf8", maxBuffer: maxBytes });
-    return boundOutput({ ok: true, output: stdout || stderr || "No output." }, maxBytes);
+    const { stdout, stderr, filtersDisabled } = await readOnlyGit(workspace, arguments_, maxBytes);
+    const notice = filtersDisabled ? "READ safety: external clean/process filters disabled; comparison uses unfiltered worktree bytes.\n" : "";
+    return boundOutput({ ok: true, output: notice + (stdout || stderr || "No output.") }, maxBytes);
   } catch {
     return { ok: false, output: "Git repository is unavailable in the working directory." };
   }
@@ -664,14 +709,14 @@ export async function createReadTools(
       operation: "READ",
       description: "Show the working-directory Git status without modifying Git state.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
-      async execute(): Promise<ToolResult> { return readGit(workspace, ["status", "--short", "--branch", "--untracked-files=normal"], maxToolOutputBytes); },
+      async execute(): Promise<ToolResult> { return readGit(workspace, ["status", "--short", "--branch", "--untracked-files=normal", "--ignore-submodules=dirty"], maxToolOutputBytes); },
     },
     {
       name: "git_diff",
       operation: "READ",
       description: "Show the working-directory Git diff without modifying Git state.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
-      async execute(): Promise<ToolResult> { return readGit(workspace, ["diff", "--no-ext-diff", "--"], maxToolOutputBytes); },
+      async execute(): Promise<ToolResult> { return readGit(workspace, ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty", "--"], maxToolOutputBytes); },
     },
     {
       name: "git_log",
@@ -697,7 +742,7 @@ export async function createCodingTools(
     maxToolOutputBytes: options.maxToolOutputBytes ?? DEFAULT_MAX_TOOL_OUTPUT_BYTES,
   };
 
-  return [
+  const tools: AgentTool[] = [
     ...readTools,
     {
       name: "write_file",
@@ -712,7 +757,7 @@ export async function createCodingTools(
         required: ["path", "content"],
         additionalProperties: false,
       },
-      async execute(input: unknown): Promise<ToolResult> {
+      async execute(input: unknown, executionOptions?: ToolExecutionOptions): Promise<ToolResult> {
         const requestedPath = requiredString(input, "path");
         const content = textValue(input, "content", true);
         if (typeof requestedPath !== "string") {
@@ -728,8 +773,11 @@ export async function createCodingTools(
         }
 
         try {
-          await writeFile(filePath, content, "utf8");
-          return { ok: true, output: `Wrote ${requestedPath}`, changedPaths: [requestedPath] };
+          return await checkpointWrite(executionOptions?.checkpoints, [{ path: requestedPath, content }], shellOptions.maxToolOutputBytes, async (attempt) => {
+            attempt(requestedPath);
+            await writeFile(filePath, content, "utf8");
+            return { ok: true, output: `Wrote ${requestedPath}`, changedPaths: [requestedPath] };
+          });
         } catch (error: unknown) {
           return toolError(error);
         }
@@ -749,7 +797,7 @@ export async function createCodingTools(
         required: ["path", "oldText", "newText"],
         additionalProperties: false,
       },
-      async execute(input: unknown): Promise<ToolResult> {
+      async execute(input: unknown, executionOptions?: ToolExecutionOptions): Promise<ToolResult> {
         const requestedPath = requiredString(input, "path");
         const oldText = textValue(input, "oldText");
         const newText = textValue(input, "newText", true);
@@ -769,7 +817,7 @@ export async function createCodingTools(
         }
 
         try {
-          const content = await readFile(filePath, "utf8");
+          const content = (executionOptions?.checkpoints ?? new SessionCheckpoints(workspace)).readText(requestedPath);
           const firstMatch = content.indexOf(oldText);
           if (firstMatch < 0) {
             return { ok: false, output: "Target text was not found." };
@@ -778,12 +826,15 @@ export async function createCodingTools(
             return { ok: false, output: "Target text is ambiguous." };
           }
 
-          await writeFile(
-            filePath,
-            `${content.slice(0, firstMatch)}${newText}${content.slice(firstMatch + oldText.length)}`,
-            "utf8",
-          );
-          return { ok: true, output: `Edited ${requestedPath}`, changedPaths: [requestedPath] };
+          return await checkpointWrite(executionOptions?.checkpoints, [{ path: requestedPath, expected: content, content: `${content.slice(0, firstMatch)}${newText}${content.slice(firstMatch + oldText.length)}` }], shellOptions.maxToolOutputBytes, async (attempt) => {
+            attempt(requestedPath);
+            await writeFile(
+              filePath,
+              `${content.slice(0, firstMatch)}${newText}${content.slice(firstMatch + oldText.length)}`,
+              "utf8",
+            );
+            return { ok: true, output: `Edited ${requestedPath}`, changedPaths: [requestedPath] };
+          });
         } catch (error: unknown) {
           return toolError(error);
         }
@@ -792,24 +843,30 @@ export async function createCodingTools(
     {
       name: "apply_patch",
       operation: "WRITE",
-      description: "Apply an all-or-fail, bounded unified patch to project files. Supports modifications and explicit /dev/null file creation; rejects deletion and path escapes.",
+      description: "Apply a prevalidated, bounded unified patch to project files. Supports modifications, creation and deletion via /dev/null; rejects path escapes.",
       inputSchema: {
         type: "object",
         properties: { patch: { type: "string", description: "Unified diff patch with ---/+++ headers and @@ hunks." } },
         required: ["patch"],
         additionalProperties: false,
       },
-      async execute(input: unknown): Promise<ToolResult> {
+      async execute(input: unknown, executionOptions?: ToolExecutionOptions): Promise<ToolResult> {
         const patch = textValue(input, "patch");
         if (typeof patch !== "string") return patch;
         if (Buffer.byteLength(patch, "utf8") > shellOptions.maxToolOutputBytes) return { ok: false, output: `Patch exceeds ${shellOptions.maxToolOutputBytes} byte limit.` };
-        const prepared = await preparePatch(patch, async (path) => resolveWritableWorkspacePath(workspace, path));
+        const prepared = await preparePatch(patch, async (path) => resolveWritableWorkspacePath(workspace, path), (path) => (executionOptions?.checkpoints ?? new SessionCheckpoints(workspace)).readText(path));
         if (typeof prepared === "string") return { ok: false, output: prepared };
         try {
-          // Every path and hunk has already been resolved and validated before the first write.
-          for (const file of prepared) await writeFile(file.resolvedPath, file.content, "utf8");
-          const hunks = prepared.reduce((total, file) => total + file.hunks, 0);
-          return { ok: true, output: `Applied patch: ${prepared.length} files changed, ${hunks} hunks applied.`, changedPaths: prepared.map((file) => file.path) };
+          return await checkpointWrite(executionOptions?.checkpoints, prepared.map((file) => ({ path: file.path, content: file.deleted ? null : file.content, expected: file.source })), shellOptions.maxToolOutputBytes, async (attempt) => {
+            // Every path and hunk has already been resolved and validated before the first write.
+            for (const file of prepared) {
+              attempt(file.path);
+              if (file.deleted) await unlink(file.resolvedPath);
+              else await writeFile(file.resolvedPath, file.content, "utf8");
+            }
+            const hunks = prepared.reduce((total, file) => total + file.hunks, 0);
+            return { ok: true, output: `Applied patch: ${prepared.length} files changed, ${hunks} hunks applied.`, changedPaths: prepared.map((file) => file.path) };
+          });
         } catch (error: unknown) { return toolError(error); }
       },
     },
@@ -835,4 +892,6 @@ export async function createCodingTools(
       },
     },
   ];
+  for (const tool of tools) if (["write_file", "edit_file", "apply_patch"].includes(tool.name)) checkpointFileTools.add(tool);
+  return tools;
 }

@@ -28,7 +28,7 @@ class Probe:
         self.before = termios.tcgetattr(self.slave)
         self.resize(100, 24, notify=False)
         self.proc = subprocess.Popen(
-            ["node", str(REPO / "scripts/tui-pty-fixture.mjs"), str(root), *(["--shared"] if "--shared" in sys.argv else []), *extra],
+            ["node", str(REPO / "tests/fixtures/tui-pty-fixture.mjs"), str(root), *(["--shared"] if "--shared" in sys.argv else []), *extra],
             cwd=REPO, stdin=self.slave, stdout=self.slave, stderr=self.slave,
             start_new_session=True,
             # Keep the parent's slave usable after child exit (macOS revokes a

@@ -1,5 +1,5 @@
 import type { AgentModel, AgentRequest, AgentResponse, AgentTextDeltaHandler } from "../agent.js";
-import { ProviderCompatibilityError, providerCompatibilityError } from "./compatibility.js";
+import { getProviderRequestFailure, ProviderRequestFailureBoundary, copyProviderRequestFailure, ProviderCompatibilityError, providerCompatibilityError } from "./compatibility.js";
 import { createOpenRouterAgentModel } from "./openrouter.js";
 
 /** Ollama's documented OpenAI-compatible endpoint; vLLM-compatible HTTPS endpoints are also supported. */
@@ -49,18 +49,21 @@ export function createLocalAgentModel(options: LocalAgentModelOptions = {}): Age
 
   return {
     async respond(request: AgentRequest, onTextDelta?: AgentTextDeltaHandler): Promise<AgentResponse> {
+      const failure = new ProviderRequestFailureBoundary();
       try {
         const response = await model.respond({
           ...request,
           continuationState: localContinuationForRequest(request.continuationState),
         }, onTextDelta);
+        failure.streamStarted();
         return {
           ...response,
           ...(response.continuationState === undefined ? {} : { continuationState: localContinuationForResponse(response.continuationState) }),
         };
       } catch (error: unknown) {
+        if (!getProviderRequestFailure(error)) failure.finish(error, request.signal?.aborted);
         if (error instanceof ProviderCompatibilityError) {
-          throw providerCompatibilityError("local", error.compatibilityKind, error.status);
+          throw copyProviderRequestFailure(error, providerCompatibilityError("local", error.compatibilityKind, error.status));
         }
         throw error;
       }

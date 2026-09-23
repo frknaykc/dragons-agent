@@ -1,5 +1,20 @@
 # Dragons Agent
 
+## Runtime and Desktop review hardening
+
+Built-in READ Git tools and automatic run change reviews disable external diff/text conversion, fsmonitor, hooks, signature helpers and clean/process filters, and avoid optional index writes. Filtered repositories remain readable, with a notice that comparisons use unfiltered worktree bytes. Review requires the workspace to be the repository root. File writes reject dangling final symlinks. Nested subagent READ tools remain readable; nested delegation still requires its own authorization. Background admission reserves capacity before persistence and releases failed claims.
+
+OpenAI API endpoints, including `OPENAI_BASE_URL`, require HTTPS without embedded credentials, query or fragment; redirects fail rather than forwarding authentication. Only the credential-free Local adapter supports literal-loopback HTTP. ChatGPT serializes credential migration/status reads, login commits, refresh mutations and logout. Logout invalidates pending login/refresh results and waits for started writes before removing credentials. Device-code, polling, token-exchange and refresh requests reject redirects. Its existing restrictive file fallback applies only when native storage is initially unavailable, not after a selected native backend fails writing or verification. API-key slots have no file fallback.
+
+Desktop packages include the dedicated secret-dialog assets. Local slash commands retain the active run identity so cancellation remains available; repeated quit attempts and quit during startup wait for owned runtime cleanup and IPC teardown. Quit does not wait for readiness, workspace dialogs or page navigation; an already-started runtime creation must settle so its result can be disposed. These source safeguards do not establish native platform or live-provider acceptance.
+
+### Conservative provider fallback
+
+Fallback is off by default. A profile can explicitly opt in with `fallback: { "enabled": true, "consent": "allow-context-sharing", "targets": [{ "provider": "openai-api", "model": "gpt-5.4" }] }` in its JSON config. **This consents to sending the current request and assembled project, skills, memory, and plan context to each listed target, including cloud providers when starting from Local.** Choose exact IDs present in the host registry's catalogue/default; unknown IDs, duplicates and more than three targets are rejected. There is no inferred Local-to-cloud route. Omit `fallback` to disable it.
+
+A foreground session or plain one-shot CLI run adopts and displays the target identity before its request. Session adoption is durable; subsequent continuation and resume belong to that target. A plain one-shot run keeps its adopted identity only in process because it does not create a session. Only a fresh first request with a classified retryable pre-stream HTTP failure can switch. Existing continuation, tool results, stream acquisition (including empty/tool-only output), emitted text, and cancellation block switching; the agent loop is never restarted. Diagnostics retain the safe initial identity and the bounded adopted transition history. Child/background factories fail closed because they do not own safe identity adoption.
+
+
 <p align="center">
   <img src="docs/assets/banner.png" alt="Dragons Agent project banner" width="960">
 </p>
@@ -34,6 +49,12 @@ pnpm desktop        # Electron desktop client
 
 All three launch commands build first. See the provider setup below before starting a real conversation. Desktop packaging remains a development-distribution milestone, not a signed public installer release.
 
+Configuration `model`/`models` values and registered adapter default models must be exact printable ASCII IDs of 1–256 characters without whitespace. Invalid IDs are rejected rather than silently trimmed; routed IDs such as `vendor/model:variant` are preserved. Validation does not establish model availability or account access.
+
+In the interactive CLI, type `/` for command choices or `/login ` for provider choices. Up/Down moves the selection; Tab or Enter inserts it without executing anything. Press Enter separately to submit the inserted command, or Escape to dismiss the choices. Redirected input remains plain line-oriented input without a picker.
+
+Approved file writes outside rollback coverage show a CLI warning even when the model only reports success. A failed legacy write or patch can leave completed and currently attempted files changed; bounded path warnings describe uncertainty, not automatic recovery. Inspect those files before retrying. No automatic retry or rollback is performed. Checkpoint coverage includes eligible regular-file edits, creation and deletion inside existing directories (256 KiB per image, 2 MiB per batch/history). Missing directories are not created. Structural operations require O_NOFOLLOW; unsupported platforms use approved legacy writes with an explicit no-coverage warning. This is normal workspace conflict detection, not atomic protection against hostile concurrent filesystem writers. Structural partial failures retain only verified completed receipts; uncertain paths require inspection and are never adopted as recovery images.
+
 ## Installation
 
 Dragons requires **Node.js 22 or newer**.
@@ -64,7 +85,25 @@ Use a real key only in your shell or secret manager; never put it in source, a p
 
 ## Interactive CLI
 
-Run `dragons` without a task to start an interactive session. Run `dragons --help` for the top-level command families and `/help` inside the CLI for local commands.
+### Checkpoint review (CLI/Desktop)
+
+`/checkpoint list` lists process/session-local snapshots. `/checkpoint diff <id> [--page <n>] [path]` is a local READ command: no provider request or WRITE approval. Small diffs retain the JSON array of exact `before`/`after` strings. Large diffs automatically show page 1; follow the returned JSON `next` command, or select any 1-based page explicitly. Pages visit each selected file's before image then after image in checkpoint order. Each page reports `path`, `side`, UTF-8 byte `offset`/`end`, `byteLength`, and JSON-escaped `text`. Nominal slices are 4,096 bytes (at most 4,099 to preserve complete UTF-8 code points); a 256 KiB before/after pair takes 128 pages. CRLF, controls, emoji and missing final newlines are preserved without partial escape sequences. Unknown flags and out-of-range pages fail locally.
+
+Whitespace/control-bearing paths require exact JSON quoting, for example `/checkpoint diff <id> --page 2 "a  b.txt"`, `/checkpoint diff <id> "tab\t.txt"`, or `/rollback <id> "tail "`. Copy the escaped path selector from the list; unquoted ambiguous whitespace is rejected, never normalized into another filename. Credential-bearing filenames are excluded from capture rather than converted into potentially ambiguous redacted selectors. Rollback still requires WRITE approval and conflict checks; review all pages first.
+
+### Local command availability
+
+Provider/model pickers include a bounded static catalogue of documented model IDs, plus the configured and default model. This is a curated list, not live discovery, account entitlement, or a guarantee of provider access. Local model installations remain unknown; enter their exact model ID yourself. Custom model IDs remain available, but reasoning controls require an exact supported provider/model match. `/provider` shows the selected provider plus safe public metadata: credential method, adapter default, curated-model count, declared adapter capabilities, and whether verified reasoning metadata exists. It never reads or reports credentials, endpoints, factories, pool contents, or account entitlement.
+
+The full-screen TUI supports `/help [filter]`, `/status` (`/session`), `/new` (`/reset`), `/resume <id>`, `/provider [id]`, `/model [name]`, `/context`, `/diagnostics`, `/mcp`, `/tasks`, `/clear`, and `/exit` (`/quit`). Changing provider or model starts a fresh session. In the TUI, `/clear` clears the display only; use `/new` for a fresh conversation. Local TUI instances also expose `/sessions`, `/login`, `/auth`, `/logout`, and `/profile` through trusted host controls. Local CLI, TUI, and desktop sessions support `/reasoning [default|level]`: choices are limited to exact known provider/model capabilities, saved per profile and model, and applied to the next run. `default` removes the override and omits effort from requests. Unknown models have no effort override; no `ultra` alias is invented, and `max` is offered only for explicitly supported models. Remote clients do not expose this local profile control.
+
+Desktop supports `/help [filter]`, `/status` (`/session`), `/new` (`/reset`), and `/resume <id>`. Local desktop instances additionally expose `/sessions`, `/login`, `/auth`, `/logout`, and `/profile [list|create <name>|select <name>]`. Profile selection closes the old runtime and requires restarting the client. Remote connections do not expose local authentication or profile controls. TUI and desktop reject unavailable slash commands locally rather than sending them to the model; their help lists only supported commands. Session resume displays the runtime summary, not an invented transcript.
+
+TUI and local desktop instances support `/login <provider>` for `openai-api`, `anthropic`, `gemini`, and `openrouter`. Named pools use `/login <provider> <slot>` to add a slot, `/login list <provider>` to show only its slot names and safe `ready`, `unverified`, or `cooldown` state, and `/logout <provider> <slot>` to remove it. Select a named slot for new runs with the profile config `apiKeySlots`, for example `{ "gemini": "primary" }`; slot references are not keys. Each profile/provider supports at most 8 named slots, including unverified entries. Slot IDs match `[a-z0-9][a-z0-9_-]{0,31}`. Each new model instance gets its own credential facade and pins its first resolution, including failures; a long-lived registry does not share that cache between runs. A rate-limited selected slot fails closed for new models until its process-local cooldown ends (30 seconds by default, at most five minutes). Named slots use version-1 OS records with verified `ready` state. After restart, explicit selection can recover that record; listing only shows process-local inventory and does not read secrets or discover OS entries. Raw historical or unverified records require removal and re-addition. There is no automatic slot rotation or cross-process inventory coordination. Enter the key only in the dedicated masked prompt, never in chat or a slash command. Desktop uses a separate sandboxed modal with a one-shot host-only credential channel; the chat renderer and remote runtime do not receive the key. Keys are saved and read back for verification in the active profile’s OS credential store, without a plaintext fallback. TUI and desktop close the current runtime after API-key login or logout; restart to continue. The plain CLI leaves the current runtime unchanged and asks you to restart. CLI key entry requires TTY stdin and stdout and uses a dedicated masked raw-input prompt; redirected input cannot supply a key. You can also run `dragons auth login --provider <provider>`, `dragons auth status --provider <provider>`, or `dragons auth logout --provider <provider>`. Local CLI, TUI, and desktop support `/auth [status] [provider]` and `/logout [provider]`; an explicit provider takes precedence over the current session provider, with ChatGPT as the fallback when neither is available. Local models require no login. API-key status checks stored-key presence, not provider access. Logout removes the stored key without changing environment credentials. Provider adapters load profile-stored keys lazily on their first request, with environment-key fallback only for singleton authentication when no stored key exists. Explicit named-slot selection fails closed rather than using an environment key.
+
+Run `dragons` without a task to start an interactive session. Run `dragons --help` for the top-level command families and `/help` inside the CLI for local commands. `/help <filter>` narrows that list. `/login [provider]`, `/auth [provider]`, and `/logout [provider]` are local provider authentication controls; they are never sent to the model. Use `chatgpt` for the experimental ChatGPT Subscription device flow. `/profile`, `/profile create <name>`, and `/profile select <name>` manage isolated profiles. Selecting a profile exits the current client; restart Dragons to load that profile's config, sessions, skills, memory, and credential namespace.
+
+Interactive CLI authentication failures are reported locally without closing the conversation or printing backend exception details. During ChatGPT device sign-in, Ctrl+C cancels the authentication request and returns to the composer; a browser approval alone is not a successful login until credential persistence is verified. Use `/auth chatgpt` to check the stored sign-in state.
 
 The TTY startup centers the DRAGON title, motto and provider/workspace metadata. Only the dragon appears inside the red frame, with a continuous gold-to-red gradient. The input row has matching red separators above and below, with model, context and activity status above it. Tool, MCP and skill listings are not startup panels; their existing commands remain available. Redirected/non-TTY output stays plain and omits the banner. The full dragon needs a sufficiently wide terminal; narrower startup artwork is clipped to fit rather than scaled.
 
@@ -85,6 +124,9 @@ Useful examples:
 /memory list
 /mcp list
 /plan list
+/login
+/auth
+/logout
 ```
 
 Press **Ctrl+C** to cancel an active run. Sessions can also be managed outside the interactive UI:
@@ -119,8 +161,8 @@ Status includes provider/model, session ID, runtime activity, context budget, an
 Local deterministic verification (no live provider inference):
 
 ```sh
-pnpm build
-node --test dist/tui-controller.test.js dist/tui-screen.test.js dist/tui-terminal.test.js
+pnpm build:tests
+node --test .test-build/tui/tui-controller.test.js .test-build/tui/tui-screen.test.js .test-build/tui/tui-terminal.test.js
 python3 scripts/verify-tui-pty.py  # POSIX PTY fixture; not a native-emulator visual test
 ```
 
@@ -137,17 +179,47 @@ pnpm desktop
 pnpm acceptance:desktop  # actual local window; deterministic provider, no live inference
 ```
 
-Source-checkout launch uses the working directory as the immutable workspace. A packaged local launch instead asks for a workspace through a native main-process folder picker; cancellation exits without creating a runtime, and invalid selections are rejected. Remote launches retain the host's workspace and do not show this picker. Configure credentials through existing host-side provider authentication/configuration, not the window. Choose **Host default** to use configured provider/model/limits, or select an explicit provider/model; create a session or resume its ID, send a request, observe streamed text and tool activity, allow once/deny the exact pending operation, or cancel. Resume restores saved continuation, not prior message display. Provider/model changes apply to new sessions only.
+Source-checkout launch uses the working directory as the immutable workspace. A packaged local launch instead asks for a workspace through a native main-process folder picker; cancellation exits without creating a runtime, and invalid selections are rejected. Remote launches retain the host's workspace and do not show this picker. Use local `/login <provider>` for the host-owned credential prompt, or configure credentials on the host; do not enter keys in chat. Remote windows cannot manage host credentials. Choose **Host default** to use configured provider/model/limits, or select an explicit provider/model; create a session or resume its ID, send a request, observe streamed text and tool activity, allow once/deny the exact pending operation, or cancel. Resume restores saved continuation, not prior message display. Provider/model changes apply to new sessions only.
 
 The sandboxed renderer has no Node integration. Its isolated preload exposes only validated runtime commands and a bounded event drain. Only the exact local main frame may invoke them; there is no filesystem, shell, credential, or arbitrary Electron RPC. The main process owns the M71 runtime and existing workspace/authorization boundary. All content uses text nodes; scripts, navigation, popups, webviews, permissions and external network/content are blocked in the renderer. The event queue is capped at 256 events / 512 Ki characters and disconnects/cancels on overflow; the UI retains at most 80 messages of 32,000 characters and 16,000 activity characters. Closing/crashing the window cancels and disposes its runtime. Memory suggestions are explicitly rejected; plan/background editing and automatic MCP connection are outside this foundation.
 
 Deterministic bridge tests run on all CI platforms without a GUI. `acceptance:desktop` separately exercises the actual Electron window, sandbox/preload, configured model defaults, inert model content, streaming, real isolated write allow/deny, cancellation, resume and reload cleanup. Reload is a fail-closed disconnect: the window closes and cancels its run; reopen and resume explicitly. Neither test path establishes live provider acceptance.
+
+### Trusted Desktop host isolation (source checkout)
+
+Trusted main-process composition can call `createDesktopRuntime(workspace, { configPath, profileName })` from `dist/desktop/host.js` after building. This is a source-checkout host API, not a renderer/IPC option, CLI flag, or package export. The normal one-argument launch is unchanged: it uses the platform config root and persisted active profile.
+
+```js
+import { randomUUID } from "node:crypto";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createDesktopRuntime, desktopLocalControls } from "./dist/desktop/host.js";
+
+const root = await mkdtemp(join(tmpdir(), "dragons-desktop-acceptance-"));
+const options = {
+  configPath: join(root, "config.json"),
+  profileName: `acceptance-${randomUUID()}`,
+};
+const runtime = await createDesktopRuntime(workspace, options);
+// Keep root/options for restart persistence; dispose before recomposing:
+await desktopLocalControls(runtime).close();
+await runtime.dispose();
+```
+
+`configPath` is an absolute **base config path**, passed to the existing profile store; the named profile uses `<root>/profiles/<profileName>/config.json`, with its own sessions, memory and skills directories. An injected path fails closed without an explicit valid non-default profile name. The override pins this composition and does not rewrite `profiles/active.json`; reuse the same options after restart. `/profile select` can still persist selection in this root, but it does not supersede a host-pinned name on restart.
+
+**Credential boundary:** filesystem-root isolation is not Keychain isolation. Native credentials still use the shared OS service `Dragons Agent`: ChatGPT uses `chatgpt-subscription:<profileName>` (the default account is `chatgpt-subscription`), API keys use `api-key:<profileName>:<provider>`, and named slots use `api-key-slot:<profileName>:<provider>:<slot>`. Paths are not part of those account labels. The caller must generate a unique acceptance profile name, must not reuse a real profile name, and must not treat this option as an OS credential sandbox. Legacy ChatGPT `auth.json` is scoped to the selected config directory; inherited environment credentials are unchanged. Local reasoning/session operations need no credential reads or network; authentication/model operations can still access native storage or network. Deterministic host tests guard native credential methods and fetch, and never run those operations. This configuration alone does not authorize live authentication, model calls, or GUI acceptance.
 
 ### Development application packages (M77)
 
 `pnpm desktop:pack` builds an unpacked application for the host platform; `pnpm desktop:dist` builds local DMG/ZIP (macOS), NSIS (Windows), or AppImage/DEB (Linux) targets. Outputs go to ignored `desktop-artifacts/`. Build natively on each platform: a successful macOS build does not verify Windows/Linux or another CPU architecture. The Electron entry point is overridden only in the application package; npm continues to expose the CLI/runtime.
 
 These are unsigned/ad-hoc development artifacts, not notarized or publicly trusted installers. No auto-update, publishing, version bump, tag, or release is included. See [M77 scope, acceptance evidence and limitations](docs/m77-application-distribution.md) before treating a package as distributable.
+
+Desktop now displays update status with check/cancel controls. Production checks remain disabled without a host-owned trusted source and policy; the renderer cannot configure either. The check verifies signed metadata only. Optional trusted launcher injection into `openDesktop` can also enable parameterless `update_prepare` IPC: the host controller downloads verified bytes into private temporary staging, validates the macOS bundle, and runs pinned Developer ID signature and conservative target preflight. It owns single-flight, deadline, cancellation, stale-result suppression and cleanup on failure/close. `prepared` is not installable (`canInstall: false`); no activation, helper, launch or real-data migration is authorized. The renderer has no prepare button yet and cannot supply trust keys, URLs, identities or paths. macOS staging supports bounded ZIP32 decoding, native XML/binary plist parsing and validated internal framework symlinks, preserving executable permissions without special mode bits. ZIP64, fat Mach-O and non-ASCII archive paths remain unsupported; staging is not native activation or OS signing acceptance.
+
+M78 adds internal [signed-manifest verification, private staging and AppImage worker primitives](docs/m78-secure-auto-update.md), not an enabled auto-updater. Trust comes from pinned Ed25519 public keys; SHA-256 only verifies the artifact bound by the signed manifest. Production trust roots and update sources are not configured. The AppImage worker is not connected to the desktop lifecycle; macOS/Windows activation, OS-enforced real-data barriers and M79 migration compatibility remain unimplemented and unaccepted.
 
 ## Live provider acceptance
 
@@ -190,8 +262,8 @@ To attach the existing CLI/TUI or desktop to the same running host, provide its 
 Verification uses deterministic local models, real HTTP/SSE, real POSIX PTYs and an actual Electron window:
 
 ```sh
-pnpm build
-node --test dist/shared*.test.js dist/session-execution-lease.test.js dist/runtime-admission-cap.test.js
+pnpm build:tests
+node --test .test-build/runtime/shared*.test.js .test-build/runtime/session-execution-lease.test.js .test-build/runtime/runtime-admission-cap.test.js
 python3 scripts/verify-tui-pty.py --shared
 pnpm exec electron scripts/verify-desktop-smoke.mjs --shared
 ```
@@ -325,6 +397,32 @@ On Windows, atomic job-file replacement retries transient rename `EPERM` failure
 
 v0.1.0 includes bounded repository intelligence, JavaScript/TypeScript symbol navigation, approval-gated unified-diff `apply_patch`, heuristic test recommendations, and Git/current-run self-review.
 
+### Opt-in LSP diagnostics (2.1, acceptance pending)
+
+Without an `lsp` entry in the active profile's `config.json`, behavior is unchanged: no language server discovery, download, installation or startup. To use a server you have separately installed and trust, explicitly configure its absolute executable and arguments. For example, adapt these placeholder absolute paths to your installation (this is not an install command):
+
+```json
+{
+  "lsp": {
+    "command": "/absolute/path/to/node",
+    "args": ["/absolute/path/to/language-server/cli.mjs", "--stdio"],
+    "languageId": "typescript",
+    "extensions": [".ts"],
+    "timeoutMilliseconds": 3000
+  }
+}
+```
+
+Only these five keys are accepted. `args`, `languageId` and `extensions` are required; timeout defaults to 3000ms and is restricted to 100–10000ms. One server/language mapping is supported. Arguments must not contain credentials. There is no shell, PATH executable lookup, environment/config discovery or inherited provider credential environment; servers requiring environment setup or `/usr/bin/env node` may be unavailable. Use an absolute interpreter and script instead. Restart the host after changing configuration.
+
+After a successful built-in `write_file`, `edit_file` or `apply_patch`, each matching changed document (maximum four per tool call) requests **EXECUTE `lsp_diagnostics_start`** through `runAgent()`. WRITE approval never authorizes startup. Every inspection uses a new process and a new EXECUTE approval; even "allow session" applies only to that inspection. CLI (including the actual TTY prompt) and Desktop show the full quoted command, ordered argument array and document path. A dedicated allowlisted approval DTO, not raw tool arguments, crosses the runtime/Desktop bridge. Its serialized scope is limited to 4096 UTF-8 bytes (command/each argument 2048 characters, document 512, at most 16 arguments); recognized credentials, controls/format characters, extra fields or oversized scopes fail closed before approval/startup rather than hiding execution identity behind redaction or truncation. The optional full-screen TUI cannot show this scope and denies LSP startup with a CLI/Desktop notice; its other approvals are unchanged. Denial leaves the successful write intact and reports diagnostics skipped. There is no model-callable server-start tool, and shell/MCP effects, rollback, delegated children and persistent background jobs do not trigger this feature.
+
+The client performs actual Content-Length framed JSON-RPC: initialize/initialized, didOpen and LSP document diagnostics. It uses a full `textDocument/diagnostic` response when supported; otherwise it accepts only `publishDiagnostics` for the exact opened file URI and version 1. Unversioned push diagnostics are ignored, not presented as clean. Each process sees a single bounded post-write document snapshot, with no shared document cache between writes/sessions. Results are advisory server output, not proof a project builds or is error-free. No workspace diagnostics, edits, commands, configuration requests, registration, file watchers or server-initiated reads are serviced.
+
+Redacted, bounded line/column/severity/messages reach the next model turn and plain/interactive CLI output; Desktop uses its existing bounded tool-activity output. Missing server, timeout, stale/unversioned messages, cancellation and protocol/resource failures are distinct from a successful empty report. The client excludes recognized sensitive paths, symlinks, hardlinks and oversized/non-UTF-8 documents. Per process: 128KiB document, 256KiB frame, 8KiB headers (frame parsing is independent of stdout chunk boundaries), 2MiB cumulative stdout/stderr, 256 messages, 20 displayed diagnostics, 512 characters per message and 8192 characters per document; aggregate reporting is limited to 16384 characters and the runtime's smaller event-byte cap still applies. Shutdown has a 200ms cleanup deadline followed by forced termination.
+
+**Trust boundary:** an approved language server is arbitrary local code, not an OS-sandboxed READ tool. It may read workspace/project configuration, load plugins, write files or access the network independently of the client. Only approve a server and workspace you trust. Credentials are not intentionally passed, but lexical redaction is not a complete secret detector. Parent-directory races/out-of-band edits are not an atomic hostile-writer guarantee. POSIX same-group descendants are killed at cleanup; detached descendants and Windows descendant trees are not guaranteed contained. No live language-server or installed-platform compatibility acceptance is claimed. See [acceptance evidence](docs/lsp-diagnostics-acceptance.md).
+
 Current limitations:
 
 - Symbol references are syntactic/lexical, not LSP or type-aware.
@@ -375,7 +473,7 @@ This is not a legal privacy policy. See [SECURITY.md](SECURITY.md) for vulnerabi
 
 ## Platform status
 
-- **macOS:** live verified.
+- **macOS:** selected CLI/Desktop development flows have native user-acceptance evidence; this is not blanket acceptance of the latest auth changes or signed installers. See [development acceptance](docs/cli-desktop-user-acceptance.md) and [M78 release gates](docs/m78-secure-auto-update.md).
 - **Linux:** deterministic coverage; no hosted live verification claimed.
 - **Windows:** deterministic coverage; no hosted live verification claimed. POSIX process-group cleanup is stronger than Windows direct-child cleanup.
 
@@ -400,8 +498,18 @@ See [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 
-Future directions may include deeper coding intelligence, broader MCP support, Skills and Memory evolution, bounded autonomy, additional providers, and future clients. No dates are promised.
+[ROADMAP.md](ROADMAP.md) tracks accepted work and open gates. Phase 1 development items 1.1–1.5, source/test separation, and the scoped runtime/provider/Desktop review repairs are complete. The latest source gate on 2026-09-22 passed with 1164 tests passing, 2 skipped and no failures; typecheck, build and package verification passed, followed by an independent review with no confirmed blocker in scope. See [acceptance evidence](docs/phase1-acceptance.md).
+
+**2.1 LSP Diagnostics is in progress**, with explicit opt-in stdio integration and deterministic fixture coverage; independent review and acceptance remain pending. See [LSP acceptance and limits](docs/lsp-diagnostics-acceptance.md). CLI and Desktop remain the priorities, with existing optional TUI compatibility preserved. M78 native activation/recovery, signing and real platform-package acceptance remain open; development acceptance does not authorize production release. No dates are promised.
 
 ## License
 
 MIT © 2026 Furkan "NaxoziwuS" Aykaç. See [LICENSE](LICENSE).
+
+## Repository layout and local tests
+
+Application TypeScript lives in `src/` and builds to a clean, application-only `dist/`. Permanent regressions live under `tests/<subsystem>/`; subprocess fixtures are in `tests/fixtures/`, and opt-in acceptance code is in `tests/acceptance/`. The development-only M78 native C labs are preserved in `experiments/macos-native/`; build/package/verification entrypoints stay in `scripts/`.
+
+`dist/` contains executable `.js` files and generated `.d.ts` API declarations for TypeScript consumers. They come from the same application source, not duplicate implementations. Test compilation disables declaration output.
+
+Run `pnpm test` for all deterministic Node regressions, or `pnpm build:tests && node --test .test-build/<subsystem>/<name>.test.js` for a focused compiled test. `.test-build/` is ignored, contains only compiled test/acceptance/fixture code, and is never shipped. Every app build cleans stale `dist/` files; every test build also cleans stale `.test-build/` files. See [CONTRIBUTING.md](CONTRIBUTING.md#source-tests-and-generated-output) for import/path conventions and platform-specific gates. No live provider acceptance runs as part of ordinary test discovery.

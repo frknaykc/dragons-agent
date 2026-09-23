@@ -12,10 +12,13 @@ import { retryProviderRequest } from "../retry.js";
 import { DEFAULT_CONTEXT_BUDGET_CHARS } from "../context-budget.js";
 import {
   classifyProviderHttpFailure,
+  ProviderRequestFailureBoundary,
   providerCompatibilityError,
   ProviderCompatibilityError,
   type ProviderCompatibilityKind,
 } from "./compatibility.js";
+
+import { openAIReasoning, type ReasoningLevel } from "./reasoning.js";
 
 export const CODEX_RESPONSES_BASE_URL = "https://chatgpt.com/backend-api/codex";
 export const DEFAULT_CODEX_MODEL = "gpt-5.6-terra";
@@ -42,6 +45,7 @@ export type CodexStreamDiagnostic = {
 };
 
 export type CodexAgentModelOptions = {
+  reasoning?: ReasoningLevel;
   credentials: CodexCredentialsResolver;
   fetchImpl?: typeof fetch;
   model?: string;
@@ -267,6 +271,7 @@ export function createCodexAgentModel(options: CodexAgentModelOptions): AgentMod
   const fetchImpl = options.fetchImpl ?? fetch;
   const baseUrl = (options.baseUrl ?? CODEX_RESPONSES_BASE_URL).replace(/\/$/, "");
   const model = options.model ?? DEFAULT_CODEX_MODEL;
+  const reasoning = openAIReasoning(model, options.reasoning);
   const instructions = options.instructions ?? DEFAULT_INSTRUCTIONS;
   const conversation: CodexInputItem[] = [];
   let lastToolCalls: ToolCall[] = [];
@@ -274,178 +279,187 @@ export function createCodexAgentModel(options: CodexAgentModelOptions): AgentMod
 
   return {
     async respond(request: AgentRequest, onTextDelta?: AgentTextDeltaHandler): Promise<AgentResponse> {
-      let resumed = false;
-      if (!initialized) {
-        const savedConversation = restoredConversation(request.continuationState);
-        if (savedConversation) {
-          conversation.splice(0, conversation.length, ...savedConversation);
+      const failure = new ProviderRequestFailureBoundary();
+      try {
+        let resumed = false;
+        if (!initialized) {
+          const savedConversation = restoredConversation(request.continuationState);
+          if (savedConversation) {
+            conversation.splice(0, conversation.length, ...savedConversation);
+            lastToolCalls = [];
+            resumed = true;
+          }
+          initialized = true;
+        }
+        if (request.previousResponseId) {
+          const expectedCallIds = new Set(lastToolCalls.map((call) => call.callId));
+          if (request.toolOutputs.length !== lastToolCalls.length
+            || request.toolOutputs.some((output) => !expectedCallIds.has(output.callId))
+            || new Set(request.toolOutputs.map((output) => output.callId)).size !== request.toolOutputs.length) {
+            recordProviderDiagnostic(request, "protocol_drift");
+            throw providerCompatibilityError("chatgpt", "protocol_drift");
+          }
+          for (const call of lastToolCalls) {
+            conversation.push({
+              type: "function_call",
+              call_id: call.callId,
+              name: call.name,
+              arguments: call.arguments,
+            });
+          }
+          for (const output of request.toolOutputs) {
+            conversation.push({ type: "function_call_output", call_id: output.callId, output: output.output });
+          }
+        } else if (request.conversationResponseId || resumed) {
+          conversation.push(...initialInput(request.task));
           lastToolCalls = [];
-          resumed = true;
+        } else {
+          conversation.splice(0, conversation.length, ...initialInput(request.task));
+          lastToolCalls = [];
         }
-        initialized = true;
-      }
-      if (request.previousResponseId) {
-        const expectedCallIds = new Set(lastToolCalls.map((call) => call.callId));
-        if (request.toolOutputs.length !== lastToolCalls.length
-          || request.toolOutputs.some((output) => !expectedCallIds.has(output.callId))
-          || new Set(request.toolOutputs.map((output) => output.callId)).size !== request.toolOutputs.length) {
-          recordProviderDiagnostic(request, "protocol_drift");
-          throw providerCompatibilityError("chatgpt", "protocol_drift");
-        }
-        for (const call of lastToolCalls) {
-          conversation.push({
-            type: "function_call",
-            call_id: call.callId,
-            name: call.name,
-            arguments: call.arguments,
-          });
-        }
-        for (const output of request.toolOutputs) {
-          conversation.push({ type: "function_call_output", call_id: output.callId, output: output.output });
-        }
-      } else if (request.conversationResponseId || resumed) {
-        conversation.push(...initialInput(request.task));
-        lastToolCalls = [];
-      } else {
-        conversation.splice(0, conversation.length, ...initialInput(request.task));
-        lastToolCalls = [];
-      }
-      const boundedConversation = compactConversation(conversation, request.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS);
-      conversation.splice(0, conversation.length, ...boundedConversation);
+        const boundedConversation = compactConversation(conversation, request.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS);
+        conversation.splice(0, conversation.length, ...boundedConversation);
 
-      const credentials = await options.credentials.getValidCredentials();
-      const headers: Record<string, string> = {
-        Authorization: `Bearer ${credentials.accessToken}`,
-        Accept: "text/event-stream",
-        "Content-Type": "application/json",
-        "User-Agent": "DragonsAgent/0.1.0 (ChatGPT Subscription Experimental)",
-        originator: "dragons-agent",
-      };
-      if (credentials.accountId) headers["ChatGPT-Account-ID"] = credentials.accountId;
+        const credentials = await options.credentials.getValidCredentials();
+        const headers: Record<string, string> = {
+          Authorization: `Bearer ${credentials.accessToken}`,
+          Accept: "text/event-stream",
+          "Content-Type": "application/json",
+          "User-Agent": "DragonsAgent/0.1.0 (ChatGPT Subscription Experimental)",
+          originator: "dragons-agent",
+        };
+        if (credentials.accountId) headers["ChatGPT-Account-ID"] = credentials.accountId;
 
-      let response: Response;
-      try {
-        response = await retryProviderRequest(async () => {
-          const candidate = await fetchImpl(`${baseUrl}/responses`, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              model,
-              instructions: [instructions, formatAdvisoryContextForInstructions(request)]
-                .filter((value): value is string => Boolean(value))
-                .join("\n\n"),
-              input: conversation,
-              tools: request.tools.map(toFunctionTool),
-              tool_choice: "auto",
-              // M11 serializes authorization and execution in model order.
-              parallel_tool_calls: false,
-              store: false,
-              stream: true,
-            }),
-            signal: request.signal,
-          });
-          // No response body has been processed yet, so retries here cannot replay tools.
-          if (candidate.status === 429 || candidate.status === 408 || candidate.status === 409 || candidate.status === 425 || candidate.status >= 500) {
-            await candidate.body?.cancel();
-            throw providerCompatibilityError("chatgpt", classifyProviderHttpFailure(candidate.status), candidate.status);
+        let response: Response;
+        try {
+          response = await retryProviderRequest(async () => {
+            failure.beginAttempt();
+            const candidate = await fetchImpl(`${baseUrl}/responses`, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                model,
+                ...(reasoning ? { reasoning } : {}),
+                instructions: [instructions, formatAdvisoryContextForInstructions(request)]
+                  .filter((value): value is string => Boolean(value))
+                  .join("\n\n"),
+                input: conversation,
+                tools: request.tools.map(toFunctionTool),
+                tool_choice: "auto",
+                // M11 serializes authorization and execution in model order.
+                parallel_tool_calls: false,
+                store: false,
+                stream: true,
+              }),
+              signal: request.signal,
+            });
+            if (!candidate.ok) failure.httpFailure(candidate.status, candidate.headers.get("retry-after"));
+            // No response body has been processed yet, so retries here cannot replay tools.
+            if (candidate.status === 429 || candidate.status === 408 || candidate.status === 409 || candidate.status === 425 || candidate.status >= 500) {
+              await candidate.body?.cancel();
+              throw providerCompatibilityError("chatgpt", classifyProviderHttpFailure(candidate.status), candidate.status);
+            }
+            return candidate;
+          }, { signal: request.signal, onRetry: request.onProviderRetry });
+        } catch (error: unknown) {
+          if (request.signal?.aborted) throw error;
+          const compatibility = error instanceof ProviderCompatibilityError
+            ? error
+            : providerCompatibilityError("chatgpt", "transient");
+          recordProviderDiagnostic(request, compatibility.compatibilityKind);
+          throw compatibility;
+        }
+        if (!response.ok) {
+          const errorBody = await response.text();
+          if (firstPartyIdentityRequired(response.status, errorBody)) {
+            recordProviderDiagnostic(request, "first_party_identity");
+            throw new CodexFirstPartyIdentityRequiredError(response.status);
           }
-          return candidate;
-        }, { signal: request.signal, onRetry: request.onProviderRetry });
-      } catch (error: unknown) {
-        if (request.signal?.aborted) throw error;
-        const compatibility = error instanceof ProviderCompatibilityError
-          ? error
-          : providerCompatibilityError("chatgpt", "transient");
-        recordProviderDiagnostic(request, compatibility.compatibilityKind);
-        throw compatibility;
-      }
-      if (!response.ok) {
-        const errorBody = await response.text();
-        if (firstPartyIdentityRequired(response.status, errorBody)) {
-          recordProviderDiagnostic(request, "first_party_identity");
-          throw new CodexFirstPartyIdentityRequiredError(response.status);
+          const kind = classifyProviderHttpFailure(response.status, errorBody);
+          recordProviderDiagnostic(request, kind);
+          throw providerCompatibilityError("chatgpt", kind, response.status);
         }
-        const kind = classifyProviderHttpFailure(response.status, errorBody);
-        recordProviderDiagnostic(request, kind);
-        throw providerCompatibilityError("chatgpt", kind, response.status);
-      }
+        failure.streamStarted();
 
-      let text = "";
-      let responseId = "";
-      const toolCalls: ToolCall[] = [];
-      const completedCallIds = new Set<string>();
-      let streamEventIndex = 0;
-      try {
-        await parseSse(response, (event) => {
-          const index = streamEventIndex;
-          streamEventIndex += 1;
-          const trace = (decision: CodexStreamDiagnostic["decision"]): void => options.onStreamDiagnostic?.(streamDiagnostic(index, event, decision));
-          const type = event.type;
-          if (typeof type !== "string") { trace("critical"); throw providerCompatibilityError("chatgpt", "malformed_response"); }
-          if (type === "response.output_text.delta") {
-            if (typeof event.delta !== "string") { trace("critical"); throw providerCompatibilityError("chatgpt", "malformed_response"); }
-            text += event.delta;
-            onTextDelta?.(event.delta);
-            trace("handled");
-            return;
-          }
-          if (type === "response.output_item.done") {
-            const item = event.item;
-            if (item && typeof item === "object" && !Array.isArray(item)
-              && (["reasoning", "message"] as const).includes((item as Record<string, unknown>).type as "reasoning" | "message")) {
-              trace("ignored");
+        let text = "";
+        let responseId = "";
+        const toolCalls: ToolCall[] = [];
+        const completedCallIds = new Set<string>();
+        let streamEventIndex = 0;
+        try {
+          await parseSse(response, (event) => {
+            const index = streamEventIndex;
+            streamEventIndex += 1;
+            const trace = (decision: CodexStreamDiagnostic["decision"]): void => options.onStreamDiagnostic?.(streamDiagnostic(index, event, decision));
+            const type = event.type;
+            if (typeof type !== "string") { trace("critical"); throw providerCompatibilityError("chatgpt", "malformed_response"); }
+            if (type === "response.output_text.delta") {
+              if (typeof event.delta !== "string") { trace("critical"); throw providerCompatibilityError("chatgpt", "malformed_response"); }
+              text += event.delta;
+              onTextDelta?.(event.delta);
+              trace("handled");
               return;
             }
-          }
-          const toolCall = completedFunctionCall(event);
-          if (toolCall) {
-            if (completedCallIds.has(toolCall.callId)) { trace("critical"); throw providerCompatibilityError("chatgpt", "protocol_drift"); }
-            completedCallIds.add(toolCall.callId);
-            toolCalls.push(toolCall);
-            trace("handled");
-            return;
-          }
-          if (type === "response.completed") {
-            const completed = event.response;
-            if (!completed || typeof completed !== "object" || Array.isArray(completed)
-              || typeof (completed as Record<string, unknown>).id !== "string") { trace("critical"); throw providerCompatibilityError("chatgpt", "malformed_response"); }
-            responseId = (completed as Record<string, unknown>).id as string;
-            trace("handled");
-            return;
-          }
-          if (type === "response.failed") { trace("critical"); throw providerCompatibilityError("chatgpt", "transient"); }
-          if (isIgnorableStreamEvent(type)) { trace(type === "response.output_item.added" ? "waiting" : "ignored"); return; }
-          if (isCriticalUnknownStreamEvent(type)) { trace("critical"); throw providerCompatibilityError("chatgpt", "protocol_drift"); }
-          trace("ignored");
-          recordProviderDiagnostic(request, "protocol_drift");
-        }, request.signal);
+            if (type === "response.output_item.done") {
+              const item = event.item;
+              if (item && typeof item === "object" && !Array.isArray(item)
+                && (["reasoning", "message"] as const).includes((item as Record<string, unknown>).type as "reasoning" | "message")) {
+                trace("ignored");
+                return;
+              }
+            }
+            const toolCall = completedFunctionCall(event);
+            if (toolCall) {
+              if (completedCallIds.has(toolCall.callId)) { trace("critical"); throw providerCompatibilityError("chatgpt", "protocol_drift"); }
+              completedCallIds.add(toolCall.callId);
+              toolCalls.push(toolCall);
+              trace("handled");
+              return;
+            }
+            if (type === "response.completed") {
+              const completed = event.response;
+              if (!completed || typeof completed !== "object" || Array.isArray(completed)
+                || typeof (completed as Record<string, unknown>).id !== "string") { trace("critical"); throw providerCompatibilityError("chatgpt", "malformed_response"); }
+              responseId = (completed as Record<string, unknown>).id as string;
+              trace("handled");
+              return;
+            }
+            if (type === "response.failed") { trace("critical"); throw providerCompatibilityError("chatgpt", "transient"); }
+            if (isIgnorableStreamEvent(type)) { trace(type === "response.output_item.added" ? "waiting" : "ignored"); return; }
+            if (isCriticalUnknownStreamEvent(type)) { trace("critical"); throw providerCompatibilityError("chatgpt", "protocol_drift"); }
+            trace("ignored");
+            recordProviderDiagnostic(request, "protocol_drift");
+          }, request.signal);
+        } catch (error: unknown) {
+          if (request.signal?.aborted) throw error;
+          const compatibility = error instanceof ProviderCompatibilityError
+            ? error
+            : providerCompatibilityError("chatgpt", "malformed_response");
+          recordProviderDiagnostic(request, compatibility.compatibilityKind);
+          throw compatibility;
+        }
+        if (!responseId) {
+          recordProviderDiagnostic(request, "malformed_response");
+          throw providerCompatibilityError("chatgpt", "malformed_response");
+        }
+        if (text) {
+          conversation.push({
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text }],
+          });
+        }
+        lastToolCalls = toolCalls;
+        return {
+          responseId,
+          text,
+          textWasStreamed: true,
+          toolCalls,
+          continuationState: continuationState(compactConversation(conversation, request.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS)),
+        };
       } catch (error: unknown) {
-        if (request.signal?.aborted) throw error;
-        const compatibility = error instanceof ProviderCompatibilityError
-          ? error
-          : providerCompatibilityError("chatgpt", "malformed_response");
-        recordProviderDiagnostic(request, compatibility.compatibilityKind);
-        throw compatibility;
+        throw failure.finish(error, request.signal?.aborted);
       }
-      if (!responseId) {
-        recordProviderDiagnostic(request, "malformed_response");
-        throw providerCompatibilityError("chatgpt", "malformed_response");
-      }
-      if (text) {
-        conversation.push({
-          type: "message",
-          role: "assistant",
-          content: [{ type: "output_text", text }],
-        });
-      }
-      lastToolCalls = toolCalls;
-      return {
-        responseId,
-        text,
-        textWasStreamed: true,
-        toolCalls,
-        continuationState: continuationState(compactConversation(conversation, request.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS)),
-      };
     },
   };
 }

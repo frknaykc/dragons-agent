@@ -8,12 +8,17 @@ export type RuntimeToolCallDiagnostic = {
   durationMilliseconds: number;
 };
 
+export type RuntimeDiagnosticIdentity = { provider?: string; model?: string };
+
 /** A bounded final summary. It deliberately contains no prompts, arguments, results, headers, credentials, or provider objects. */
 export type RuntimeDiagnosticsSummary = {
   runId: string;
   sessionId?: string;
   provider?: string;
   model?: string;
+  /** Safe original identity and last three adopted identities, present only after a transition. */
+  initialIdentity?: RuntimeDiagnosticIdentity;
+  identityTransitions?: RuntimeDiagnosticIdentity[];
   startedAt: string;
   endedAt: string;
   durationMilliseconds: number;
@@ -105,6 +110,25 @@ export class RuntimeDiagnosticsRun {
     };
   }
 
+  /** Call only after identity adoption commits, before target I/O; never pass errors or context. */
+  recordIdentityTransition(identity: RuntimeDiagnosticIdentity): void {
+    if (this.finalSummary) return;
+    this.summary.initialIdentity ??= {
+      ...(this.summary.provider ? { provider: this.summary.provider } : {}),
+      ...(this.summary.model ? { model: this.summary.model } : {}),
+    };
+    const provider = safeLabel(identity.provider);
+    const model = safeLabel(identity.model);
+    // Unsafe or absent labels must remove the old identity, not leave a stale attribution.
+    delete this.summary.provider;
+    delete this.summary.model;
+    const adopted = { ...(provider ? { provider } : {}), ...(model ? { model } : {}) };
+    Object.assign(this.summary, adopted);
+    const transitions = this.summary.identityTransitions ??= [];
+    transitions.push(adopted);
+    if (transitions.length > 3) transitions.shift();
+  }
+
   recordModelTurn(): void { if (!this.finalSummary) this.summary.modelTurnCount += 1; }
   recordProviderRetry(): void { if (!this.finalSummary) this.summary.providerRetryCount += 1; }
   recordProviderDiagnostic(kind: ProviderDiagnosticKind): void {
@@ -183,6 +207,9 @@ export class RuntimeDiagnosticsService {
 export function formatRuntimeDiagnostics(summary: RuntimeDiagnosticsSummary | undefined): string {
   if (!summary) return "No completed runtime diagnostics.\n";
   const identity = [summary.provider, summary.model].filter((value): value is string => Boolean(value)).join("/");
+  const formatIdentity = (value: RuntimeDiagnosticIdentity): string =>
+    [value.provider, value.model].filter((label): label is string => Boolean(label)).join("/") || "unknown";
+  const fallbackHistory = summary.identityTransitions?.map(formatIdentity) ?? [];
   const tools = summary.toolCalls.length === 0
     ? "none"
     : summary.toolCalls.map((tool) => `${tool.name ?? "tool"}:${tool.durationMilliseconds}ms`).join(", ");
@@ -193,5 +220,6 @@ export function formatRuntimeDiagnostics(summary: RuntimeDiagnosticsSummary | un
     `Run ${summary.runId} [${summary.status}]${identity ? ` ${identity}` : ""}`,
     `duration ${summary.durationMilliseconds}ms · turns ${summary.modelTurnCount} · tools ${summary.toolCallCount} (${tools}) · retries ${summary.providerRetryCount} · timeouts ${summary.timeoutCount}${providerDiagnostics ? ` · provider ${providerDiagnostics}` : ""}`,
     `MCP ${summary.mcpCallCount} · subagents ${summary.subagentCount} · orchestration ${summary.orchestrationCount} · background ${summary.backgroundTaskCount} · cancellation ${summary.cancellationState}${summary.sessionId ? ` · session ${summary.sessionId}` : ""}`,
+    ...(summary.initialIdentity ? [`identity initial ${formatIdentity(summary.initialIdentity)} · fallback ${fallbackHistory.join(" → ") || "none"}`] : []),
   ].join("\n");
 }

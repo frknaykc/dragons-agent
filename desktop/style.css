@@ -1,12 +1,20 @@
 :root { color-scheme: light; font-family: -apple-system, 'Helvetica Neue', sans-serif; color: #2f3437; background: #f7f6f3; }
 * { box-sizing: border-box; }
-body { margin: 0; padding: 28px 36px; }
-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #deddd8; margin-bottom: 24px; }
+html { height: 100%; }
+body { margin: 0; padding: 16px 24px; height: 100%; display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
+body > :not(main) { flex-shrink: 0; }
+header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #deddd8; }
 small { font-size: 10px; letter-spacing: .14em; color: #787774; }
-h1 { font: 32px Georgia, serif; margin: 8px 0 20px; letter-spacing: -.03em; }
+h1 { font: 28px Georgia, serif; margin: 4px 0 10px; letter-spacing: -.03em; }
 h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin: 0 0 16px; }
 #status { font-size: 12px; background: #edf3ec; padding: 6px 10px; }
 .setup { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+.setup-help, #reasoning-status { color: #787774; font-size: 11px; margin: 0; overflow-wrap: anywhere; }
+.reasoning-setup { display: flex; align-items: end; flex-wrap: wrap; gap: 8px; }
+#reasoning-status { flex: 1 1 240px; max-height: 3em; overflow: auto; }
+#reasoning { max-width: min(320px, 80vw); }
+#model { width: 210px; }
+.setup select { max-width: 240px; }
 label { display: flex; flex-direction: column; font-size: 12px; gap: 6px; }
 input, select, textarea { font: inherit; color: inherit; border: 1px solid #cfcec8; background: white; border-radius: 4px; padding: 9px; }
 input { width: 165px; }
@@ -15,16 +23,40 @@ button:hover { background: #ecebe6; }
 button:disabled { opacity: .45; cursor: default; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid #346538; outline-offset: 3px; }
 #send { background: #2f3437; color: white; }
-#session { color: #787774; font: 11px ui-monospace, monospace; overflow-wrap: anywhere; margin: 18px 0; }
-main { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; height: 300px; }
-.conversation, aside { padding: 20px; border: 1px solid #eaeaea; background: white; min-width: 0; overflow: auto; border-radius: 8px; }
+#session { color: #787774; font: 11px ui-monospace, monospace; overflow-wrap: anywhere; margin: 0; max-height: 3em; overflow: auto; }
+main { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; flex: 1 1 0; min-height: 0; }
+.conversation, aside { padding: 16px; border: 1px solid #eaeaea; background: white; min-width: 0; min-height: 0; overflow: auto; border-radius: 8px; }
 pre, #messages p { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; }
 #messages .user { border-left: 2px solid #cfcec8; padding-left: 12px; color: #787774; }
 #messages .assistant { margin-bottom: 24px; }
-#approval { border: 1px solid #cfbf9b; background: #fbf3db; padding: 16px; margin-top: 16px; font-size: 13px; }
-#approval p { margin: 8px 0; }
-#composer { margin-top: 20px; }
-textarea { width: 100%; resize: vertical; margin: 8px 0; }
+#approval { border: 1px solid #cfbf9b; background: #fbf3db; padding: 12px; max-height: 25vh; overflow: auto; font-size: 13px; }
+#approval p { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+#composer { position: relative; }
+textarea { display: block; width: 100%; height: clamp(64px, 12vh, 120px); resize: none; overflow: auto; margin: 8px 0; }
 #composer div { display: flex; gap: 8px; }
-#error { color: #9f2f2d; font-size: 13px; min-height: 20px; }
-@media (max-width: 720px) { body { padding: 20px; } main { grid-template-columns: 1fr; height: auto; } .conversation { height: 230px; } aside { max-height: 130px; } }
+#composer #slash-choices { position: absolute; bottom: 100%; left: 0; right: 0; z-index: 1; background: #f7f6f3; border: 1px solid #cfcec8; border-radius: 4px; padding: 4px; flex-direction: column; max-height: min(220px, 35vh); overflow-y: auto; gap: 2px; }
+#composer #slash-choices[hidden] { display: none; }
+#slash-choices button { text-align: left; }
+#slash-choices [aria-selected="true"] { background: #edf3ec; border-color: #346538; }
+#error { color: #9f2f2d; font-size: 13px; margin: 0; max-height: 3em; overflow: auto; }
+#error:empty { display: none; }
+@media (max-width: 720px) { body { padding: 12px; gap: 8px; } main { grid-template-columns: 1fr; grid-template-rows: minmax(0, 2fr) minmax(0, 1fr); gap: 8px; } }
+@media (max-height: 600px) {
+  body { padding: 10px 16px; gap: 6px; }
+  header small { display: none; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  input, select, button { padding: 6px 8px; }
+  .setup { gap: 6px; }
+  textarea { height: 64px; margin: 4px 0; }
+  #approval { padding: 8px; }
+}
+@media (max-height: 420px) { body { overflow: auto; } main { flex: none; height: 160px; } }
+/* The ephemeral secret page is document flow, not the application workspace grid. */
+body.secret-page { display: block; height: auto; min-height: 100%; padding: 16px; overflow: auto; }
+.secret-page main { display: block; height: auto; min-height: 0; }
+.secret-page h1 { margin: 0 0 10px; font-size: 22px; }
+.secret-page main > p { margin: 0 0 14px; font-size: 13px; line-height: 1.4; }
+.secret-page form { display: grid; grid-template-columns: auto 1fr; gap: 8px; }
+.secret-page label, .secret-page input, .secret-page #error { grid-column: 1 / -1; }
+.secret-page input { width: 100%; min-width: 0; }
+.secret-page button { justify-self: start; }

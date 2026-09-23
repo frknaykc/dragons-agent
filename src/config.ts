@@ -1,3 +1,6 @@
+import { parseLspConfig, type LspConfig } from "./lsp-diagnostics.js";
+import { parseReasoningPreferences, type ReasoningPreferences } from "./provider/reasoning.js";
+import { isCatalogueModelId } from "./provider/model-catalogue.js";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -5,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { parseMcpServerConfigs, type McpServerConfig } from "./mcp-client.js";
 import { joinPlatformPath } from "./platform-path.js";
 import { DEFAULT_PROVIDER_IDS, type ProviderId } from "./provider/registry.js";
+import { isApiKeyProvider, isApiKeySlot, type ApiKeyProvider } from "./provider/api-key-auth.js";
 
 export type DragonsConfig = {
   version?: 1;
@@ -12,6 +16,11 @@ export type DragonsConfig = {
   /** Legacy global model value retained for existing local configuration. */
   model?: string;
   models?: Partial<Record<ProviderId, string>>;
+  /** Selected non-default OS credential slot per API-key provider; values are references, never keys. */
+  apiKeySlots?: Partial<Record<ApiKeyProvider, string>>;
+  reasoning?: ReasoningPreferences;
+  /** Explicit consent: fallback may disclose request/context to the listed providers. */
+  fallback?: { enabled: boolean; consent: "allow-context-sharing"; targets: { provider: ProviderId; model: string }[] };
   /** Explicit credential-free OpenAI-compatible local-runtime endpoint. */
   localEndpoint?: string;
   maxTurns?: number;
@@ -21,10 +30,11 @@ export type DragonsConfig = {
   retryMaxAttempts?: number;
   /** Explicit, app-owned stdio or Streamable HTTP MCP servers. Never auto-connected or persisted in sessions. */
   mcpServers?: McpServerConfig[];
+  lsp?: LspConfig;
 };
 
 export type ConfigPathOptions = { platform?: NodeJS.Platform; homeDirectory?: string; xdgConfigHome?: string; appData?: string };
-const ALLOWED = new Set<keyof DragonsConfig>(["version", "provider", "model", "models", "localEndpoint", "maxTurns", "maxToolOutputBytes", "shellTimeoutMilliseconds", "contextBudgetChars", "retryMaxAttempts", "mcpServers"]);
+const ALLOWED = new Set<keyof DragonsConfig>(["version", "provider", "model", "models", "apiKeySlots", "reasoning", "fallback", "localEndpoint", "maxTurns", "maxToolOutputBytes", "shellTimeoutMilliseconds", "contextBudgetChars", "retryMaxAttempts", "mcpServers", "lsp"]);
 
 export function getDragonsConfigPath(options: ConfigPathOptions = {}): string {
   const platform = options.platform ?? process.platform;
@@ -58,18 +68,53 @@ export function parseDragonsConfig(value: unknown, providerIds: readonly Provide
     config.version = 1;
   }
   if (source.provider !== undefined) { if (typeof source.provider !== "string" || !providerIds.includes(source.provider)) throw new Error("Dragons config provider must be a registered provider."); config.provider = source.provider; }
-  if (source.model !== undefined) { if (typeof source.model !== "string" || !source.model.trim()) throw new Error("Dragons config model must be a non-empty string."); config.model = source.model.trim(); }
+  if (source.model !== undefined) { if (!isCatalogueModelId(source.model)) throw new Error("Dragons config model must be a bounded safe exact model ID."); config.model = source.model; }
   if (source.models !== undefined) {
     if (!source.models || typeof source.models !== "object" || Array.isArray(source.models)) throw new Error("Dragons config models must be an object.");
     const models = source.models as Record<string, unknown>;
     for (const [provider, model] of Object.entries(models)) {
-      if (!providerIds.includes(provider) || typeof model !== "string" || !model.trim()) {
+      if (!providerIds.includes(provider) || !isCatalogueModelId(model)) {
         throw new Error("Dragons config models must contain non-empty supported provider model values.");
       }
     }
-    config.models = Object.fromEntries(Object.entries(models).map(([provider, model]) => [provider, (model as string).trim()])) as DragonsConfig["models"];
+    config.models = { ...models } as DragonsConfig["models"];
   }
+  if (source.apiKeySlots !== undefined) {
+    if (!source.apiKeySlots || typeof source.apiKeySlots !== "object" || Array.isArray(source.apiKeySlots)) throw new Error("Dragons config apiKeySlots must be an object.");
+    const slots = source.apiKeySlots as Record<string, unknown>;
+    for (const [provider, slot] of Object.entries(slots)) {
+      if (!providerIds.includes(provider) || !isApiKeyProvider(provider) || !isApiKeySlot(slot)) {
+        throw new Error("Dragons config apiKeySlots must contain registered API-key providers and safe slot IDs.");
+      }
+    }
+    config.apiKeySlots = { ...slots } as DragonsConfig["apiKeySlots"];
+  }
+  if (source.fallback !== undefined) {
+    const f = source.fallback as Record<string, unknown>;
+    if (!f || typeof f !== "object" || Array.isArray(f)
+      || Object.keys(f).some((key) => !["enabled", "consent", "targets"].includes(key))
+      || typeof f.enabled !== "boolean" || f.consent !== "allow-context-sharing"
+      || !Array.isArray(f.targets) || f.targets.length > 3 || (f.enabled && !f.targets.length)) {
+      throw new Error("Dragons config fallback requires explicit context-sharing consent and at most three targets.");
+    }
+    const seen = new Set<string>();
+    const targets = f.targets.map((target: unknown) => {
+      const t = target as Record<string, unknown>;
+      if (!t || typeof t !== "object" || Array.isArray(t)
+        || Object.keys(t).some((key) => key !== "provider" && key !== "model")
+        || typeof t.provider !== "string" || !providerIds.includes(t.provider) || !isCatalogueModelId(t.model)) {
+        throw new Error("Dragons config fallback target must be an exact registered provider/model ID.");
+      }
+      const key = JSON.stringify([t.provider, t.model]);
+      if (seen.has(key)) throw new Error("Dragons config fallback contains duplicate targets.");
+      seen.add(key);
+      return { provider: t.provider, model: t.model as string };
+    });
+    config.fallback = { enabled: f.enabled, consent: "allow-context-sharing", targets };
+  }
+  if (source.reasoning !== undefined) config.reasoning = parseReasoningPreferences(source.reasoning, providerIds);
   if (source.localEndpoint !== undefined) config.localEndpoint = validLocalEndpoint(source.localEndpoint);
+  if (source.lsp !== undefined) config.lsp = parseLspConfig(source.lsp);
   if (source.mcpServers !== undefined) config.mcpServers = parseMcpServerConfigs(source.mcpServers);
   for (const key of ["maxTurns", "maxToolOutputBytes", "shellTimeoutMilliseconds", "contextBudgetChars", "retryMaxAttempts"] as const) if (source[key] !== undefined) config[key] = positiveInteger(source[key], key);
   return config;

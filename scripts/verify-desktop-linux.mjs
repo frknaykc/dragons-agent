@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { mkdtemp, writeFile, unlink, rmdir, access, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { assertNoDebIntegration, pathExists as exists } from './desktop-linux-acceptance.mjs';
+import { assertNoDebIntegration, pathExists as exists } from '../tests/acceptance/desktop-linux-acceptance.mjs';
 const exec = promisify(execFile);
 const mode = process.argv[2];
 const artifact = resolve(process.argv[3] || '.');

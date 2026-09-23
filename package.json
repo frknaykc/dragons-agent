@@ -46,9 +46,9 @@
     "!dist/mcp-official-sdk-server.d.ts"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc --noEmit",
-    "test": "pnpm build && node --test dist/*.test.js dist/provider/*.test.js scripts/desktop-*.test.mjs",
+    "build": "pnpm clean && tsc -p tsconfig.json",
+    "typecheck": "pnpm build && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "pnpm build:tests && node scripts/run-tests.mjs",
     "dragons": "pnpm build && node dist/cli.js",
     "desktop": "pnpm build && electron desktop/main.mjs",
     "desktop:pack": "pnpm build && electron-builder --config electron-builder.json --dir --publish never",
@@ -59,14 +59,16 @@
     "remote": "pnpm build && node scripts/serve-remote.mjs",
     "acceptance:desktop": "pnpm build && electron scripts/verify-desktop-smoke.mjs",
     "acceptance:shared": "pnpm build && electron scripts/verify-desktop-smoke.mjs --shared",
-    "smoke:live": "pnpm build && node dist/live-smoke.js",
-    "acceptance:openai": "pnpm build && node dist/acceptance-openai.js",
-    "acceptance:chatgpt": "pnpm build && node dist/acceptance-chatgpt.js",
-    "acceptance:provider": "pnpm build && node dist/acceptance-live.js",
-    "acceptance:mcp": "pnpm build && node --test dist/m32-mcp-acceptance.test.js",
+    "smoke:live": "pnpm build:tests && node .test-build/acceptance/live-smoke.js",
+    "acceptance:openai": "pnpm build:tests && node .test-build/acceptance/acceptance-openai.js",
+    "acceptance:chatgpt": "pnpm build:tests && node .test-build/acceptance/acceptance-chatgpt.js",
+    "acceptance:provider": "pnpm build:tests && node .test-build/acceptance/acceptance-live.js",
+    "acceptance:mcp": "pnpm build:tests && node --test .test-build/acceptance/m32-mcp-acceptance.test.js",
     "verify:package": "pnpm build && node scripts/verify-package.mjs",
     "release:check": "node scripts/release-check.mjs",
-    "release:pack": "pnpm release:check && pnpm pack"
+    "release:pack": "pnpm release:check && pnpm pack",
+    "clean": "node scripts/clean-build.mjs",
+    "build:tests": "pnpm build && node scripts/clean-build.mjs tests && tsc -p tsconfig.test.json"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "2.0.0",

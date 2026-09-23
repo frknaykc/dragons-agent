@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 // Bounded diagnostic experiment for the intermittent native Windows CI failure.
 // Each child uses the existing isolated deterministic fixture; never print raw TAP.
-const target = fileURLToPath(new URL('../dist/m60-review-regressions.test.js', import.meta.url));
+const target = fileURLToPath(new URL('../.test-build/integration/m60-review-regressions.test.js', import.meta.url));
 const runs = 64;
 const concurrency = 8;
 let next = 0;

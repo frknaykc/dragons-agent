@@ -1,3 +1,62 @@
+
+/** Safe, in-process evidence only; compatibilityKind and legacy retry heuristics
+ * are diagnostic contracts, NOT permission to replay a request or change providers.
+ * Even pre-stream HTTP failures require caller policy/continuation checks.
+ */
+export type ProviderRequestFailure = Readonly<{
+  phase: "pre-stream" | "stream-started";
+  source: "http" | "unknown";
+  httpRetryable: boolean;
+  status?: number;
+  retryAfterMilliseconds?: number;
+}>;
+
+const requestFailures = new WeakMap<object, ProviderRequestFailure>();
+
+export function getProviderRequestFailure(error: unknown): ProviderRequestFailure | undefined {
+  return error !== null && typeof error === "object" ? requestFailures.get(error) : undefined;
+}
+
+export function copyProviderRequestFailure<T>(from: unknown, to: T): T {
+  const failure = getProviderRequestFailure(from);
+  if (failure && to !== null && typeof to === "object") requestFailures.set(to, failure);
+  return to;
+}
+
+/** One instance per respond call. Mark acquisition, not first text/tool delta. */
+export class ProviderRequestFailureBoundary {
+  private started = false;
+  private http?: { status: number; retryAfterMilliseconds?: number };
+
+  beginAttempt(): void { this.http = undefined; }
+
+  // Call only with a fetch Response or a verified SDK APIError, never duck-typed errors.
+  httpFailure(status: number | undefined, retryAfter: string | null | undefined): void {
+    if (status === undefined || !Number.isInteger(status) || status < 400 || status > 599) return;
+    // Only bounded delta-seconds are accepted. Dates/untrusted free-form strings
+    // are deliberately omitted rather than guessed or retained.
+    const seconds = typeof retryAfter === "string" && /^\d{1,5}$/.test(retryAfter) ? Number(retryAfter) : undefined;
+    this.http = { status, ...(seconds !== undefined && seconds <= 86400 ? { retryAfterMilliseconds: seconds * 1000 } : {}) };
+  }
+
+  streamStarted(): void { this.started = true; this.http = undefined; }
+
+  finish<T>(error: T, cancelled = false): T {
+    if (error !== null && typeof error === "object") {
+      const inherited = getProviderRequestFailure(error);
+      const started = this.started || inherited?.phase === "stream-started";
+      const http = started || cancelled || isAbortError(error) ? undefined : this.http;
+      requestFailures.set(error, Object.freeze({
+        phase: started ? "stream-started" : "pre-stream",
+        source: http ? "http" : "unknown",
+        httpRetryable: Boolean(http && (http.status === 408 || http.status === 409 || http.status === 425 || http.status === 429 || http.status >= 500)),
+        ...http,
+      }));
+    }
+    return error;
+  }
+}
+
 export type ProviderCompatibilityKind =
   | "authentication"
   | "entitlement"

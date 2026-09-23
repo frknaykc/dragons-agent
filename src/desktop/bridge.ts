@@ -1,8 +1,16 @@
+import { validateLspApproval } from "../lsp-approval.js";
 import type {
   DragonsRuntime,
   RuntimeEvent,
   RuntimeRunHandle,
 } from "../runtime.js";
+import { DesktopUpdateController } from "./update-controller.js";
+import { RuntimeTextRedactor } from "../runtime-redaction.js";
+import { isCheckpointCommand } from "../checkpoint.js";
+import { formatSlashHelp } from "../slash-commands.js";
+import { formatProviderList, loginSetup, slashChoices } from "../slash-choices.js";
+import { isApiKeyProvider, isApiKeySlot, type ApiKeyProvider, type SecretPrompt } from "../provider/api-key-auth.js";
+import { isSafeProfileName } from "../profiles.js";
 import { observeRuntimeRun } from "../runtime-observation.js";
 
 export const MAX_DESKTOP_CONTENT_CHARACTERS = 64_000;
@@ -10,6 +18,9 @@ export const MAX_DESKTOP_MESSAGE_BYTES = 256_000;
 
 /** Decoded JSON only; unknown keys, nested values and session-wide approval are rejected. */
 export type DesktopCommand =
+  | { type: "choices"; content: string; provider?: string }
+  | { type: "slash"; content: string }
+  | { type: "update_status" | "update_check" | "update_prepare" | "update_cancel" }
   | { type: "providers" }
   | { type: "create"; provider?: string; model?: string }
   | { type: "resume"; sessionId: string }
@@ -73,6 +84,13 @@ function commandFrom(input: unknown): DesktopCommand | undefined {
   const sessionId = (): boolean => sessionIdPattern.test(copy.sessionId ?? "");
   let valid = false;
   switch (copy.type) {
+    case "choices":
+      valid = exact(["type", "content"], ["provider"]) && copy.content!.length <= 8000 && (copy.provider === undefined || providerPattern.test(copy.provider));
+      break;
+    case "update_status":
+    case "update_check":
+    case "update_prepare":
+    case "update_cancel":
     case "providers":
     case "status":
     case "background":
@@ -86,6 +104,9 @@ function commandFrom(input: unknown): DesktopCommand | undefined {
       break;
     case "resume":
       valid = exact(["type", "sessionId"]) && sessionId();
+      break;
+    case "slash":
+      valid = exact(["type", "content"]) && !!copy.content?.trim().startsWith("/");
       break;
     case "send":
       valid = exact(["type", "content"], ["sessionId"]) && !!copy.content?.trim()
@@ -121,6 +142,23 @@ type OwnedRun = {
  * close is idempotent: stop admissions/events synchronously, cancel and dispose the runtime.
  * In-flight store requests may finish later, but cannot reattach a session or publish events.
  */
+export type DesktopLocalControls = {
+  requestSecret?: SecretPrompt;
+  loginApiKey?: (provider: ApiKeyProvider, slot?: string) => Promise<boolean>;
+  listApiKeySlots?: (provider: ApiKeyProvider) => Promise<string>;
+  removeApiKeySlot?: (provider: ApiKeyProvider, slot: string) => Promise<void>;
+  reasoning?: (provider: string, model: string, level?: string) => Promise<string>;
+  sessions(): Promise<string>;
+  defaultProvider?: string;
+  auth(provider?: string): Promise<string>;
+  login(): Promise<string>;
+  logout(provider?: string): Promise<string>;
+  profiles(): Promise<string>;
+  createProfile(name: string): Promise<string>;
+  selectProfile(name: string): Promise<void>;
+  close(): Promise<void>;
+};
+
 export class DesktopBridge {
   readonly #runtime: DragonsRuntime;
   readonly #emit: (event: RuntimeEvent) => void;
@@ -130,7 +168,7 @@ export class DesktopBridge {
   #closed = false;
   #closing?: Promise<void>;
 
-  constructor(runtime: DragonsRuntime, emit: (event: RuntimeEvent) => void) {
+  constructor(runtime: DragonsRuntime, emit: (event: RuntimeEvent) => void, private readonly local?: DesktopLocalControls, private readonly updates = new DesktopUpdateController()) {
     this.#runtime = runtime;
     this.#emit = emit;
   }
@@ -140,6 +178,25 @@ export class DesktopBridge {
     let command: DesktopCommand | undefined;
     try { command = commandFrom(input); } catch { /* Non-JSON/proxy input also fails closed. */ }
     if (!command) return failure("INVALID_MESSAGE");
+
+    if (command.type === "update_status") return success(this.updates.status());
+    if (command.type === "update_prepare") return success(this.updates.prepare());
+    if (command.type === "update_check") return success(this.updates.check());
+    if (command.type === "update_cancel") return success(this.updates.cancel());
+
+    if (command.type === "choices") {
+      try {
+        // Model and reasoning choices belong to the attached host session.
+        const session = (command.content.startsWith("/reasoning ") || command.content.startsWith("/model ")) && this.#sessionId
+          ? (await this.#runtime.status({ sessionId: this.#sessionId })).session : undefined;
+        if (this.#closed) return failure("CLOSED");
+        return success(slashChoices(command.content, ["/help", "/checkpoint", "/rollback", "/new", "/resume", "/status", "/provider", "/model", ...(this.local?.reasoning ? ["/reasoning"] : []), ...(this.local ? ["/sessions", "/login", "/logout", "/auth", "/profile"] : [])], this.#runtime.providers(), session?.provider ?? command.provider, session?.model));
+      } catch { return failure("RUNTIME_ERROR"); }
+    }
+    if (command.type === "slash" && isCheckpointCommand(command.content)) command = { type: "send", content: command.content };
+    if (command.type === "slash" || (command.type === "send" && command.content.trimStart().startsWith("/") && !isCheckpointCommand(command.content))) {
+      return this.#slash(command.content);
+    }
 
     // Controls are synchronous and remain available while status/admission/run work awaits.
     try {
@@ -228,6 +285,127 @@ export class DesktopBridge {
     }
   }
 
+  async #slash(content: string): Promise<DesktopBridgeReply> {
+    const [name, ...args] = content.trim().split(/\s+/);
+    const text = (value: string) => {
+      const redactor = new RuntimeTextRedactor();
+      return success({ kind: "text", text: (redactor.push(value) + redactor.finish()).slice(0, 32000) });
+    };
+    const supported = ["/help", "/checkpoint", "/rollback", "/new", "/resume", "/status", "/provider", "/model", ...(this.local?.reasoning ? ["/reasoning"] : []), ...(this.local ? ["/sessions", "/login", "/logout", "/auth", "/profile"] : [])];
+    if (name === "/help") return text(formatSlashHelp(args.join(" "), supported));
+    if (name === "/reasoning" && this.local?.reasoning) {
+      if (this.#admitting || this.#active) return failure("BUSY");
+      if (!this.#sessionId) return failure("NO_SESSION");
+      if (args.length > 1) return text("Usage: /reasoning [default|level]");
+      this.#admitting = true;
+      try {
+        const status = await this.#runtime.status({ sessionId: this.#sessionId });
+        if (this.#closed) return failure("CLOSED");
+        if (!status.session) return failure("NO_SESSION");
+        return text(await this.local.reasoning(status.session.provider, status.session.model, args[0]));
+      } catch { return text("Unable to set reasoning: unsupported level or profile could not be saved."); }
+      finally { this.#admitting = false; }
+    }
+    if (name === "/provider" || name === "/model") {
+      if (args.length > 1) return text(`Usage: ${name} <id>`);
+      const status = this.#sessionId ? await this.#runtime.status({ sessionId: this.#sessionId }) : undefined;
+      if (!args.length) return text(name === "/provider" ? formatProviderList(this.#runtime.providers(), status?.session?.provider) : `Current model: ${status?.session?.model ?? "none"}. Type /model followed by a space for the adapter default (access not verified).`);
+      const reply = await this.request(name === "/provider" ? { type: "create", provider: args[0] } : { type: "create", ...(status?.session?.provider ? { provider: status.session.provider } : {}), model: args[0] });
+      return reply.ok ? success({ kind: "session", session: reply.value }) : reply;
+    }
+    if (["/status", "/session"].includes(name!) && !args.length) {
+      const reply = await this.request({ type: "status" });
+      return reply.ok ? text(JSON.stringify(reply.value, null, 2)) : reply;
+    }
+    if (["/new", "/reset", "/resume"].includes(name!)) {
+      if ((name === "/resume" && (args.length !== 1 || !sessionIdPattern.test(args[0]!))) || (name !== "/resume" && args.length)) return text("Usage: /new or /resume <id>");
+      const reply = await this.request(name === "/resume" ? { type: "resume", sessionId: args[0] } : { type: "create" });
+      return reply.ok ? success({ kind: "session", session: reply.value }) : reply;
+    }
+    if (!["/sessions", "/auth", "/login", "/logout", "/profile"].includes(name!)) return text("Unknown or unavailable command. Run /help.");
+    if (!this.local) return text("This command is unavailable on remote connections. Run /help.");
+    if (name === "/login" && args.length === 2 && args[0] === "list" && isApiKeyProvider(args[1]) && this.local.listApiKeySlots) {
+      if (this.#admitting || this.#active) return failure("BUSY");
+      this.#admitting = true;
+      try { return this.#closed ? failure("CLOSED") : text(await this.local.listApiKeySlots(args[1]!)); }
+      catch { return failure(this.#closed ? "CLOSED" : "RUNTIME_ERROR"); }
+      finally { this.#admitting = false; }
+    }
+    if (name === "/login" && ((args.length === 1 && isApiKeyProvider(args[0])) || (args.length === 2 && isApiKeyProvider(args[0]) && isApiKeySlot(args[1]))) && this.local.loginApiKey && this.local.requestSecret) {
+      if (this.#admitting || this.#active) return failure("BUSY");
+      this.#admitting = true;
+      try {
+        const saved = await this.local.loginApiKey(args[0]!, args[1]);
+        if (this.#closed) return failure("CLOSED");
+        if (!saved) return text("API-key sign-in cancelled.");
+        await this.close();
+        return success({ kind: "restart", text: "API key saved in profile OS credential storage. Restart Dragons to use it. Provider access not yet verified." });
+      } catch { return failure(this.#closed ? "CLOSED" : "RUNTIME_ERROR"); }
+      finally { this.#admitting = false; }
+    }
+    if (name === "/login") {
+      const setup = args.length > 1 ? "Usage: /login <provider>. Never include credentials." : loginSetup(args[0]);
+      if (setup) return text(setup);
+    }
+    if (name === "/logout" && args.length === 2 && isApiKeyProvider(args[0]) && isApiKeySlot(args[1]) && this.local.removeApiKeySlot) {
+      if (this.#admitting || this.#active) return failure("BUSY");
+      this.#admitting = true;
+      try {
+        await this.close();
+        await this.local.removeApiKeySlot(args[0], args[1]);
+        return success({ kind: "restart", text: "Named API-key slot removed. Restart Dragons to continue." });
+      } catch { return failure("RUNTIME_ERROR"); }
+      finally { this.#admitting = false; }
+    }
+    if (name === "/auth" || name === "/logout") {
+      const providerArgs = name === "/auth" && args[0] === "status" ? args.slice(1) : args;
+      if (providerArgs.length > 1) return text(name === "/auth" ? "Usage: /auth [status] [provider]" : "Usage: /logout [provider]");
+      if (this.#admitting || this.#active) return failure("BUSY");
+      this.#admitting = true;
+      try {
+        const session = !providerArgs.length && this.#sessionId ? (await this.#runtime.status({ sessionId: this.#sessionId })).session : undefined;
+        if (this.#closed) return failure("CLOSED");
+        const provider = providerArgs[0] ?? session?.provider ?? this.local.defaultProvider ?? "chatgpt";
+        if (provider !== "chatgpt" && !isApiKeyProvider(provider)) return text("This provider has no supported stored login.");
+        if (name === "/auth") {
+          const output = await this.local.auth(provider);
+          return this.#closed ? failure("CLOSED") : text(output);
+        }
+        if (isApiKeyProvider(provider)) {
+          // Quiesce cached credential-bearing adapters before removal, including partial failures.
+          await this.close();
+          await this.local.logout(provider);
+          return success({ kind: "restart", text: "Provider API key removed from profile OS credential storage. Restart Dragons to continue. Environment credentials remain unchanged." });
+        }
+        const output = await this.local.logout(provider);
+        return this.#closed ? failure("CLOSED") : text(output);
+      } catch { return failure("RUNTIME_ERROR"); }
+      finally { this.#admitting = false; }
+    }
+    if (!["/profile", "/login"].includes(name!) && args.length) return text(`Usage: ${name}`);
+    const action = args[0] ?? "list";
+    if (name === "/profile" && !((action === "list" && args.length <= 1) || (["create", "select"].includes(action) && args.length === 2 && isSafeProfileName(args[1]!)))) return text("Usage: /profile [list|create <name>|select <name>]");
+    if (this.#admitting || this.#active) return failure("BUSY");
+    this.#admitting = true;
+    try {
+      let output: string;
+      switch (name) {
+        case "/sessions": output = await this.local.sessions(); break;
+        case "/login": output = await this.local.login(); break;
+        default:
+          if (action === "select") {
+            // Stop admissions synchronously before changing persistent profile selection.
+            await this.close();
+            await this.local.selectProfile(args[1]!);
+            return success({ kind: "restart", text: "Profile selected. Restart Dragons Desktop to continue." });
+          }
+          output = action === "create" ? await this.local.createProfile(args[1]!) : await this.local.profiles();
+      }
+      return this.#closed ? failure("CLOSED") : text(output);
+    } catch { return failure("RUNTIME_ERROR"); }
+    finally { this.#admitting = false; }
+  }
+
   close(): Promise<void> {
     if (this.#closing) return this.#closing;
     this.#closed = true;
@@ -237,8 +415,12 @@ export class DesktopBridge {
     run?.approvals.clear();
     // Defer effects one microtask so reentrant/concurrent close calls share the same promise.
     this.#closing = Promise.resolve().then(async () => {
+      // Observe rejection immediately, including synchronous throws, without blocking siblings.
+      const updateCleanup = Promise.resolve().then(() => this.updates.close()).then(() => false, () => true);
       try { run?.handle.cancel(); } catch { /* Disposal must still run. */ }
+      try { await this.local?.close(); } catch { /* Auth shutdown is private. */ }
       try { await this.#runtime.dispose(); } catch { /* Never expose private disposal exceptions. */ }
+      if (await updateCleanup) throw new Error("Desktop update cleanup failed.");
     });
     return this.#closing;
   }
@@ -262,6 +444,11 @@ export class DesktopBridge {
         }
         if (event.type === "approval_requested") {
           if (run.cancelled) continue;
+          if ((event.toolName === "lsp_diagnostics_start" && (event.operation !== "EXECUTE" || !validateLspApproval(event.lspApproval)))
+            || (event.toolName !== "lsp_diagnostics_start" && event.lspApproval !== undefined)) {
+            this.#runtime.resolveAuthorization({ runId: event.runId, approvalId: event.approvalId, decision: "deny" });
+            run.handle.cancel(); continue;
+          }
           // Defensive cap in addition to the runtime's bounded queue; never retain history.
           if (run.approvals.size >= 256) { run.handle.cancel(); continue; }
           run.approvals.add(event.approvalId);

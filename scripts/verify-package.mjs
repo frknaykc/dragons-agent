@@ -40,7 +40,7 @@ try {
   await command(pnpm, ["pack", "--pack-destination", directory], root);
   const tarball = join(directory, `${packageMetadata.name}-${packageMetadata.version}.tgz`);
   const contents = await command("tar", ["-tzf", tarball], directory);
-  for (const forbidden of [".env", "/src/", ".test.js", ".test.d.ts", "MILESTONES.md", ".hermes/", "acceptance-", "provider-acceptance", "live-smoke", "stream-trace"]) assert.equal(contents.includes(forbidden), false, `package contains forbidden ${forbidden}`);
+  for (const forbidden of [".env", "/src/", "/tests/", "/experiments/", "/.test-build/", "mcp-mock-server", "mcp-official-sdk-server", ".test.js", ".test.d.ts", "MILESTONES.md", ".hermes/", "acceptance-", "provider-acceptance", "live-smoke", "stream-trace"]) assert.equal(contents.includes(forbidden), false, `package contains forbidden ${forbidden}`);
   assert.match(contents, /package\/dist\/cli\.js/);
   assert.match(contents, /package\/dist\/runtime\.js/);
   assert.match(contents, /package\/dist\/runtime\.d\.ts/);

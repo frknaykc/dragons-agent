@@ -109,7 +109,7 @@ export function createSubagentTool(options: CreateSubagentToolOptions): AgentToo
           maxTurns,
           signal,
           authorize: options.authorizeNested
-            ? async (request) => request.name === SUBAGENT_TOOL_NAME && await options.authorizeNested!({ name: request.name, task: request.arguments, depth })
+            ? async (request) => request.operation === "READ" || (request.name === SUBAGENT_TOOL_NAME && await options.authorizeNested!({ name: request.name, task: request.arguments, depth }))
             : undefined,
         });
         return { ok: true, output: boundedText(`Subagent report:\n${result.finalText}`, maxReportCharacters, "subagent report") };

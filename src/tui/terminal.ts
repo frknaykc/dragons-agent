@@ -1,8 +1,11 @@
+import { SecretInput } from "./secret-input.js";
+import { SlashPicker } from "../slash-choices.js";
 import type { ReadStream } from "node:tty";
 import type { Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import type { DragonsRuntime } from "../runtime.js";
 import { TuiController } from "./controller.js";
+import type { TuiLocalCommands } from "./local-commands.js";
 import { InputDecoder, type InputAction } from "./input.js";
 import { graphemes, MAX_DRAFT, renderScreen, screenSize, type ViewState } from "./screen.js";
 
@@ -11,6 +14,7 @@ export type TuiOutput = Writable & { isTTY?: boolean; columns?: number; rows?: n
 export type TuiOptions = {
   input?: TuiInput;
   output?: TuiOutput;
+  localCommands?: TuiLocalCommands;
   resume?: string;
   provider?: string;
   model?: string;
@@ -34,8 +38,16 @@ export async function runTui(runtime: DragonsRuntime, options: TuiOptions = {}):
   let presentedApprovalId: string | undefined;
   let finish!: () => void;
   const done = new Promise<void>((resolve) => { finish = resolve; });
-  const controller = new TuiController(runtime, schedule);
+  const secret = new SecretInput();
+  const localCommands = options.localCommands;
+  const controller = new TuiController(runtime, schedule, localCommands ? {
+    names: localCommands.names,
+    execute: (command, context) => localCommands.execute(command, {
+      ...context, requestSecret: (signal) => secret.request(signal, schedule),
+    }),
+  } : undefined);
   const decoder = new InputDecoder();
+  const picker = new SlashPicker();
   const utf8 = new StringDecoder("utf8");
   const wasRaw = input.isRaw ?? false;
   const wasFlowing = (input as { readableFlowing?: boolean | null }).readableFlowing === true;
@@ -43,6 +55,7 @@ export async function runTui(runtime: DragonsRuntime, options: TuiOptions = {}):
   let stopPromise: Promise<void> | undefined;
 
   function schedule(): void {
+    if (controller.exitRequested) { setImmediate(stopEvent); return; }
     if (stopped || blocked || timer) return;
     timer = setTimeout(() => { timer = undefined; paint(); }, 33);
   }
@@ -52,7 +65,10 @@ export async function runTui(runtime: DragonsRuntime, options: TuiOptions = {}):
       approvalId = controller.state.approval?.approvalId;
       view.allowSelected = false;
     }
-    const frame = renderScreen(controller.state, view, output.columns ?? 80, output.rows ?? 24);
+    const choices = !controller.state.busy && !picker.dismissed ? controller.choices(view.draft) : [];
+    const start = Math.max(0, picker.selected - 4);
+    view.choices = choices.slice(start, start + 5).map((c, i) => `${start + i === picker.selected ? "›" : " "} ${c.value} — ${c.description}`);
+    const frame = renderScreen(controller.state, secret.active ? { ...view, draft: secret.mask, cursor: 0, choices: [] } : view, output.columns ?? 80, output.rows ?? 24);
     let diff = "";
     frame.forEach((line, index) => {
       if (previous[index] !== line) diff += `\x1b[${index + 1};1H\x1b[2K${line}`;
@@ -85,9 +101,15 @@ export async function runTui(runtime: DragonsRuntime, options: TuiOptions = {}):
   function stop(): Promise<void> {
     if (stopPromise) return stopPromise;
     stopped = true;
+    secret.cancel();
     // Restore terminal before awaiting potentially slow provider cleanup.
     restore();
-    stopPromise = controller.close().finally(finish);
+    stopPromise = controller.close().finally(() => {
+      if (controller.exitRequested) {
+        try { output.write("Dragons closed. Restart Dragons to use the selected profile and current credentials.\n"); } catch { /* Closed output. */ }
+      }
+      finish();
+    });
     return stopPromise;
   }
   function stopEvent(): void { void stop().catch(() => {}); }
@@ -95,10 +117,20 @@ export async function runTui(runtime: DragonsRuntime, options: TuiOptions = {}):
   function resize(): void { previous = []; presentedApprovalId = undefined; view.allowSelected = false; schedule(); }
   function handle(action: InputAction): void {
     if (stopped) return;
+    if (secret.active) { secret.handle(action); schedule(); return; }
     if (action.type === "quit") { stopEvent(); return; }
     if (action.type === "interrupt") {
       if (controller.state.busy) controller.cancel(); else stopEvent();
       return;
+    }
+    if (!controller.state.busy && !controller.state.approval) {
+      const choices = picker.dismissed ? [] : controller.choices(view.draft);
+      if (choices.length && ["up", "down", "enter", "tab", "cancel"].includes(action.type)) {
+        const value = picker.key(action.type, choices);
+        if (value !== undefined) { view.draft = value; view.cursor = graphemes(value).length; picker.reset(); }
+        schedule(); return;
+      }
+      if (["insert", "backspace", "delete"].includes(action.type)) picker.reset();
     }
     if (action.type === "cancel") { controller.cancel(); return; }
     if (controller.state.approval) {

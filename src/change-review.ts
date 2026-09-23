@@ -1,7 +1,4 @@
-import { execFile } from "node:child_process";
-import { realpath } from "node:fs/promises";
-import { relative } from "node:path";
-import { promisify } from "node:util";
+import { readOnlyGit } from "./read-only-git.js";
 
 export type ChangeReview = {
   runLocalFiles: string[];
@@ -11,7 +8,6 @@ export type ChangeReview = {
   diffSummary: string;
 };
 
-const execFileAsync = promisify(execFile);
 const MAX_FILES = 20;
 const MAX_DIFF_CHARS = 12_000;
 
@@ -46,12 +42,12 @@ export class RunChangeTracker {
 }
 
 async function isGit(workspace: string): Promise<boolean> {
-  try { await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: workspace, encoding: "utf8" }); return true; } catch { return false; }
+  try { await readOnlyGit(workspace, ["rev-parse", "--is-inside-work-tree"], 65_536); return true; } catch { return false; }
 }
 
 async function gitChangedFiles(workspace: string): Promise<string[]> {
   try {
-    const { stdout } = await execFileAsync("git", ["status", "--porcelain=v1", "--untracked-files=normal"], { cwd: workspace, encoding: "utf8", maxBuffer: 65_536 });
+    const { stdout } = await readOnlyGit(workspace, ["status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=dirty"], 65_536);
     return stdout.split(/\r?\n/).filter(Boolean).map((line) => line.slice(3)).sort().slice(0, MAX_FILES);
   } catch { return []; }
 }
@@ -59,8 +55,9 @@ async function gitChangedFiles(workspace: string): Promise<string[]> {
 async function gitDiffFor(workspace: string, paths: string[]): Promise<string> {
   if (!paths.length) return "No run-local diff is available.";
   try {
-    const { stdout } = await execFileAsync("git", ["diff", "--no-ext-diff", "--stat", "--", ...paths], { cwd: workspace, encoding: "utf8", maxBuffer: MAX_DIFF_CHARS });
-    return stdout.slice(0, MAX_DIFF_CHARS) || "No Git diff is available for run-local files.";
+    const { stdout, filtersDisabled } = await readOnlyGit(workspace, ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty", "--stat", "--", ...paths], MAX_DIFF_CHARS);
+    const notice = filtersDisabled ? "READ safety: external clean/process filters disabled; comparison uses unfiltered worktree bytes.\n" : "";
+    return (notice + (stdout || "No Git diff is available for run-local files.")).slice(0, MAX_DIFF_CHARS);
   } catch { return "Git diff is unavailable; run-local tool mutations are listed above."; }
 }
 

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { AgentRunCancelledError, runAgent, type AgentEvent, type AgentModel } from "./agent.js";
@@ -245,6 +245,24 @@ async function readVerifiedRegularFile(filePath: string): Promise<string | undef
   }
 }
 
+// Only pending attempts are retained; separate store instances share the canonical key.
+const pendingStoreSaves = new Map<string, Promise<void>>();
+
+async function serializeStoreSave<T>(directory: string, save: () => Promise<T>): Promise<T> {
+  const key = await realpath(directory);
+  const previous = pendingStoreSaves.get(key);
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  pendingStoreSaves.set(key, pending);
+  await previous;
+  try {
+    return await save();
+  } finally {
+    release();
+    if (pendingStoreSaves.get(key) === pending) pendingStoreSaves.delete(key);
+  }
+}
+
 async function acquireStoreLock(directory: string): Promise<() => Promise<void>> {
   const path = join(directory, ".persistent-background-jobs.lock");
   const token = randomUUID();
@@ -323,7 +341,8 @@ export function createPersistentBackgroundJobStore(directory: string, options: P
     async save(job, expectedRevision): Promise<PersistentBackgroundJob> {
       if (!isPersistentBackgroundJob(job)) throw new Error("Refusing to save an invalid or credential-bearing persistent background job.");
       await ensureJobDirectory(directory, true);
-      return retryPersistentJobRename(async () => {
+      // Retry backoff must not hold the process mutex: cancellation needs to commit.
+      return retryPersistentJobRename(() => serializeStoreSave(directory, async () => {
         const releaseStoreLock = await acquireStoreLock(directory);
         try {
           const path = jobPath(directory, job.id);
@@ -345,7 +364,7 @@ export function createPersistentBackgroundJobStore(directory: string, options: P
         } finally {
           await releaseStoreLock();
         }
-      });
+      }));
     },
     async delete(id): Promise<boolean> {
       try {
@@ -467,17 +486,26 @@ export class PersistentBackgroundJobManager {
     }
   }
 
-  private async launch(job: PersistentBackgroundJob, options: ResumePersistentBackgroundJobOptions): Promise<void> {
+  private async admit(job: PersistentBackgroundJob, options: ResumePersistentBackgroundJobOptions, expectedRevision?: number): Promise<PersistentBackgroundJob> {
     if (this.runtimes.has(job.id) || this.launching.has(job.id)) throw new Error("Persistent background job is already executing.");
     this.assertCapacity();
+    // Reserve synchronously, before either the claim or the durable queued write yields.
     this.launching.add(job.id);
-    let releaseClaim: () => Promise<void>;
+    let releaseClaim: (() => Promise<void>) | undefined;
     try {
       releaseClaim = await this.store.claim(job.id);
-    } catch (error) {
-      this.launching.delete(job.id);
-      throw error;
+      Object.assign(job, await this.store.save(job, expectedRevision));
+      this.jobs.set(job.id, job);
+      this.launch(job, options, releaseClaim);
+      releaseClaim = undefined; // Runtime owns cleanup after synchronous handoff.
+      return cloneJob(job);
+    } finally {
+      try { await releaseClaim?.(); }
+      finally { this.launching.delete(job.id); }
     }
+  }
+
+  private launch(job: PersistentBackgroundJob, options: ResumePersistentBackgroundJobOptions, releaseClaim: () => Promise<void>): void {
     const controller = new AbortController();
     let timedOut = false;
     const durationTimer = setTimeout(() => {
@@ -493,12 +521,12 @@ export class PersistentBackgroundJobManager {
       pendingPolls.add(poll);
       void poll.then(() => pendingPolls.delete(poll));
     }, 50);
-    const diagnostics = this.onJobStarted?.(cloneJob(job));
     const runtime: RuntimeJob = {
       controller,
       promise: Promise.resolve().then(async () => {
         try {
           if (job.state === "cancelled") return;
+          const diagnostics = this.onJobStarted?.(cloneJob(job));
           if (controller.signal.aborted) throw new AgentRunCancelledError();
           await this.transition(job, {
             state: "running",
@@ -606,10 +634,7 @@ export class PersistentBackgroundJobManager {
       executionAttempts: 0,
       transcript: "",
     };
-    Object.assign(job, await this.store.save(job));
-    this.jobs.set(id, job);
-    await this.launch(job, options);
-    return cloneJob(job);
+    return this.admit(job, options);
   }
 
   async resume(id: string, options: ResumePersistentBackgroundJobOptions, sessionId?: string): Promise<PersistentBackgroundJob> {
@@ -621,10 +646,7 @@ export class PersistentBackgroundJobManager {
     const resumed: PersistentBackgroundJob = { ...job, state: "queued", updatedAt: this.now().toISOString() };
     delete resumed.completedAt;
     delete resumed.error;
-    Object.assign(resumed, await this.store.save(resumed, job.revision));
-    this.jobs.set(id, resumed);
-    await this.launch(resumed, options);
-    return cloneJob(resumed);
+    return this.admit(resumed, options, job.revision);
   }
 
   list(sessionId?: string): PersistentBackgroundJob[] {
