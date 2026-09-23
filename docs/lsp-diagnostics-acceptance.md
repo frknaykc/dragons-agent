@@ -1,6 +1,8 @@
 # 2.1 LSP Diagnostics — uygulama ve kabul kaydı
 
-Durum: **2.1 scoped geliştirme kabulü tamamlandı (2026-09-23).** Bağımsız kaynak incelemesi PASS; nihai `pnpm release:check`: **1201 başarılı, 2 atlanan, 0 hata**, typecheck/build/package başarılı. Kullanıcının devam onayıyla yapılan gerçek sunucu kabulünde Microsoft `@typescript/native-preview@7.0.0-dev.20260707.2` FULL pull üzerinden TS2322 ve düzeltme sonrası boş tanıyı production `runAgent()` model devamına iletti. Ana ajan `dragons-real-lsp-jOIe2e/evidence.json` içindeki wire yanıtlarını, onayları ve continuation çıktılarını doğruladı. Bu pinli macOS arm64 preview kabulüdür; varsayılan/stable sunucu seçimi değildir. TLS 5.0.0 unversioned push uyumsuzluğu sürer. Native GUI/PTY, kullanıcı tarafından elle UAT ve kurulu diğer platformların kabulü iddia edilmez. M78 üretim kapıları ve 2.2+ kapsamı değişmedi.
+Yerel kanıt yollarında `$SCRATCH`, doğrulama için ayrılmış geçici dizini temsil eder. Bu kayıtlar depoda dağıtılan artefaktlar değildir.
+
+Durum: **2.1 scoped geliştirme kabulü tamamlandı (2026-09-23).** Bağımsız kaynak incelemesi PASS; nihai `pnpm release:check`: **1201 başarılı, 2 atlanan, 0 hata**, typecheck/build/package başarılı. Kullanıcının devam onayıyla yapılan gerçek sunucu kabulünde Microsoft `@typescript/native-preview@7.0.0-dev.20260707.2` FULL pull üzerinden TS2322 ve düzeltme sonrası boş tanıyı production `runAgent()` model devamına iletti. Doğrulama `dragons-real-lsp-jOIe2e/evidence.json` içindeki wire yanıtlarını, onayları ve continuation çıktılarını doğruladı. Bu pinli macOS arm64 preview kabulüdür; varsayılan/stable sunucu seçimi değildir. TLS 5.0.0 unversioned push uyumsuzluğu sürer. Native GUI/PTY, kullanıcı tarafından elle UAT ve kurulu diğer platformların kabulü iddia edilmez. M78 üretim kapıları ve 2.2+ kapsamı değişmedi.
 
 ## Akış ve yetki
 
@@ -27,7 +29,7 @@ Shutdown yanıtı ardından exit; 200ms cleanup deadline sonunda kill. POSIX ayn
 - `tests/core/lsp-chunking.test.mjs`: 98 bayt initialize + sekiz toplam 2095968 bayt log + 162 bayt tanı + 4094 bayt son log; ayrı frame, initialize sonrası 64KiB, tek chunk ve bütçe sınırından bölünmüş akışlar. Sınırdan bir bayt önce/tam sınırda tanı, tanının header/body içinde aşım, stderr birleşik bütçe ve normal shutdown/exit dahil 7 senaryo × 4 yerleşim. Tanıdan önce aşım her yerleşimde aynı output-limit hatasıdır; cleanup her koşuda doğrulanır.
 - İlk behavioral RED: birleşik chunk output-limit döndürürken ayrı frame EXPECTED döndürdü. Odaklı son koşu **33 passed, 0 failed, 0 skipped** (chunking, diagnostics, approval, presentation). Önceki 129-test approval kanıtı ayrı ve korunmuştur.
 - Son materyal değişiklikten sonra `pnpm release:check` **bir kez**, exit 0: **1203 test, 1201 passed, 0 failed, 2 skipped**; typecheck/build/package başarılı, `PACKAGE_ACCEPTANCE_OK dragons-agent-0.1.0.tgz` ve `RELEASE_CHECK_OK`. Bu satır yalnız sonuç kaydıdır; gate sonrası kod/test değişmedi.
-- Kanıtlar: `/Users/naxoziwus/.hermes/profiles/naxoziwus/cache/scratch/lsp-budget-red.log`, `lsp-budget-focused.log`, `lsp-budget-release-check.log` (üçü aynı scratch dizininde). Canonical gate aşağıdaki teslim kaydıyla raporlanır. Bu takip onarımı canlı server/provider veya milestone kapanışı değildir.
+- Kanıtlar: `$SCRATCH/lsp-budget-red.log`, `lsp-budget-focused.log`, `lsp-budget-release-check.log` (üçü aynı scratch dizininde). Canonical gate aşağıdaki teslim kaydıyla raporlanır. Bu takip onarımı canlı server/provider veya milestone kapanışı değildir.
 
 - Reviewer probe önce okundu. `tests/core/lsp-chunking.test.mjs` deterministic injected stdio ile aynı near-256KiB + komşu frame stream'ini ayrı/64KiB/tek chunk geçirir. Onarım öncesi ayrı stream başarılı, birleşik stream output-limit hatası: **behavioral RED**.
 - `tests/core/lsp-approval.test.ts`: gerçek `TerminalRenderer` TTY dalı, A/B script ayrımı; hostile controls, credential flag/value, oversized/multibyte scope, extra-field ve redaction retleri. TTY script görünürlüğü onarım öncesi **RED**.
@@ -40,10 +42,10 @@ Shutdown yanıtı ardından exit; 200ms cleanup deadline sonunda kill. POSIX ayn
 
 Aktif profil scratch kanıtları:
 
-- `/Users/naxoziwus/.hermes/profiles/naxoziwus/cache/scratch/lsp-blockers-red.log`
-- `/Users/naxoziwus/.hermes/profiles/naxoziwus/cache/scratch/lsp-desktop-red.log`
-- `/Users/naxoziwus/.hermes/profiles/naxoziwus/cache/scratch/lsp-blockers-focused.log`
-- `/Users/naxoziwus/.hermes/profiles/naxoziwus/cache/scratch/lsp-blockers-release-check.log`
+- `$SCRATCH/lsp-blockers-red.log`
+- `$SCRATCH/lsp-desktop-red.log`
+- `$SCRATCH/lsp-blockers-focused.log`
+- `$SCRATCH/lsp-blockers-release-check.log`
 
 Önceki fixture tesliminde canlı provider/language-server, private repo verisi, installed-platform/Electron görsel kabulü yoktur. Renderer testleri gerçek JS'yi deterministic DOM ile çalıştırır, native pencereyi değil. Yeni dependency, credential işlemi, stage/commit/push veya release yapılmadı. Başlangıç dirty/untracked değişiklikleri korunmuştur. Bu kayıt milestone'u kapatmaz.
 
@@ -56,7 +58,7 @@ Opt-in harness: `tests/acceptance/lsp-real-server.mjs`. Normal test keşfine gir
 Tekrarlama (repo kökünde; harness öncesinde mevcut kaynak için `pnpm build` gerekir):
 
 ```sh
-SCRATCH=/Users/naxoziwus/.hermes/profiles/naxoziwus/cache/scratch
+SCRATCH="$(mktemp -d)"
 npm install --prefix "$SCRATCH/lsp-real-acceptance-deps" --ignore-scripts --no-audit --no-fund --save-exact --registry=https://registry.npmjs.org typescript-language-server@5.0.0 typescript@5.9.3
 node --check tests/acceptance/lsp-real-server.mjs
 node tests/acceptance/lsp-real-server.mjs "$SCRATCH" "$SCRATCH/lsp-real-acceptance-deps"
@@ -74,7 +76,7 @@ Bu koşuda önceki doğrulanmış release build kullanıldı; production değiş
 
 **Sınırlı onarım seçeneği (bu adımda uygulanmadı):** versioned push/full pull sunan gerçek bir server ile aynı acceptance'ı çalıştırmak veya TLS upstream'de tanı hesaplamasının hangi belge sürümüne ait olduğunu güvenilir biçimde taşıyan versioned-push/full-pull desteği geliştirmek. Gelen unversioned bildirime istemci/proxy tarafında körlemesine `version: 1` eklemek ya da version şartını kaldırmak kabul edilemez. Upstream onarımı eski sürüm/ara boş snapshot ve semantic completion regresyonları gerektirir; yalnız bildirime mevcut sürümü eklemek freshness kanıtı değildir. Ürün runtime'ı ve onay/güvenlik sınırları değiştirilmedi.
 
-Kanıt: `/Users/naxoziwus/.hermes/profiles/naxoziwus/cache/scratch/dragons-real-lsp-stqjDe/evidence.json` — exact command/args, approval kayıtları, capabilities, iki wire tanısı, runtime raporları, sürümler, npm tarball URL'leri ve SHA-512 integrity. İzole kurulumun `package-lock.json` dosyası `lsp-real-acceptance-deps/` altında. Sunucu workspace'i yalnız sentetik scratch projesidir; özel repo sunucuya açılmadı. Canlı model/provider, GUI/PTY veya kurulu platform kabulü yok; 2.1 kapanmadı, 2.2 başlamadı.
+Kanıt: `$SCRATCH/dragons-real-lsp-stqjDe/evidence.json` — exact command/args, approval kayıtları, capabilities, iki wire tanısı, runtime raporları, sürümler, npm tarball URL'leri ve SHA-512 integrity. İzole kurulumun `package-lock.json` dosyası `lsp-real-acceptance-deps/` altında. Sunucu workspace'i yalnız sentetik scratch projesidir; özel repo sunucuya açılmadı. Canlı model/provider, GUI/PTY veya kurulu platform kabulü yok; 2.1 kapanmadı, 2.2 başlamadı.
 
 ## Bounded alternative-server acceptance — native TypeScript FULL pull
 
@@ -89,8 +91,8 @@ Pinned installation used `npm install --prefix <active-profile-scratch>/lsp-nati
 
 ```sh
 node tests/acceptance/lsp-real-server.mjs \
-  /Users/naxoziwus/.hermes/profiles/naxoziwus/cache/scratch \
-  /Users/naxoziwus/.hermes/profiles/naxoziwus/cache/scratch/lsp-native-acceptance-deps native
+  "$SCRATCH" \
+  "$SCRATCH/lsp-native-acceptance-deps" native
 ```
 
 - Production `runAgent` handled synthetic `a.ts` WRITE, subsequent correction and model continuation via the deterministic credential-free model adapter. This is a real language-server run, **not** a live external LLM/provider test.
@@ -101,8 +103,8 @@ node tests/acceptance/lsp-real-server.mjs \
 
 Local evidence:
 
-- `/Users/naxoziwus/.hermes/profiles/naxoziwus/cache/scratch/dragons-real-lsp-jOIe2e/evidence.json` — exact npm resolutions/integrities, server argv/cwd/PIDs, untouched capabilities/FULL responses, approvals and continuation outputs.
+- `$SCRATCH/dragons-real-lsp-jOIe2e/evidence.json` — exact npm resolutions/integrities, server argv/cwd/PIDs, untouched capabilities/FULL responses, approvals and continuation outputs.
 - Sibling `provenance.json` — SHA-256 of executed native binary, evidence, harness, production source/build artifacts, and immutable upstream URLs.
-- `/Users/naxoziwus/.hermes/profiles/naxoziwus/cache/scratch/lsp-candidates-source/` — upstream source snapshots, npm metadata and source URL index. Scratch evidence is local/ephemeral; do not treat it as committed durable artifacts.
+- `$SCRATCH/lsp-candidates-source/` — upstream source snapshots, npm metadata and source URL index. Scratch evidence is local/ephemeral; do not treat it as committed durable artifacts.
 
 Only this opt-in harness and this evidence document changed in this follow-up. No production source, repository dependencies/config, roadmap completion, LSP2.2 work, commit or push. The existing `1201 pass / 2 skip` deterministic gate was not rerun or superseded. This successful narrow acceptance does not itself close the milestone: retain the preview pin as an explicit opt-in compatible server, and decide stable/default server policy separately rather than accepting unversioned push.
