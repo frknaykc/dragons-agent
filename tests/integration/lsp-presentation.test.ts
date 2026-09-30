@@ -11,9 +11,24 @@ import { type AgentModel } from "../../dist/agent.js";
 import { parseLspConfig } from "../../dist/lsp-diagnostics.js";
 import { createProviderRegistry } from "../../dist/provider/registry.js";
 import { createDragonsRuntime, type RuntimeEvent } from "../../dist/runtime.js";
+import { createSessionSearchTools } from "../../dist/session-search.js";
 import { createSessionStore } from "../../dist/session-store.js";
 import { createCodingTools } from "../../dist/tools.js";
 const lsp = parseLspConfig({ command: process.execPath, args: [resolve("tests/fixtures/lsp-server.mjs"), "pull"], extensions: [".ts"], languageId: "typescript" });
+async function assertDurableObservation(root: string, store: ReturnType<typeof createSessionStore>, allow: boolean) {
+  const sessions = await store.list(); assert.equal(sessions.length, 1);
+  const session = sessions[0]!;
+  assert.equal(session.toolHistory?.length, 1);
+  assert.equal(session.toolHistory![0]!.name, "write_file");
+  assert.match(session.toolHistory![0]!.output, /Checkpoint .*1 file\(s\) changed/);
+  const raw = await readFile(join(root, "sessions", `${session.id}.json`), "utf8");
+  assert.doesNotMatch(raw, /EXECUTE denied|lsp_diagnostics_start/);
+  const [search, read] = createSessionSearchTools(store, root);
+  assert.equal(JSON.parse((await search!.execute({ query: "denied" })).output).results.length, 0);
+  const projection = (await read!.execute({ sessionId: session.id })).output;
+  assert.match(projection, /write_file/); assert.doesNotMatch(projection, /EXECUTE denied/);
+  if (allow) assert.match(projection, /Type mismatch/);
+}
 function model(expected: RegExp = /Type mismatch/): AgentModel {
   let turn = 0;
   return { async respond(request) {
@@ -22,15 +37,16 @@ function model(expected: RegExp = /Type mismatch/): AgentModel {
     return { responseId: "2", text: "done", toolCalls: [] };
   } };
 }
-for (const interactive of [false, true]) test(`CLI ${interactive ? "interactive" : "plain"} displays LSP report after separate EXECUTE approval`, async () => {
+for (const allow of [false, true]) for (const interactive of [false, true]) test(`CLI ${interactive ? "interactive" : "plain"} displays LSP report after separate EXECUTE approval (${allow})`, async () => {
   const root = await mkdtemp(join(tmpdir(), "dragons-lsp-cli-")); let output = "";
   try {
     await main(interactive ? [] : ["edit"], { config: { lsp }, configPath: join(root, "config.json"), workingDirectory: root,
       sessionDirectory: join(root, "sessions"), memoryDirectory: join(root, "memory"), skillsDirectory: join(root, "skills"),
-      model: model(), tools: await createCodingTools(root), input: Readable.from([interactive ? "edit\ny\ny\n/exit\n" : "y\ny\n"]),
+      model: model(allow ? /Type mismatch/ : /EXECUTE denied/), tools: await createCodingTools(root), input: Readable.from([`${interactive ? "edit\n" : ""}y\n${allow ? "y" : "n"}\n${interactive ? "/exit\n" : ""}`]),
       write: (text) => { output += text; }, terminal: { inputIsTTY: false, outputIsTTY: false, color: false },
     });
-    assert.match(output, /EXECUTE lsp_diagnostics_start/); assert.match(output, /3:5 error: Type mismatch/); assert.doesNotMatch(output, /fixture-secret/);
+    assert.match(output, /EXECUTE lsp_diagnostics_start/); assert.match(output, allow ? /3:5 error: Type mismatch/ : /EXECUTE denied/); assert.doesNotMatch(output, /fixture-secret/);
+    if (interactive) await assertDurableObservation(root, createSessionStore(join(root, "sessions")), allow);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 test("real runtime → Desktop bridge preserves script A/B scope and denies unsafe scopes before emission", async () => {
@@ -72,12 +88,12 @@ test("real runtime → Desktop bridge preserves script A/B scope and denies unsa
   const scopes=seen.flatMap(e=>e.type==="approval_requested"&&e.lspApproval?[e.lspApproval]:[]);
   assert.equal(scopes.length,2); assert.notDeepEqual(scopes[0],scopes[1]);
   assert.equal(labels.length,2); assert.match(labels[0]!,/server-A\.js/); assert.match(labels[1]!,/server-B\.js/);
-  for(const label of labels) {assert.ok(label.includes(lsp.command));assert.match(label,/Document: "a\.ts"/);}
+  for(const label of labels) {assert.ok(label.includes(JSON.stringify(lsp.command)));assert.match(label,/Document: "a\.ts"/);}
 });
 
-test("Desktop's runtime stream carries bounded diagnostics and independent one-use EXECUTE approval", async () => {
+for (const allow of [false, true]) test(`Desktop's runtime stream carries bounded diagnostics and independent one-use EXECUTE approval (${allow})`, async () => {
   const root = await mkdtemp(join(tmpdir(), "dragons-lsp-runtime-"));
-  const providers = createProviderRegistry([{ id: "fixture", label: "Fixture", defaultModel: "fixture-1", credentialRequirement: "none", capabilities: { streaming: true, toolCalls: true, toolResultContinuation: true, usageMetadata: false }, createModel: () => model() }]);
+  const providers = createProviderRegistry([{ id: "fixture", label: "Fixture", defaultModel: "fixture-1", credentialRequirement: "none", capabilities: { streaming: true, toolCalls: true, toolResultContinuation: true, usageMetadata: false }, createModel: () => model(allow ? /Type mismatch/ : /EXECUTE denied/) }]);
   const runtime = await createDragonsRuntime({ workingDirectory: root, lsp, providerRegistry: providers, sessionStore: createSessionStore(join(root, "sessions"), { providerIds: providers.ids() }), memoryDirectory: join(root, "memory"), skillsDirectory: join(root, "skills") });
   try {
     const session = await runtime.createSession(); const run = await runtime.sendUserInput({ sessionId: session.id, content: "edit" }); const events: RuntimeEvent[] = [];
@@ -85,13 +101,14 @@ test("Desktop's runtime stream carries bounded diagnostics and independent one-u
       events.push(event);
       if (event.type === "approval_requested") {
         if (event.toolName === "lsp_diagnostics_start") assert.deepEqual((event as any).lspApproval, { command: lsp.command, args: lsp.args, document: "a.ts" });
-        assert.equal(runtime.resolveAuthorization({ runId: run.id, approvalId: event.approvalId, decision: "allow_session" }), true);
+        assert.equal(runtime.resolveAuthorization({ runId: run.id, approvalId: event.approvalId, decision: event.operation === "EXECUTE" && !allow ? "deny" : "allow_session" }), true);
         assert.equal(runtime.resolveAuthorization({ runId: run.id, approvalId: event.approvalId, decision: "allow_once" }), false);
       }
     }
     await run.result;
     assert.deepEqual(events.flatMap((e) => e.type === "approval_requested" ? [e.operation] : []), ["WRITE", "EXECUTE"]);
     const completed = events.filter((e) => e.type === "tool_activity" && e.phase === "completed");
-    assert.match(JSON.stringify(completed), /Type mismatch/); assert.doesNotMatch(JSON.stringify(events), /fixture-secret/);
+    assert.match(JSON.stringify(completed), allow ? /Type mismatch/ : /EXECUTE denied/); assert.doesNotMatch(JSON.stringify(events), /fixture-secret/);
+    await assertDurableObservation(root, createSessionStore(join(root, "sessions"), { providerIds: providers.ids() }), allow);
   } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }); }
 });

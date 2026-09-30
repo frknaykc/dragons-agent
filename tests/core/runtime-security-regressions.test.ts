@@ -46,7 +46,7 @@ for (const failure of ["claim", "save", "diagnostics"] as const) test(`job ${fai
   }
 });
 
-for (const helper of ["textconv", "fsmonitor", "clean", "process"]) test(`READ Git tools and automatic review never execute configured ${helper}`, { skip: process.platform === "win32" }, async () => {
+for (const helper of ["textconv", "fsmonitor", "clean", "process"]) test(`READ Git tools and automatic review never execute configured ${helper}`, async () => {
   const dir = await mkdtemp(join(tmpdir(), "dragons-git-read-"));
   const git = (...args: string[]) => exec("git", args, { cwd: dir });
   try {
@@ -56,15 +56,16 @@ for (const helper of ["textconv", "fsmonitor", "clean", "process"]) test(`READ G
     await git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture");
     await writeFile(join(dir, "file.txt"), "after\n");
     const marker = join(dir, "executed");
-    const script = join(dir, "helper.sh");
-    await writeFile(script, `#!/bin/sh\nprintf executed > '${marker}'\nprintf converted\n`, { mode: 0o700 });
+    const script = join(dir, "helper.cjs");
+    await writeFile(script, `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "executed");\nprocess.stdout.write("converted\\n");\n`);
+    const command = `node "${script.replaceAll("\\", "/")}"`;
     if (helper === "textconv") {
       await writeFile(join(dir, ".gitattributes"), "*.txt diff=fixture\n");
-      await git("config", "diff.fixture.textconv", script);
-    } else if (helper === "fsmonitor") await git("config", "core.fsmonitor", script);
+      await git("config", "diff.fixture.textconv", command);
+    } else if (helper === "fsmonitor") await git("config", "core.fsmonitor", command);
     else {
       await writeFile(join(dir, ".gitattributes"), "*.txt filter=fixture\n");
-      await git("config", `filter.fixture.${helper}`, script);
+      await git("config", `filter.fixture.${helper}`, command);
     }
     const indexBefore = await readFile(join(dir, ".git", "index"));
     const tracker = new RunChangeTracker(dir);
@@ -88,7 +89,7 @@ for (const helper of ["textconv", "fsmonitor", "clean", "process"]) test(`READ G
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("checkpoint-less write rejects dangling final symlink but preserves ordinary writes", { skip: process.platform === "win32" }, async () => {
+test("checkpoint-less write rejects dangling final symlink but preserves ordinary writes", async () => {
   const dir = await mkdtemp(join(tmpdir(), "dragons-dangling-"));
   try {
     const workspace = join(dir, "workspace");

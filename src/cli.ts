@@ -1,7 +1,8 @@
 #!/usr/bin/env node
+import { createSessionHistoryRecorder, createSessionSearchTools } from "./session-search.js";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -40,6 +41,22 @@ import { RuntimeDiagnosticsService, formatRuntimeDiagnostics, type RuntimeDiagno
 import { createTerminalRenderer, type TerminalRenderer } from "./terminal/renderer.js";
 import { loadDragonsConfig, parseDragonsConfig, saveDragonsConfig, type DragonsConfig } from "./config.js";
 import { createDragonsRuntime } from "./runtime.js";
+import { createRuntimeSessionLoop } from "./session-loop-runtime.js";
+import { createPersistentGoalService } from "./persistent-goal-service.js";
+import { goalWorkspaceDirectory, inspectPersistentGoalLock, recoverAbandonedPersistentGoalLock } from "./persistent-goal-store.js";
+import { GOAL_USAGE, parseInteractiveGoalCommand } from "./cli/goal-commands.js";
+import { KANBAN_USAGE, parseKanbanWorkerLane, parseKanbanWorkerStart, parseInteractiveKanbanCommand, runInteractiveKanbanCommand } from "./cli/kanban-commands.js";
+import { createFileKanbanBoard, inspectKanbanLock, kanbanWorkspaceDirectory, recoverAbandonedKanbanLock } from "./kanban.js";
+import { launchKanbanWorker } from "./kanban-worker-process.js";
+import { runKanbanWorkerLane } from "./kanban-worker-lane.js";
+import { runMixtureOfAgents } from "./mixture-of-agents.js";
+import { MIXTURE_USAGE, parseInteractiveMixtureCommand } from "./cli/mixture-commands.js";
+import { batchWorkspaceDirectory, createFileBatchQueue, inspectBatchLock, recoverAbandonedBatchLock } from "./batch-queue.js";
+import { runBatch } from "./batch-runner.js";
+import { BATCH_USAGE, parseInteractiveBatchCommand } from "./cli/batch-commands.js";
+import { DEFAULT_DRAGONS_PROFILE } from "./profiles.js";
+import type { SessionLoop } from "./session-loop.js";
+import type { DragonsRuntime } from "./runtime.js";
 import { connectRemoteRuntime } from "./remote/runtime.js";
 import { runTui, type TuiOutput } from "./tui/terminal.js";
 import { createTuiLocalCommands } from "./tui/local-commands.js";
@@ -71,11 +88,13 @@ import { createPlanOrchestrationTools } from "./orchestration.js";
 import { parseCliCommand as parseBaseCliCommand, providerFrom, type CliCommand, type ProviderName } from "./cli/commands.js";
 import { formatMemorySuggestion, handleInteractiveMemoryCommand, memoryContextFor, runMemoryCommand } from "./cli/memory-commands.js";
 import { handleInteractivePlanCommand, runPlanCommand } from "./cli/plan-commands.js";
+import { runCronCommand } from "./cli/cron-commands.js";
 import { handleInteractiveSkillsCommand, runSkillsCommand, writeActiveSkillNotices } from "./cli/skills-commands.js";
 import { SessionCheckpoints, checkpointCommand, isCheckpointCommand } from "./checkpoint.js";
 import { formatSlashHelp, SLASH_COMMANDS } from "./slash-commands.js";
 import { slashChoices } from "./slash-choices.js";
 import { createLineInput, type LineInput } from "./cli/line-input.js";
+import { createIsolatedWorktree, selectIsolatedWorktree } from "./worktree.js";
 import { createDragonsProfileStore, type DragonsProfileStore } from "./profiles.js";
 
 type AuthCommand = Extract<CliCommand, { kind: "auth" }> & { provider?: string };
@@ -132,6 +151,10 @@ export type CliDependencies = {
   memoryDirectory?: string;
   /** App-owned durable M60 job state root; runtime handles and approvals are never stored here. */
   backgroundJobsDirectory?: string;
+  /** Active profile's workspace-partitioned cron state root. */
+  cronDirectory?: string;
+  /** Host-injected stop signal for a foreground cron service. */
+  cronSignal?: AbortSignal;
   /** Process-local MCP connections; dependency injection exists for deterministic tests only. */
   mcpManager?: McpClientManager;
   /** Process-local bounded diagnostics; never saved into Dragons session JSON. */
@@ -139,38 +162,54 @@ export type CliDependencies = {
 };
 
 type AnswerSource = {
-  next: () => Promise<IteratorResult<string>>;
+  next: (signal?: AbortSignal) => Promise<IteratorResult<string>>;
 };
 
-function cancellationAwareAnswer(
-  answers: AnswerSource,
-  signal?: AbortSignal,
-): Promise<IteratorResult<string>> {
-  if (!signal) return answers.next();
-  if (signal.aborted) return Promise.resolve({ done: true, value: undefined as never });
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (answer: IteratorResult<string>): void => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener("abort", cancel);
-      resolve(answer);
-    };
-    const cancel = (): void => finish({ done: true, value: undefined as never });
-    signal.addEventListener("abort", cancel, { once: true });
-    void answers.next().then(finish);
-  });
+/** Own the underlying read across sequential composer/approval consumers. Cancelling
+ * a consumer cannot cancel readline.next(): retain that read for the next owner.
+ */
+function createAnswerSource(read: () => Promise<IteratorResult<string>>): AnswerSource {
+  let pending: Promise<IteratorResult<string>> | undefined;
+  return { next(signal) {
+    if (signal?.aborted) return Promise.resolve({ done: true, value: undefined });
+    pending ??= read();
+    const current = pending;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = (): void => { settled = true; signal?.removeEventListener("abort", cancel); };
+      const cancel = (): void => {
+        if (settled) return;
+        cleanup();
+        // Do not consume/clear current: the composer must receive its first line.
+        resolve({ done: true, value: undefined });
+      };
+      signal?.addEventListener("abort", cancel, { once: true });
+      void current.then((answer) => {
+        if (settled) return;
+        cleanup();
+        pending = undefined;
+        resolve(answer);
+      }, (error: unknown) => {
+        if (settled) return;
+        cleanup();
+        pending = undefined;
+        reject(error);
+      });
+    });
+  } };
 }
 
 function createAuthorizer(
   answers: AnswerSource,
   renderApproval: (request: ToolAuthorizationRequest) => void,
   signal?: AbortSignal,
-): (request: ToolAuthorizationRequest) => Promise<ToolAuthorizationDecision> {
-  return async (request: ToolAuthorizationRequest): Promise<ToolAuthorizationDecision> => {
+): (request: ToolAuthorizationRequest, signal?: AbortSignal) => Promise<ToolAuthorizationDecision> {
+  return async (request: ToolAuthorizationRequest, approvalSignal?: AbortSignal): Promise<ToolAuthorizationDecision> => {
     if (request.operation === "READ") return true;
+    const lifetime = approvalSignal && signal ? AbortSignal.any([approvalSignal, signal]) : approvalSignal ?? signal;
+    if (lifetime?.aborted) return false;
     renderApproval(request);
-    const answer = await cancellationAwareAnswer(answers, signal);
+    const answer = await answers.next(lifetime);
     const response = answer.done ? "" : answer.value.trim().toLowerCase();
     if (response === "session" || response === "always" || response === "a") return "session";
     return response === "y" || response === "yes";
@@ -181,9 +220,10 @@ function createCliAuthorizer(
   input: NodeJS.ReadableStream,
   renderer: TerminalRenderer,
   signal?: AbortSignal,
-): { authorize: (request: ToolAuthorizationRequest) => Promise<ToolAuthorizationDecision>; close: () => void } {
+): { authorize: (request: ToolAuthorizationRequest, signal?: AbortSignal) => Promise<ToolAuthorizationDecision>; close: () => void } {
   const lines = createInterface({ input, crlfDelay: Infinity });
-  const answers = lines[Symbol.asyncIterator]();
+  const iterator = lines[Symbol.asyncIterator]();
+  const answers = createAnswerSource(() => iterator.next());
   return {
     authorize: createAuthorizer(answers, (request) => renderer.renderApproval(request), signal),
     close: () => lines.close(),
@@ -468,14 +508,26 @@ async function runInteractiveConversation(
   resumed: boolean,
   mcp: McpClientManager,
   diagnostics: RuntimeDiagnosticsService,
+  profileName?: string,
 ): Promise<void> {
   const input = dependencies.input ?? process.stdin;
   const renderer = terminalRenderer(dependencies, input, write, true);
   const operations = new Map(tools.map((tool) => [tool.name, tool.operation]));
   let lines: LineInput;
-  const answers: AnswerSource = { next: () => lines.next() };
+  const answers = createAnswerSource(() => lines.next());
   let activeController: AbortController | undefined;
   let session = initialSession;
+  let sessionLoop: SessionLoop | undefined;
+  let loopRuntime: DragonsRuntime | undefined;
+  let goalRuntime: DragonsRuntime | undefined;
+  let goalService: ReturnType<typeof createPersistentGoalService> | undefined;
+  let lastLoopReport: string | undefined;
+  let loopFailures = 0;
+  const stopSessionLoop = async (): Promise<void> => {
+    const previous = sessionLoop;
+    sessionLoop = undefined;
+    await previous?.stop();
+  };
   // Plan tools resolve the currently selected session at execution time; no plan is injected into provider continuation or transcript state.
   const planTools = createPlanTools(() => createSessionPlanStore(sessionStore, session.id));
   tools.push(...planTools);
@@ -517,7 +569,7 @@ async function runInteractiveConversation(
     });
   let activeSkillReferences: SkillReference[] = session.skills ?? [];
   // Process-local only: intentionally discarded on resume and process exit.
-  const checkpoints = new SessionCheckpoints(workingDirectory);
+  let checkpoints = new SessionCheckpoints(workingDirectory);
   const sessionApprovals = new Set<string>();
   // Tasks and all runtime handles are deliberately process-local, never session state.
   const backgroundTasks = new BackgroundTaskManager({
@@ -581,12 +633,442 @@ async function runInteractiveConversation(
       }
       const task = answer.value.trim();
       if (!task) continue;
+      if (/^\/(loop|heartbeat)(?:\s|$)/.test(task)) {
+        const name = task.startsWith("/loop") ? "/loop" : "/heartbeat";
+        const usage = name === "/loop" ? "Usage: /loop [status|stop|start <interval-seconds> <max-runs> -- <prompt>].\n"
+          : "Usage: /heartbeat [status|stop|start <interval-seconds> <idle-seconds> <max-runs> -- <prompt>].\n";
+        const parts = task.split(/\s+/);
+        const action = parts[1] ?? "status";
+        if ((action === "status" || action === "stop") && parts.length <= 2) {
+          if (!sessionLoop) { write("No Loop/Heartbeat for this session.\n"); continue; }
+          if (action === "stop") { await stopSessionLoop(); write("Loop/Heartbeat stopped.\n"); }
+          else {
+            const state = sessionLoop.status();
+            write(`Loop/Heartbeat: ${state.running ? "running" : "stopped"}; completed: ${state.completed}; active: ${state.active}; failures: ${loopFailures}; last report: ${lastLoopReport ?? "none"}\n`);
+          }
+          continue;
+        }
+        const marker = task.indexOf(" -- ");
+        const fields = marker === -1 ? [] : task.slice(0, marker).trim().split(/\s+/).slice(2);
+        const prompt = marker === -1 ? "" : task.slice(marker + 4).trim();
+        if (action !== "start" || fields.length !== (name === "/loop" ? 2 : 3)
+          || fields.some((field) => !/^[1-9][0-9]{0,5}$/.test(field))
+          || !prompt || prompt.length > 4_000 || /[\u0000-\u001f\u007f]/.test(prompt)) { write(usage); continue; }
+        if (sessionLoop?.status().running) { write("Session loop already running.\n"); continue; }
+        if (dependencies.model || dependencies.modelFactory) { write("Loop requires a registry-backed provider model.\n"); continue; }
+        try {
+          await stopSessionLoop();
+          if (await realpath(workingDirectory) !== workingDirectory)
+            throw new Error("Loop requires a canonical session workspace; start a new session from this directory.");
+          loopRuntime ??= await createDragonsRuntime({ workingDirectory, providerRegistry: providers, sessionStore,
+            tools: [], memoryStore, skillsDirectory, maxTurns: dependencies.config?.maxTurns,
+            contextBudgetChars: dependencies.config?.contextBudgetChars });
+          const values = fields.map(Number);
+          const loop = createRuntimeSessionLoop({ runtime: loopRuntime,
+            config: { sessionId: session.id, prompt, intervalMs: values[0]! * 1_000,
+              maxRuns: values[name === "/loop" ? 1 : 2]!,
+              ...(name === "/heartbeat" ? { idleMs: values[1]! * 1_000 } : {}) },
+            onResult: (id, text) => {
+              if (sessionLoop === loop && session.id === id) {
+                lastLoopReport = text.slice(0, 8_000);
+                // The unattended runtime owns the persisted continuation; do not reuse a stale CLI adapter.
+                activeModel = undefined;
+              }
+            },
+            onError: () => { if (sessionLoop === loop) loopFailures += 1; },
+          });
+          sessionLoop = loop;
+          lastLoopReport = undefined;
+          loopFailures = 0;
+          loop.start();
+          write(name === "/loop" ? "Loop started (READ-only; current session).\n" : "Heartbeat started (READ-only; current session).\n");
+        } catch (error: unknown) { write(`${error instanceof Error ? error.message : "Unable to start session loop."}\n`); }
+        continue;
+      }
+      // A foreground command takes ownership of this session before doing any work.
+      // Stop and cancel the unattended turn rather than letting two hosts race over state.
+      if (sessionLoop) {
+        await stopSessionLoop();
+        write("Loop/Heartbeat stopped for interactive input.\n");
+        const updated = await sessionStore.load(session.id);
+        if (!updated || updated.workingDirectory !== workingDirectory) throw new Error("Session loop changed or lost its workspace.");
+        if (updated.provider !== activeProvider || updated.model !== activeModelName) {
+          providers.get(updated.provider);
+          activeProvider = updated.provider;
+          activeModelName = updated.model;
+          activeModelInput = updated.model;
+          activeModel = undefined;
+          write(`Provider fallback: ${activeProvider} · ${activeModelName} (context sharing explicitly enabled).\n`);
+        }
+        session = updated;
+        conversationResponseId = updated.continuation?.responseId;
+        continuationState = updated.continuation?.providerState;
+      }
       if (task === "exit" || task === "quit" || task === "/exit") {
         backgroundTasks.cancelForSession(session.id);
         return;
       }
+      if (task === "/worktree" || task.startsWith("/worktree ")) {
+        const parts = task.split(/\s+/);
+        if (parts.length !== 3 || !["create", "select"].includes(parts[1]!)) {
+          write("Usage: /worktree create <name> | /worktree select <name>\n");
+          continue;
+        }
+        if ([...backgroundTasks.list(session.id), ...persistentJobs.list(session.id)].some((job) => job.state === "running" || job.state === "queued")) {
+          write("Finish or cancel background tasks before changing workspace.\n");
+          continue;
+        }
+        if (mcp.status().some((server) => server.state === "connected")) {
+          write("Disconnect MCP servers before changing workspace.\n");
+          continue;
+        }
+        try {
+          if (dependencies.tools) throw new Error("Custom tool bindings cannot be switched; start a new CLI in the worktree.");
+          const target = parts[1] === "create"
+            ? await createIsolatedWorktree(workingDirectory, parts[2]!)
+            : await selectIsolatedWorktree(workingDirectory, parts[2]!);
+          const replacementTools = await createCodingTools(target, {
+            maxToolOutputBytes: dependencies.config?.maxToolOutputBytes,
+            shellTimeoutMilliseconds: dependencies.config?.shellTimeoutMilliseconds,
+          });
+          const replacementCheckpoints = new SessionCheckpoints(target);
+          const next = await sessionStore.create({ workingDirectory: target, provider: activeProvider, model: activeModelName });
+          // Rebind all workspace resources between turns; never switch during runAgent.
+          await loopRuntime?.dispose();
+          loopRuntime = undefined;
+          await goalService?.close();
+          goalService = undefined;
+          await goalRuntime?.dispose();
+          goalRuntime = undefined;
+          workingDirectory = target;
+          session = next;
+          tools.splice(0, tools.length, ...replacementTools, ...planTools);
+          operations.clear();
+          for (const tool of tools) operations.set(tool.name, tool.operation);
+          checkpoints = replacementCheckpoints;
+          sessionApprovals.clear();
+          activeSkillReferences = [];
+          conversationResponseId = undefined;
+          continuationState = undefined;
+          activeModel = undefined;
+          write(`Workspace: ${target}\nSession: ${session.id}\n`);
+        } catch (error) { write(`Worktree switch failed: ${error instanceof Error ? error.message : "unknown error"}\n`); }
+        continue;
+      }
       if (task === "/help" || task.startsWith("/help ")) {
-        write(formatSlashHelp(task.slice("/help".length)));
+        write(formatSlashHelp(task.slice("/help".length), SLASH_COMMANDS.map(({ name }) => name)));
+        continue;
+      }
+      if (/^\/batch(?:\s|$)/u.test(task)) {
+        if (task.startsWith("/batch lock")) {
+          if (task !== "/batch lock status" && task !== "/batch lock recover") {
+            write("Usage: /batch lock status | /batch lock recover.\n");
+            continue;
+          }
+          activeController = new AbortController();
+          try {
+            if (!dependencies.configPath || !profileName) throw new Error("Batch requires a local profile.");
+            if (await realpath(workingDirectory) !== workingDirectory)
+              throw new Error("Batch requires a canonical session workspace; start a new session from this directory.");
+            const directory = batchWorkspaceDirectory(join(dirname(dependencies.configPath), "batches"), workingDirectory);
+            const lock = await inspectBatchLock(directory);
+            if (!lock) write("No batch lock for this profile and workspace.\n");
+            else if (task === "/batch lock status") write(`Batch lock owner: PID ${lock.pid} on ${JSON.stringify(lock.host)}. No recovery attempted.\n`);
+            else {
+              write(`Batch lock owner: PID ${lock.pid} on ${JSON.stringify(lock.host)}. Only recover if this process has stopped. Type RECOVER to confirm: `);
+              const answer = await answers.next(activeController.signal);
+              if (answer.done || answer.value.trim() !== "RECOVER") write("Batch lock recovery not confirmed.\n");
+              else {
+                activeController.signal.throwIfAborted();
+                write(await recoverAbandonedBatchLock(directory, lock.token)
+                  ? "Abandoned batch lock removed; no task was started or retried.\n"
+                  : "No batch lock for this profile and workspace.\n");
+              }
+            }
+          } catch (error: unknown) {
+            write(activeController.signal.aborted ? "Batch lock recovery cancelled.\n"
+              : `${error instanceof Error ? error.message : "Unable to inspect batch lock."}\n`);
+          } finally { activeController = undefined; }
+          continue;
+        }
+        const request = parseInteractiveBatchCommand(task);
+        if (!request) { write(`${BATCH_USAGE}\n`); continue; }
+        try {
+          if (!dependencies.configPath || !profileName) throw new Error("Batch requires a local profile.");
+          if (await realpath(workingDirectory) !== workingDirectory)
+            throw new Error("Batch requires a canonical session workspace; start a new session from this directory.");
+          const queue = createFileBatchQueue(batchWorkspaceDirectory(join(dirname(dependencies.configPath), "batches"), workingDirectory), workingDirectory);
+          if (request.action === "add") {
+            const batch = await queue.create(request.prompts, request.maxRuns);
+            write(`Batch ${batch.id} created (revision ${batch.revision}, ${batch.tasks.length} tasks, ${batch.maxRuns} runs).\n`);
+          } else if (request.action === "list") {
+            const batches = await queue.list();
+            if (!batches.length) write("No batches for this profile and workspace.\n");
+            for (const batch of batches) write(`${batch.id} revision ${batch.revision}: ${batch.runsUsed}/${batch.maxRuns} runs, ${batch.tasks.map((entry) => entry.state).join(", ")}\n`);
+          } else {
+            const batch = await queue.load(request.id);
+            if (!batch) { write("Batch not found for this profile and workspace.\n"); continue; }
+            if (request.action === "status") {
+              write(`Batch ${batch.id} revision ${batch.revision}: ${batch.runsUsed}/${batch.maxRuns} runs.\n`);
+              for (const entry of batch.tasks) write(`${entry.id}: ${entry.state}${entry.state === "running" ? entry.owner
+                ? ` (PID ${entry.owner.pid} on ${JSON.stringify(entry.owner.host)})` : " (legacy owner unknown; cannot recover safely)" : ""}\n`);
+              continue;
+            }
+            if (request.action === "recover") {
+              if (batch.revision !== request.revision) { write("Batch revision changed; inspect current status before recovery.\n"); continue; }
+              const running = batch.tasks.find((entry) => entry.state === "running");
+              if (!running?.owner) { write("No verifiable running batch reservation; no recovery attempted.\n"); continue; }
+              activeController = new AbortController();
+              try {
+                write(`Batch ${batch.id} revision ${batch.revision}: task ${running.id} owned by PID ${running.owner.pid} on ${JSON.stringify(running.owner.host)}. Only mark interrupted if this process has stopped. Type RECOVER to confirm: `);
+                const answer = await answers.next(activeController.signal);
+                if (answer.done || answer.value.trim() !== "RECOVER") write("Batch reservation recovery not confirmed.\n");
+                else {
+                  activeController.signal.throwIfAborted();
+                  const done = await queue.recover(batch.id, running.id, batch.revision, running.owner.token);
+                  write(`Batch ${done.id} revision ${done.revision}: task marked interrupted; no task was started or retried.\n`);
+                }
+              } finally { activeController = undefined; }
+              continue;
+            }
+            if (batch.revision !== request.revision) { write("Batch revision changed; inspect current status before running.\n"); continue; }
+            if (batch.tasks.some((entry) => entry.state !== "queued" && entry.state !== "completed") || batch.runsUsed >= batch.maxRuns) {
+              write("Batch cannot run: inspect task states and budget first.\n"); continue;
+            }
+            if (dependencies.model && !dependencies.modelFactory) { write("Batch run requires fresh registry-backed provider models.\n"); continue; }
+            activeController = new AbortController();
+            try {
+              write(`Batch ${batch.id} revision ${batch.revision}: up to ${batch.maxRuns - batch.runsUsed} new READ-only runs on ${activeProvider}:${activeModelName} in ${workingDirectory}. Type RUN to confirm: `);
+              const answer = await answers.next(activeController.signal);
+              if (answer.done || answer.value.trim() !== "RUN") { write("Batch not confirmed; no model started.\n"); continue; }
+              activeController.signal.throwIfAborted();
+              const batchTools = await createCodingTools(workingDirectory, {
+                maxToolOutputBytes: dependencies.config?.maxToolOutputBytes,
+                shellTimeoutMilliseconds: dependencies.config?.shellTimeoutMilliseconds,
+              });
+              const done = await runBatch({ queue, id: batch.id, revision: batch.revision, tools: batchTools,
+                createModel: () => createFreshSubagentModel(dependencies, providers, activeProvider, activeModelName, write),
+                signal: activeController.signal });
+              write(`Batch ${done.id} checkpointed at revision ${done.revision}: ${done.tasks.map((entry) => entry.state).join(", ")}.\n`);
+            } finally { activeController = undefined; }
+          }
+        } catch (error: unknown) {
+          write(`Batch command failed${error instanceof AgentRunCancelledError || activeController?.signal.aborted ? " or was cancelled" : ""}; inspect status before retrying.\n`);
+        }
+        continue;
+      }
+      if (/^\/moa(?:\s|$)/u.test(task)) {
+        const mixture = parseInteractiveMixtureCommand(task, providers.ids());
+        if (!mixture) { write(`${MIXTURE_USAGE}\n`); continue; }
+        if (dependencies.model && !dependencies.modelFactory) {
+          write("MoA requires fresh registry-backed provider models.\n");
+          continue;
+        }
+        activeController = new AbortController();
+        try {
+          const modelFor = (provider: string): string => dependencies.config?.models?.[provider]
+            ?? dependencies.config?.model ?? providers.get(provider).defaultModel;
+          write(`MoA sends this question to ${mixture.providers.map((provider) => `${provider}:${modelFor(provider)}`).join(", ")} and sends their reports to ${mixture.aggregator}:${modelFor(mixture.aggregator)}. Type SHARE to confirm: `);
+          const answer = await answers.next(activeController.signal);
+          if (answer.done || answer.value.trim() !== "SHARE") { write("MoA not confirmed; no model started.\n"); continue; }
+          activeController.signal.throwIfAborted();
+          const mixtureTools = dependencies.tools ?? await createCodingTools(workingDirectory, {
+            maxToolOutputBytes: dependencies.config?.maxToolOutputBytes,
+            shellTimeoutMilliseconds: dependencies.config?.shellTimeoutMilliseconds,
+          });
+          const result = await runMixtureOfAgents({
+            task: mixture.question, preset: mixture.preset,
+            candidates: mixture.providers.map((provider) => ({ id: provider,
+              createModel: () => createFreshSubagentModel(dependencies, providers, provider, modelFor(provider), write) })),
+            createAggregatorModel: () => createFreshSubagentModel(dependencies, providers, mixture.aggregator, modelFor(mixture.aggregator), write),
+            tools: mixtureTools, signal: activeController.signal,
+          });
+          write(`${result.finalText}\n`);
+        } catch {
+          write("MoA failed or was cancelled; no synthesis was saved.\n");
+        } finally { activeController = undefined; }
+        continue;
+      }
+      if (/^\/kanban(?:\s|$)/u.test(task)) {
+        if (task.startsWith("/kanban worker lane")) {
+          const tasks = parseKanbanWorkerLane(task);
+          if (!tasks) { write("Usage: /kanban worker lane <id>:<revision> [<id>:<revision> ...] (up to 8).\n"); continue; }
+          activeController = new AbortController();
+          try {
+            if (!profileName || !dependencies.profileStore) throw new Error("Kanban requires a local profile store.");
+            if (await realpath(workingDirectory) !== workingDirectory)
+              throw new Error("Kanban requires a canonical session workspace; start a new session from this directory.");
+            const baseConfigPath = dependencies.profileStore.paths(DEFAULT_DRAGONS_PROFILE).configPath;
+            const board = createFileKanbanBoard(kanbanWorkspaceDirectory(baseConfigPath, workingDirectory), dependencies.profileStore);
+            const done = await runKanbanWorkerLane({ board, workingDirectory, configPath: baseConfigPath,
+              profile: profileName, tasks, signal: activeController.signal });
+            write(`Kanban worker lane completed ${done.length} tasks: ${done.join(", ")}.\n`);
+          } catch {
+            write("Kanban worker lane failed or was cancelled; inspect task statuses before retrying.\n");
+          } finally { activeController = undefined; }
+          continue;
+        }
+        if (task.startsWith("/kanban worker start")) {
+          const start = parseKanbanWorkerStart(task);
+          if (!start) { write("Usage: /kanban worker start <id> <revision>.\n"); continue; }
+          activeController = new AbortController();
+          try {
+            if (!profileName || !dependencies.profileStore) throw new Error("Kanban requires a local profile store.");
+            const baseConfigPath = dependencies.profileStore.paths(DEFAULT_DRAGONS_PROFILE).configPath;
+            await launchKanbanWorker({ workingDirectory, configPath: baseConfigPath, profile: profileName,
+              id: start.id, revision: start.revision, signal: activeController.signal });
+            write(`Kanban worker completed task ${start.id}; inspect /kanban status ${start.id}.\n`);
+          } catch (error: unknown) {
+            write(`Kanban worker failed: ${error instanceof Error ? error.message : "Unknown error."}\n`);
+          } finally { activeController = undefined; }
+          continue;
+        }
+        if (task.startsWith("/kanban lock")) {
+          if (task !== "/kanban lock status" && task !== "/kanban lock recover") {
+            write("Usage: /kanban lock status | /kanban lock recover.\n");
+            continue;
+          }
+          activeController = new AbortController();
+          try {
+            if (!profileName || !dependencies.profileStore) throw new Error("Kanban requires a local profile store.");
+            if (await realpath(workingDirectory) !== workingDirectory)
+              throw new Error("Kanban requires a canonical session workspace; start a new session from this directory.");
+            const directory = kanbanWorkspaceDirectory(dependencies.profileStore.paths(DEFAULT_DRAGONS_PROFILE).configPath, workingDirectory);
+            const lock = await inspectKanbanLock(directory);
+            if (!lock) write("No Kanban lock for this workspace.\n");
+            else if (task === "/kanban lock status") write(`Kanban lock owner: PID ${lock.pid} on ${JSON.stringify(lock.host)}. No recovery attempted.\n`);
+            else {
+              write(`Kanban lock owner: PID ${lock.pid} on ${JSON.stringify(lock.host)}. Only recover if this process has stopped. Type RECOVER to confirm: `);
+              const answer = await answers.next(activeController.signal);
+              if (answer.done || answer.value.trim() !== "RECOVER") write("Kanban lock recovery not confirmed.\n");
+              else {
+                activeController.signal.throwIfAborted();
+                write(await recoverAbandonedKanbanLock(directory, lock.token)
+                  ? "Abandoned Kanban lock removed; no worker was stopped or started.\n"
+                  : "No Kanban lock for this workspace.\n");
+              }
+            }
+          } catch (error: unknown) {
+            write(activeController.signal.aborted ? "Kanban lock recovery cancelled.\n"
+              : `${error instanceof Error ? error.message : "Unable to inspect Kanban lock."}\n`);
+          } finally { activeController = undefined; }
+          continue;
+        }
+        const command = parseInteractiveKanbanCommand(task);
+        if (!command) write(`${KANBAN_USAGE}\n`);
+        else if (!profileName || !dependencies.profileStore) write("Kanban requires a local profile store.\n");
+        else {
+          try {
+            // The board root is shared across profiles; the actor is bound at CLI startup, not read from user text.
+            if (await realpath(workingDirectory) !== workingDirectory)
+              throw new Error("Kanban requires a canonical session workspace; start a new session from this directory.");
+            const baseConfigPath = dependencies.profileStore.paths(DEFAULT_DRAGONS_PROFILE).configPath;
+            const board = createFileKanbanBoard(kanbanWorkspaceDirectory(baseConfigPath, workingDirectory), dependencies.profileStore);
+            if (command.action === "worker_recover") {
+              activeController = new AbortController();
+              try {
+                const current = await board.get(profileName, command.id);
+                if (!current) throw new Error("Kanban task not found.");
+                if (current.assignee !== profileName) throw new Error("Only the task assignee can recover worker ownership.");
+                if (current.revision !== command.revision) throw new Error("Kanban task revision changed.");
+                if (!current.worker) throw new Error("No Kanban worker claim to recover.");
+                if (current.worker.pid !== command.pid) throw new Error("Kanban worker claim changed.");
+                write(`Kanban worker PID ${command.pid} on ${JSON.stringify(current.worker.host)} for task ${command.id}. Only recover if this process has stopped. Type RECOVER to confirm: `);
+                const answer = await answers.next(activeController.signal);
+                if (answer.done || answer.value.trim() !== "RECOVER") write("Kanban worker recovery not confirmed.\n");
+                else {
+                  activeController.signal.throwIfAborted();
+                  const recovered = await board.recoverWorker(profileName, command.id, command.revision, command.pid);
+                  write(`Kanban task ${recovered.id} revision ${recovered.revision} blocked; no worker was stopped or started.\n`);
+                }
+              } finally { activeController = undefined; }
+            } else write(`${await runInteractiveKanbanCommand(board, profileName, command)}\n`);
+          } catch (error: unknown) {
+            write(`Kanban command failed: ${error instanceof Error ? error.message : "Unknown error."}\n`);
+          }
+        }
+        continue;
+      }
+      if (/^\/goal(?:\s|$)/.test(task)) {
+        if (task.startsWith("/goal lock")) {
+          if (task !== "/goal lock status" && task !== "/goal lock recover") {
+            write("Usage: /goal lock status | /goal lock recover.\n");
+            continue;
+          }
+          activeController = new AbortController();
+          try {
+            if (!dependencies.configPath) throw new Error("Goal commands require a local profile.");
+            if (await realpath(workingDirectory) !== workingDirectory)
+              throw new Error("Goal commands require a canonical session workspace; start a new session from this directory.");
+            const directory = goalWorkspaceDirectory(join(dirname(dependencies.configPath), "goals"), workingDirectory);
+            const lock = await inspectPersistentGoalLock(directory);
+            if (!lock) write("No goal lock for this workspace.\n");
+            else if (task === "/goal lock status") write(`Lock owner: PID ${lock.pid} on ${JSON.stringify(lock.host)}. No recovery attempted.\n`);
+            else {
+              write(`Lock owner: PID ${lock.pid} on ${JSON.stringify(lock.host)}. Only recover if this process has stopped. Type RECOVER to confirm: `);
+              const answer = await answers.next(activeController.signal);
+              if (answer.done || answer.value.trim() !== "RECOVER") write("Goal lock recovery not confirmed.\n");
+              else {
+                activeController.signal.throwIfAborted();
+                write(await recoverAbandonedPersistentGoalLock(directory, lock.token)
+                  ? "Abandoned goal lock removed. A stranded goal run is not stopped or replayed.\n"
+                  : "No goal lock for this workspace.\n");
+              }
+            }
+          } catch (error: unknown) {
+            write(activeController.signal.aborted ? "Goal lock recovery cancelled.\n"
+              : `${error instanceof Error ? error.message : "Unable to inspect goal lock."}\n`);
+          } finally { activeController = undefined; }
+          continue;
+        }
+        const goalCommand = parseInteractiveGoalCommand(task, session.id);
+        if (!goalCommand) { write(`${GOAL_USAGE}\n`); continue; }
+        if (goalCommand.action === "run" && (dependencies.model || dependencies.modelFactory)) {
+          write("Goal run requires a registry-backed provider model.\n");
+          continue;
+        }
+        activeController = new AbortController();
+        try {
+          if (!dependencies.configPath) throw new Error("Goal commands require a local profile.");
+          if (await realpath(workingDirectory) !== workingDirectory)
+            throw new Error("Goal commands require a canonical session workspace; start a new session from this directory.");
+          goalRuntime ??= await createDragonsRuntime({ workingDirectory, providerRegistry: providers, sessionStore,
+            tools: [], memoryStore, skillsDirectory, maxTurns: dependencies.config?.maxTurns,
+            contextBudgetChars: dependencies.config?.contextBudgetChars });
+          goalService ??= createPersistentGoalService(goalRuntime, join(dirname(dependencies.configPath), "goals"), workingDirectory);
+          const current = goalService;
+          const cancelGoal = (): void => { void current.close(); };
+          activeController.signal.addEventListener("abort", cancelGoal, { once: true });
+          try { write(`${await current.command(goalCommand)}\n`); }
+          finally { activeController.signal.removeEventListener("abort", cancelGoal); }
+        } catch (error: unknown) {
+          write(activeController.signal.aborted ? "Goal command cancelled.\n"
+            : error instanceof Error && /^(Goal commands require|Persistent goal session is unavailable)/.test(error.message)
+              ? `${error.message}\n` : "Goal command failed. Check session, budget, and goal state.\n");
+        } finally {
+          if (goalCommand.action === "run") {
+            const updated = await sessionStore.load(session.id);
+            if (updated && updated.workingDirectory === workingDirectory) {
+              session = updated;
+              conversationResponseId = updated.continuation?.responseId;
+              continuationState = updated.continuation?.providerState;
+              activeModel = undefined;
+              if (updated.provider !== activeProvider || updated.model !== activeModelName) {
+                providers.get(updated.provider);
+                activeProvider = updated.provider;
+                activeModelName = updated.model;
+                activeModelInput = updated.model;
+              }
+            }
+          }
+          if (activeController.signal.aborted) {
+            await goalService?.close();
+            goalService = undefined;
+            await goalRuntime?.dispose();
+            goalRuntime = undefined;
+          }
+          activeController = undefined;
+        }
         continue;
       }
       if (/^\/(login|logout|auth)(?:\s|$)/.test(task)) {
@@ -682,9 +1164,9 @@ async function runInteractiveConversation(
       if (task === "/clear") {
         const clearedAt = new Date().toISOString();
         const clearedSession = sessionStore.mutate
-          ? await sessionStore.mutate(session.id, (current) => ({ ...current, updatedAt: clearedAt, messages: [], continuation: undefined }))
+          ? await sessionStore.mutate(session.id, (current) => ({ ...current, updatedAt: clearedAt, messages: [], toolHistory: [], continuation: undefined }))
           : await (async () => {
-            const next = { ...session, updatedAt: clearedAt, messages: [], continuation: undefined };
+            const next = { ...session, updatedAt: clearedAt, messages: [], toolHistory: [], continuation: undefined };
             await sessionStore.save(next);
             return next;
           })();
@@ -856,6 +1338,7 @@ async function runInteractiveConversation(
         if (!nextModel) { write("Usage: /model <name>\n"); continue; }
         const nextConfig: DragonsConfig = { ...(dependencies.config ?? {}), version: 1, models: { ...(dependencies.config?.models ?? {}), [activeProvider]: nextModel } };
         await saveDragonsConfig(nextConfig, dependencies.configPath, providers.ids());
+        dependencies.config = nextConfig;
         backgroundTasks.cancelForSession(session.id);
         activeModelName = nextModel;
         activeModelInput = nextModel;
@@ -882,6 +1365,7 @@ async function runInteractiveConversation(
         const nextModel = selectedModel(providers, nextProvider, configuredModel);
         const nextConfig: DragonsConfig = { ...(dependencies.config ?? {}), version: 1, provider: nextProvider };
         await saveDragonsConfig(nextConfig, dependencies.configPath, providers.ids());
+        dependencies.config = nextConfig;
         backgroundTasks.cancelForSession(session.id);
         activeProvider = nextProvider;
         activeModelName = nextModel;
@@ -988,7 +1472,10 @@ async function runInteractiveConversation(
           memory,
           getPlan: async () => ({ version: 1, tasks: await createSessionPlanStore(sessionStore, session.id).list() }),
         });
-        const runTools = [...tools, suggestionTool, subagent, parallelSubagents, ...orchestrationTools];
+        const historyRecorder = createSessionHistoryRecorder();
+        const searchTools = createSessionSearchTools(sessionStore, workingDirectory);
+        for (const tool of searchTools) operations.set(tool.name, tool.operation);
+        const runTools = [...tools, ...searchTools, suggestionTool, subagent, parallelSubagents, ...orchestrationTools];
         operations.set(suggestionTool.name, suggestionTool.operation);
         operations.set(subagent.name, subagent.operation);
         operations.set(parallelSubagents.name, parallelSubagents.operation);
@@ -998,6 +1485,7 @@ async function runInteractiveConversation(
         activeRunDiagnostics = runDiagnostics;
         const result = await runAgent({
           task,
+          inlineContextReferences: true,
           model: activeModel,
           tools: runTools,
           lsp: dependencies.config?.lsp,
@@ -1011,7 +1499,7 @@ async function runInteractiveConversation(
           sessionApprovals,
           checkpoints,
           authorize,
-          onEvent: (event) => renderEvent(event, renderer, operations),
+          onEvent: (event) => { historyRecorder.observe(event); renderEvent(event, renderer, operations); },
           maxTurns: dependencies.config?.maxTurns,
           contextBudgetChars: dependencies.config?.contextBudgetChars,
           signal: controller.signal,
@@ -1030,6 +1518,7 @@ async function runInteractiveConversation(
             ...current,
             updatedAt: completedAt,
             messages,
+            toolHistory: historyRecorder.merge(current),
             continuation: {
               responseId: result.responseId,
               ...(result.continuationState === undefined ? {} : { providerState: result.continuationState }),
@@ -1064,6 +1553,8 @@ async function runInteractiveConversation(
     backgroundTasks.cancelForSession(session.id);
     process.removeListener("SIGINT", cancel);
     lines.close();
+    try { await stopSessionLoop(); } finally { await loopRuntime?.dispose(); }
+    try { await goalService?.close(); } finally { await goalRuntime?.dispose(); }
     await mcp.closeAll();
     renderer.dispose();
   }
@@ -1080,7 +1571,7 @@ export async function main(
     return;
   }
   if (arguments_.length === 1 && (arguments_[0] === "--help" || arguments_[0] === "-h")) {
-    write(`Usage: dragons [--provider ${configuredProviderIds.join("|")}] [--model <model>] [task]\n\nRun without a task for interactive mode. Use --tui for the full-screen runtime client; --tui --resume <id> continues a saved session. Commands: auth, profile, config, session, skills, memory, plan, mcp.\n`);
+    write(`Usage: dragons [--provider ${configuredProviderIds.join("|")}] [--model <model>] [task]\n\nRun without a task for interactive mode. Use --tui for the full-screen runtime client; --tui --resume <id> continues a saved session. Commands: auth, profile, config, session, skills, memory, plan, cron, mcp.\n`);
     return;
   }
   const initialCommand = parseCliCommand(arguments_, configuredProviderIds);
@@ -1112,8 +1603,12 @@ export async function main(
   }
   let tuiAuthNotice: ((text: string) => void) | undefined;
   let tuiAuthSignal: AbortSignal | undefined;
+  let cronProfileName: string | undefined;
   if (profiles) {
-    const profile = profiles.paths(await profiles.active());
+    const requestedCronProfile = initialCommand.kind === "cron" && initialCommand.action === "serve" ? initialCommand.profile : undefined;
+    if (requestedCronProfile && !(await profiles.list()).includes(requestedCronProfile)) throw new Error("Cron profile does not exist.");
+    const profile = profiles.paths(requestedCronProfile ?? await profiles.active());
+    cronProfileName = profile.name;
     dependencies = {
       ...dependencies,
       apiKeyAuth: dependencies.apiKeyAuth ?? createApiKeyAuth(profile.name),
@@ -1122,6 +1617,7 @@ export async function main(
       skillsDirectory: dependencies.skillsDirectory ?? profile.skillsDirectory,
       memoryDirectory: dependencies.memoryDirectory ?? profile.memoryDirectory,
       backgroundJobsDirectory: dependencies.backgroundJobsDirectory ?? profile.backgroundJobsDirectory,
+      cronDirectory: dependencies.cronDirectory ?? join(dirname(profile.configPath), "cron"),
       chatgptAuth: dependencies.chatgptAuth ?? createChatGPTAuthService({
         write: initialCommand.kind === "tui" ? (text) => tuiAuthNotice?.(text) : write,
         credentialPath: join(dirname(profile.configPath), "auth.json"),
@@ -1256,6 +1752,19 @@ export async function main(
     await runPlanCommand(parsedCommand, sessionStoreFor(dependencies, providers), write);
     return;
   }
+  if (parsedCommand.kind === "cron") {
+    if (!dependencies.cronDirectory) throw new Error("Cron requires an active Dragons profile state root.");
+    if (parsedCommand.action === "serve" && parsedCommand.workspace && dependencies.workingDirectory
+      && await realpath(parsedCommand.workspace) !== await realpath(dependencies.workingDirectory)) throw new Error("Cron workspace cannot override the host workspace.");
+    const provider = config.provider ?? providers.ids()[0];
+    if (!provider) throw new Error("Cron requires a configured provider.");
+    await runCronCommand({ command: parsedCommand, directory: dependencies.cronDirectory,
+      workingDirectory: parsedCommand.action === "serve" && parsedCommand.workspace ? parsedCommand.workspace : dependencies.workingDirectory ?? process.cwd(), skillsDirectory: skillsDirectoryFor(dependencies),
+      ...(cronProfileName ? { profileName: cronProfileName } : {}),
+      createModel: () => createFreshSubagentModel(dependencies, providers, provider, config.models?.[provider] ?? config.model, write),
+      write, ...(dependencies.cronSignal === undefined ? {} : { signal: dependencies.cronSignal }) });
+    return;
+  }
   if (parsedCommand.kind === "memory") {
     await runMemoryCommand({
       command: parsedCommand,
@@ -1307,7 +1816,8 @@ export async function main(
     command = parsedCommand;
   }
 
-  const workingDirectory = resumedSession?.workingDirectory ?? dependencies.workingDirectory ?? process.cwd();
+  // Runtime-owned unattended turns compare exact canonical workspace identities.
+  const workingDirectory = resumedSession?.workingDirectory ?? await realpath(dependencies.workingDirectory ?? process.cwd());
   const tools = dependencies.tools ?? await createCodingTools(workingDirectory, {
     maxToolOutputBytes: config.maxToolOutputBytes,
     shellTimeoutMilliseconds: config.shellTimeoutMilliseconds,
@@ -1319,7 +1829,7 @@ export async function main(
       provider: command.provider,
       model: selectedModel(providers, command.provider, command.model),
     });
-    await runInteractiveConversation(command, { ...dependencies, config }, providers, write, dependencies.model, tools, workingDirectory, skillsDirectoryFor(dependencies), memoryStoreFor(dependencies), store, session, Boolean(resumedSession), mcp, diagnostics);
+    await runInteractiveConversation(command, { ...dependencies, config }, providers, write, dependencies.model, tools, workingDirectory, skillsDirectoryFor(dependencies), memoryStoreFor(dependencies), store, session, Boolean(resumedSession), mcp, diagnostics, cronProfileName);
     return;
   }
   let plainRunDiagnostics: RuntimeDiagnosticsRun | undefined;
@@ -1363,7 +1873,9 @@ export async function main(
       projectContext,
       memory,
     });
-    const runTools = [...tools, suggestionTool, subagent, parallelSubagents];
+    const searchTools = createSessionSearchTools(sessions ?? sessionStoreFor(dependencies, providers), workingDirectory);
+    for (const tool of searchTools) operations.set(tool.name, tool.operation);
+    const runTools = [...tools, ...searchTools, suggestionTool, subagent, parallelSubagents];
     operations.set(suggestionTool.name, suggestionTool.operation);
     operations.set(subagent.name, subagent.operation);
     operations.set(parallelSubagents.name, parallelSubagents.operation);
@@ -1371,6 +1883,7 @@ export async function main(
     plainRunDiagnostics = runDiagnostics;
     await runAgent({
       task: command.prompt,
+      inlineContextReferences: true,
       model,
       tools: runTools,
       lsp: config.lsp,

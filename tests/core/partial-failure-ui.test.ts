@@ -14,6 +14,9 @@ import { createProviderRegistry } from "../../dist/provider/registry.js";
 import { createSessionStore } from "../../dist/session-store.js";
 import { DesktopBridge } from "../../dist/desktop/bridge.js";
 import { toolMutationWarning } from "../../dist/tool-mutation-warning.js";
+import { checkpointIo } from "../../dist/checkpoint-win32.js";
+
+import { supportedCheckpointTest } from "../checkpoint/checkpoint-support.js";
 
 function model() {
   let first = true;
@@ -24,18 +27,20 @@ function model() {
   } };
 }
 
-for (const product of ["CLI", "Desktop"] as const) test(`${product} shows actual injected partial-write path without model repetition`, { timeout: 15000 }, async (t) => {
+for (const product of ["CLI", "Desktop"] as const) supportedCheckpointTest(`${product} shows actual injected partial-write path without model repetition`, { timeout: 15000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "dragons-partial-ui-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(join(root, "affected.txt"), "original");
-  const original = fs.writeSync;
+  const windows = process.platform === "win32";
+  const original = windows ? checkpointIo.write : fs.writeSync;
   let injected = false;
-  const mocked = t.mock.method(fs, "writeSync", (fd: number, bytes: Buffer, offset: number, length: number, position: number) => {
-    if (!injected) { injected = true; original(fd, Buffer.from("PART"), 0, 4, 0); throw new Error("Synthetic partial failure"); }
-    return original(fd, bytes, offset, length, position);
-  });
-  syncBuiltinESMExports();
-  t.after(() => { mocked.mock.restore(); syncBuiltinESMExports(); });
+  const inject = (fd: number | object, bytes: Buffer, offset: number, length: number, position: number) => {
+    if (!injected) { injected = true; (original as typeof checkpointIo.write)(fd as never, Buffer.from("PART"), 0, 4, 0); throw new Error("Synthetic partial failure"); }
+    return (original as typeof checkpointIo.write)(fd as never, bytes, offset, length, position);
+  };
+  const mocked = windows ? t.mock.method(checkpointIo, "write", inject) : t.mock.method(fs, "writeSync", inject);
+  if (!windows) syncBuiltinESMExports();
+  t.after(() => { mocked.mock.restore(); if (!windows) syncBuiltinESMExports(); });
   const tools = await createCodingTools(root);
   let visible = "";
   if (product === "CLI") {

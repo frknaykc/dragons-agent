@@ -112,6 +112,9 @@ export async function connectRemoteRuntime(options: { url: string; token: string
     },
     listBackgroundTasks: async (sessionId) => { if (sessionId !== session?.id) throw new RuntimeRunError("Session is not attached."); return request<RuntimeBackgroundTask[]>({ type: "background" }); },
     sendUserInput: async (input) => {
+      // The remote command protocol has no readOnly field. Never silently
+      // downgrade a restricted turn into an ordinary approval-capable run.
+      if (input?.readOnly === true) throw new RuntimeRunError("Read-only turns are not supported by the remote runtime.");
       assertOpen(); if (admitting || sending || !session || input.sessionId !== session.id || (run && !run.done)) throw new RuntimeRunError("Remote session unavailable or busy.");
       sending = true; run = undefined;
       try {

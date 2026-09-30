@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .test-build/
+native/checkpoint-win32/build/
 desktop-artifacts/
 .env
 .env.*

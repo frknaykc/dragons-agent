@@ -160,6 +160,7 @@ export class BackgroundTaskManager {
             task: options.prompt,
             model: options.createModel(),
             tools: readOnlyTaskTools(options.tools),
+            programmaticTools: false,
             workingDirectory: options.workingDirectory,
             projectContext: cloneSnapshot(options.projectContext),
             skills: cloneSnapshot(options.skills),

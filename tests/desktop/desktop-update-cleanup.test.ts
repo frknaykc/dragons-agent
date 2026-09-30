@@ -42,7 +42,7 @@ for (const mode of ["reject", "throw", "pending"] as const) test(`bridge updater
   await checked;
 });
 
-for (const duringClose of [false, true]) test(`temporary cleanup retains ownership, duringClose=${duringClose}`, async () => {
+for (const duringClose of [false, true]) test(`temporary cleanup retains ownership, duringClose=${duringClose}`, { skip: process.platform === "win32" && "macOS staging permissions are not modeled by Windows" }, async () => {
   const root = await mkdtemp(join(tmpdir(), "dragons-cleanup-"));
   let attempts = 0;
   let entered!: () => void;

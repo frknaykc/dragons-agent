@@ -1,3 +1,5 @@
+import { constants } from "node:fs";
+import { open, opendir, realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -15,6 +17,9 @@ export type SessionMessage = {
   createdAt: string;
 };
 
+export type SessionToolObservation = { name: string; output: string; ok: boolean; createdAt: string };
+export type SessionSearchSnapshot = { sessions: DragonsSession[]; limited: boolean };
+
 export type SessionContinuation = {
   responseId: string;
   providerState?: Record<string, unknown>;
@@ -30,6 +35,8 @@ export type DragonsSession = {
   model: string;
   messages: SessionMessage[];
   continuation?: SessionContinuation;
+  /** App-owned bounded observations; never tool arguments or provider state. */
+  toolHistory?: SessionToolObservation[];
   /** Skill activation intent only; bodies are never persisted with the transcript. */
   skills?: SkillReference[];
   /** Bounded app-owned task state, never provider continuation or transcript content. */
@@ -59,6 +66,8 @@ export type SessionStore = {
   /** Exclusive foreground execution lease; independent of short session mutations. */
   acquireExecution?(id: string): Promise<() => Promise<void>>;
   list(): Promise<DragonsSession[]>;
+  /** Non-mutating bounded scan, restricted to this store and canonical workspace. */
+  searchSnapshot?(workspace: string, signal?: AbortSignal): Promise<SessionSearchSnapshot>;
   delete(id: string): Promise<boolean>;
 };
 
@@ -155,6 +164,9 @@ function parseSession(value: unknown, providers: ReadonlySet<SessionProvider>): 
     || !Array.isArray(value.messages)
     || !value.messages.every(isSessionMessage)) return undefined;
 
+  if (value.toolHistory !== undefined && (!Array.isArray(value.toolHistory) || value.toolHistory.length > 100
+    || !value.toolHistory.every((item) => isRecord(item) && typeof item.name === "string" && item.name.length <= 128
+      && typeof item.output === "string" && item.output.length <= 2000 && typeof item.ok === "boolean" && typeof item.createdAt === "string"))) return undefined;
   const continuation = value.continuation;
   if (continuation !== undefined) {
     if (!isRecord(continuation)
@@ -245,6 +257,45 @@ export function createSessionStore(directory: string, options: SessionStoreOptio
       } finally {
         await release();
       }
+    },
+
+    async searchSnapshot(workspace, signal): Promise<SessionSearchSnapshot> {
+      const sessions: DragonsSession[] = [];
+      signal?.throwIfAborted();
+      const scope = await realpath(workspace);
+      let scanned = 0;
+      let bytes = 0;
+      let limited = false;
+      signal?.throwIfAborted();
+      let directoryHandle;
+      try { directoryHandle = await opendir(directory); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return { sessions, limited };
+        throw new Error("Session search is unavailable.");
+      }
+      for await (const entry of directoryHandle) {
+        signal?.throwIfAborted();
+        if (++scanned > 1000) { limited = true; break; }
+        if (!entry.isFile() || !entry.name.endsWith(".json") || !SESSION_ID_PATTERN.test(entry.name.slice(0, -5))) continue;
+        let handle;
+        try {
+          handle = await open(join(directory, entry.name), constants.O_RDONLY | constants.O_NOFOLLOW);
+          const stat = await handle.stat();
+          if (!stat.isFile() || stat.size > 1_048_576) { limited = true; continue; }
+          if (bytes + stat.size > 8_388_608) { limited = true; break; }
+          // Fixed buffer also bounds concurrent file growth.
+          const buffer = Buffer.alloc(stat.size + 1);
+          const read = await handle.read(buffer, 0, buffer.length, 0);
+          bytes += read.bytesRead;
+          if (read.bytesRead !== stat.size) { limited = true; continue; }
+          const session = parseSession(JSON.parse(buffer.subarray(0, read.bytesRead).toString("utf8")), providers);
+          if (!session || session.id !== entry.name.slice(0, -5) || await realpath(session.workingDirectory) !== scope) continue;
+          sessions.push(session);
+        } catch { /* Invalid, deleted, symlinked, or inaccessible records are excluded. */ }
+        finally { await handle?.close(); }
+      }
+      signal?.throwIfAborted();
+      return { sessions, limited };
     },
 
     async list(): Promise<DragonsSession[]> {

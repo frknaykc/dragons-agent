@@ -18,7 +18,7 @@ import { createProviderRegistry } from "../../dist/provider/registry.js";
 import { slashChoices } from "../../dist/slash-choices.js";
 
 const credentials = { getValidCredentials: async () => ({ accessToken: "fixture-token", refreshToken: "fixture-refresh", expiresAt: "2099-01-01T00:00:00.000Z", tokenType: "Bearer" as const }) };
-const registry = () => createBuiltInProviderRegistry({ chatgptAuth: { credentials } });
+const registry = () => createBuiltInProviderRegistry({ chatgptAuth: { credentials }, apiKeyAuth: false });
 
 test("reasoning capabilities use exact model IDs and reject unsupported max/ultra", async () => {
   const providers = registry();

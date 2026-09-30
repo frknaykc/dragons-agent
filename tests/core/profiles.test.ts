@@ -7,11 +7,11 @@ import test from "node:test";
 import { createDragonsProfileStore, DEFAULT_DRAGONS_PROFILE, getDragonsProfilePaths, isSafeProfileName } from "../../dist/profiles.js";
 
 test("profile paths retain legacy defaults and isolate named profiles", () => {
-  const configPath = "/tmp/dragons/config.json";
-  assert.equal(getDragonsProfilePaths(DEFAULT_DRAGONS_PROFILE, configPath).sessionDirectory, "/tmp/dragons/sessions");
+  const configPath = join(tmpdir(), "dragons", "config.json");
+  assert.equal(getDragonsProfilePaths(DEFAULT_DRAGONS_PROFILE, configPath).sessionDirectory, join(tmpdir(), "dragons", "sessions"));
   const work = getDragonsProfilePaths("work", configPath);
-  assert.equal(work.configPath, "/tmp/dragons/profiles/work/config.json");
-  assert.equal(work.sessionDirectory, "/tmp/dragons/profiles/work/sessions");
+  assert.equal(work.configPath, join(tmpdir(), "dragons", "profiles", "work", "config.json"));
+  assert.equal(work.sessionDirectory, join(tmpdir(), "dragons", "profiles", "work", "sessions"));
   assert.equal(work.credentialAccount, "chatgpt-subscription:work");
   assert.equal(isSafeProfileName("work-2026"), true);
   assert.equal(isSafeProfileName("../outside"), false);

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -8,10 +7,12 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { runAgent, type AgentModel, type ToolCall } from "../../dist/agent.js";
 import { SessionCheckpoints } from "../../dist/checkpoint.js";
+import { checkpointIo, type CheckpointHandle } from "../../dist/checkpoint-win32.js";
 import { createProviderRegistry } from "../../dist/provider/registry.js";
 import { createDragonsRuntime, type RuntimeEvent } from "../../dist/runtime.js";
 import { createSessionStore } from "../../dist/session-store.js";
 import { createCodingTools } from "../../dist/tools.js";
+import { supportedCheckpointTest as checkpointTest } from "./checkpoint-support.js";
 
 function modelFor(call: ToolCall): AgentModel {
   let first = true;
@@ -31,7 +32,7 @@ async function fixture(t: TestContext) {
   return root;
 }
 
-test("classification is nonmutating and structural capture remains nonmutating and rejects unsafe batch members", async (t) => {
+checkpointTest("classification is nonmutating and structural capture remains nonmutating and rejects unsafe batch members", async (t) => {
   const root = await fixture(t);
   const history = new SessionCheckpoints(root);
   assert.deepEqual(history.classify([{ path: "new.txt", content: "safe" }]), { kind: "covered" });
@@ -117,21 +118,20 @@ for (const withHistory of [false]) for (const toolName of ["write_file", "edit_f
   });
 }
 
-for (const toolName of ["write_file", "edit_file", "apply_patch"]) test(`structural ${toolName} partial failure uses actual backend and retains only completed receipts`, async (t) => {
+for (const toolName of ["write_file", "edit_file", "apply_patch"]) checkpointTest(`structural ${toolName} partial failure uses actual backend and retains only completed receipts`, async (t) => {
   const root = await fixture(t);
   await writeFile(join(root, "nested/second.txt"), "before\n");
   const history = new SessionCheckpoints(root);
-  const original = fs.writeSync;
+  const original = checkpointIo.write;
   let writes = 0;
-  const mock = t.mock.method(fs, "writeSync", (fd: number, bytes: Buffer, offset: number, length: number, position: number) => {
+  const mock = t.mock.method(checkpointIo, "write", (fd: CheckpointHandle, bytes: Buffer, offset: number, length: number, position: number) => {
     if (++writes === (toolName === "apply_patch" ? 2 : 1)) {
       original(fd, Buffer.from("PART"), 0, 4, 0);
       throw new Error("Synthetic structural failure");
     }
     return original(fd, bytes, offset, length, position);
   });
-  syncBuiltinESMExports();
-  t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+  t.after(() => mock.mock.restore());
   const input = toolName === "apply_patch" ? { patch: ["edit", "second"].map(name => `--- a/nested/${name}.txt\n+++ b/nested/${name}.txt\n@@ -1 +1 @@\n-before\n+after\n`).join("") }
     : toolName === "edit_file" ? { path: "nested/edit.txt", oldText: "before", newText: "after" } : { path: "nested/edit.txt", content: "after\n" };
   const tools = await createCodingTools(root);
@@ -158,7 +158,7 @@ async function assertContent(root: string, path: string, expected: string | null
 
 for (const scenario of scenarios) {
   for (const allow of [false, true]) {
-    test(`runtime ${allow ? "approved" : "denied"} ${scenario.name} preserves tool behavior and single approval`, async (t) => {
+    (allow ? checkpointTest : test)(`runtime ${allow ? "approved" : "denied"} ${scenario.name} preserves tool behavior and single approval`, async (t) => {
       const root = await fixture(t);
       const call: ToolCall = { callId: "coverage-call", name: scenario.tool, arguments: JSON.stringify(scenario.args) };
       const providers = createProviderRegistry([{
@@ -210,7 +210,7 @@ for (const output of [
   "Checkpoint unsupported operation/topology: injected mutation error must not trigger retry.",
   "Checkpoint excludes credential paths, sensitive content and binary files; write refused.",
 ]) {
-  test(`runAgent never retries a checkpoint mutation error through legacy writes: ${output}`, async (t) => {
+  checkpointTest(`runAgent never retries a checkpoint mutation error through legacy writes: ${output}`, async (t) => {
     const root = await fixture(t);
     await writeFile(join(root, "existing.txt"), "before");
     const history = new SessionCheckpoints(root);

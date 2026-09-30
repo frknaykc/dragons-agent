@@ -5,10 +5,10 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 /** Internal READ-only Git boundary. Callers supply fixed commands, never shell input. */
-export async function readOnlyGit(workspace: string, arguments_: string[], maxBytes: number) {
+export async function readOnlyGit(workspace: string, arguments_: string[], maxBytes: number, signal?: AbortSignal) {
   // READ must not run repository-configured helpers or refresh the index on disk.
-  const safeConfig = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", `core.hooksPath=${devNull}`, "-c", "log.showSignature=false", "-c", "diff.submodule=short"];
-  const { stdout: root } = await execFileAsync("git", [...safeConfig, "rev-parse", "--show-toplevel"], { cwd: workspace, encoding: "utf8", maxBuffer: maxBytes });
+  const safeConfig = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", `core.hooksPath=${process.platform === "win32" ? "NUL" : devNull}`, "-c", "log.showSignature=false", "-c", "diff.submodule=short"];
+  const { stdout: root } = await execFileAsync("git", [...safeConfig, "rev-parse", "--show-toplevel"], { cwd: workspace, encoding: "utf8", maxBuffer: maxBytes, signal, timeout: 10_000, env: { ...process.env, GIT_NO_LAZY_FETCH: "1", GIT_TERMINAL_PROMPT: "0" } });
   if (await realpath(root.trim()) !== await realpath(workspace)) throw new Error("Git repository root must be the working directory.");
   let filtersDisabled = false;
   if (arguments_[0] === "diff" || arguments_[0] === "status") {
@@ -16,7 +16,7 @@ export async function readOnlyGit(workspace: string, arguments_: string[], maxBy
     // each configured driver rather than disabling Git in every LFS-enabled repo.
     let filterKeys = "";
     try {
-      filterKeys = (await execFileAsync("git", [...safeConfig, "config", "--null", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|process)$"], { cwd: workspace, encoding: "utf8", maxBuffer: maxBytes })).stdout;
+      filterKeys = (await execFileAsync("git", [...safeConfig, "config", "--null", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|process)$"], { cwd: workspace, encoding: "utf8", maxBuffer: maxBytes, signal, timeout: 10_000, env: { ...process.env, GIT_NO_LAZY_FETCH: "1", GIT_TERMINAL_PROMPT: "0" } })).stdout;
     } catch (error: unknown) {
       // Exit 1 means no matching keys; every other failure must fail closed.
       if (!(typeof error === "object" && error !== null && "code" in error && error.code === 1)) throw error;
@@ -27,6 +27,6 @@ export async function readOnlyGit(workspace: string, arguments_: string[], maxBy
       filtersDisabled = true;
     }
   }
-  const { stdout, stderr } = await execFileAsync("git", [...safeConfig, ...arguments_], { cwd: workspace, encoding: "utf8", maxBuffer: maxBytes });
+  const { stdout, stderr } = await execFileAsync("git", [...safeConfig, ...arguments_], { cwd: workspace, encoding: "utf8", maxBuffer: maxBytes, signal, timeout: 10_000, env: { ...process.env, GIT_NO_LAZY_FETCH: "1", GIT_TERMINAL_PROMPT: "0" } });
   return { stdout, stderr, filtersDisabled };
 }

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import vm from "node:vm";
 import test from "node:test";
 
@@ -46,6 +48,21 @@ test("LSP Desktop approval distinguishes interpreter scripts and renders full do
     assert.ok(label.includes(script)); assert.ok(label.includes("src/a.ts")); labels.push(label);
   }
   assert.notEqual(labels[0], labels[1]);
+});
+
+test("Inline URL approval renders the full destination and denies missing or hostile scopes", async () => {
+  const f = await renderer();
+  f.run("mayControl=true;runId='run';globalThis.requests=[];window.dragons.request=async r=>{requests.push(r);return {ok:true,value:true}};");
+  const base = { type: "approval_requested", sessionId: "session", runId: "run", approvalId: "approval", operation: "EXECUTE", toolName: "inline_context_url" };
+  f.run(`receive(${JSON.stringify({ ...base, contextUrl: "https://www.wikipedia.org/guide" })})`);
+  assert.match(f.nodes.get("approval-label").textContent, /HTTPS GET https:\/\/www.wikipedia.org\/guide/);
+  assert.match(f.nodes.get("approval-label").textContent, /One request, no redirects/);
+  for (const contextUrl of [undefined, "http://local/", "https://www.wikipedia.org/\u202e", "https://www.wikipedia.org/" + "x".repeat(2049)]) {
+    f.run(`receive(${JSON.stringify({ ...base, contextUrl })})`);
+    assert.equal(f.run("approval"), undefined);
+  }
+  assert.equal(f.run("requests.length"), 4);
+  assert.equal(f.run("requests.every(r=>r.decision==='deny')"), true);
 });
 
 test("M78 update UI uses intent-only requests and keeps disabled/unavailable honest", async () => {
@@ -153,6 +170,34 @@ test("desktop model picker isolates provider drafts without executing requests",
   f.run("$('model').value='custom/exact-ID';$('model').oninput();$('provider').value='two';$('provider').onchange();$('provider').value='one';$('provider').onchange();");
   assert.equal(f.nodes.get('model').value, 'custom/exact-ID');
   assert.equal(f.run('requests.length'), 0);
+});
+
+test("Desktop Kanban board renders host tasks as text and sends no model request", async () => {
+  const f = await renderer();
+  f.run("globalThis.requests=[];window.dragons.request=async r=>{requests.push(r);return {ok:true,value:[{id:'task-id',title:'<img src=x onerror=alert(1)>',assignee:'alpha',createdBy:'beta',status:'todo',progress:0,revision:2,dependsOn:[],handoffTo:'<script>alert(1)</script>'}]}};");
+  await f.run("$('kanban-refresh').onclick()");
+  assert.equal(f.run('JSON.stringify(requests)'), '[{"type":"kanban_board"}]');
+  assert.equal(f.nodes.get('kanban-status').textContent, '1 task · refreshed');
+  const columns = f.nodes.get('kanban-columns').children;
+  assert.match(columns[0].children[1].children[0].textContent, /<img src=x/);
+  assert.match(columns[0].children[1].children[1].textContent, /offered to <script>alert\(1\)<\/script>/);
+  f.run("receive({type:'client_disconnected',message:'Closed'})");
+  await f.run("$('kanban-refresh').onclick()");
+  assert.equal(f.run('requests.length'), 1);
+});
+
+test("Desktop Kanban refresh drops stale replies and clears stale cards on failure", async () => {
+  const f = await renderer();
+  f.run("globalThis.firstDone=undefined;globalThis.requests=[];window.dragons.request=r=>{requests.push(r);return requests.length===1?new Promise(resolve=>{firstDone=resolve}):Promise.resolve({ok:true,value:[]})};");
+  const old = f.run("$('kanban-refresh').onclick()");
+  await f.run("$('kanban-refresh').onclick()");
+  f.run("firstDone({ok:true,value:[{status:'todo',title:'stale',assignee:'a',progress:0,revision:0,id:'id',dependsOn:[]}]})");
+  await old;
+  assert.equal(f.nodes.get('kanban-status').textContent, '0 tasks · refreshed');
+  f.run("window.dragons.request=async()=>({ok:false,error:{code:'RUNTIME_ERROR',message:'Board unavailable'}})");
+  await f.run("$('kanban-refresh').onclick()");
+  assert.equal(f.nodes.get('kanban-columns').children.length, 0);
+  assert.match(f.nodes.get('kanban-status').textContent, /Board unavailable/);
 });
 
 test("desktop reasoning applies only explicitly through local slash and reads host state", async () => {
@@ -275,6 +320,39 @@ test("desktop renderer routes slash before session admission and applies session
   await f.run("$('composer').onsubmit({preventDefault(){}})");
   assert.equal(f.run("stopped"), true); assert.equal(f.run("session"), undefined);
   assert.equal(f.nodes.get("send").disabled, true);
+});
+
+test("Desktop composer creates and manages a durable cron task without opening a chat session", async (t) => {
+  const { saveDragonsConfig } = await import("../../dist/config.js");
+  const { DesktopBridge } = await import("../../dist/desktop/bridge.js");
+  const { createDesktopRuntime, desktopLocalControls } = await import("../../dist/desktop/host.js");
+  const { createDragonsProfileStore } = await import("../../dist/profiles.js");
+  const root = await realpath(await mkdtemp(join(tmpdir(), "desktop-cron-composer-")));
+  let close = async () => {};
+  t.after(async () => { try { await close(); } finally { await rm(root, { recursive: true, force: true }); } });
+  const configPath = join(root, "config.json");
+  const profile = await createDragonsProfileStore({ configPath }).create("cron-ui-fixture");
+  await saveDragonsConfig({ provider: "local", model: "fixture" }, profile.configPath);
+  const runtime = await createDesktopRuntime(root, { configPath, profileName: "cron-ui-fixture" });
+  const bridge = new DesktopBridge(runtime, () => {}, desktopLocalControls(runtime));
+  close = () => bridge.close();
+  const f = await renderer();
+  f.context.hostRequest = (input: unknown) => bridge.request(structuredClone(input));
+  f.run("session=undefined;controls();window.dragons.request=hostRequest");
+  const at = new Date(Date.now() + 3_600_000).toISOString();
+  f.nodes.get("prompt").value = `/cron once ${at} -- Read workspace status`;
+  await f.run("$('composer').onsubmit({preventDefault(){}})");
+  assert.equal(f.run("session"), undefined);
+  const message = f.nodes.get("messages").children[0]?.textContent as string;
+  const id = message.match(/Cron task created: ([0-9a-f-]{36})/)?.[1];
+  assert.ok(id, message);
+  f.nodes.get("prompt").value = "/cron list";
+  await f.run("$('composer').onsubmit({preventDefault(){}})");
+  assert.match(f.nodes.get("messages").children[1]?.textContent, new RegExp(id));
+  f.nodes.get("prompt").value = `/cron remove ${id}`;
+  await f.run("$('composer').onsubmit({preventDefault(){}})");
+  assert.match(f.nodes.get("messages").children[2]?.textContent, /Cron task removed/);
+  assert.equal(f.nodes.get("error").textContent, "");
 });
 
 test("late slash admission cannot overwrite a subsequent composer run", async () => {

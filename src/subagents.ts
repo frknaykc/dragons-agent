@@ -102,6 +102,7 @@ export function createSubagentTool(options: CreateSubagentToolOptions): AgentToo
           task,
           model: options.createModel(),
           tools: childTools,
+          programmaticTools: false,
           projectContext: cloneSnapshot(options.projectContext),
           skills: cloneSnapshot(options.skills),
           memory: cloneSnapshot(options.memory),

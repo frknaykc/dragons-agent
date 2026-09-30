@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import test from "node:test";
+import { parseTrustedDesktopWorkspaceArg } from "../../dist/desktop/workspace.js";
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -70,6 +71,7 @@ async function fixture(options: FixtureOptions = {}) {
       assert.equal(destroyed, true, "destroy must precede IPC removal"); order.push(key); handlers.delete(key);
     } },
     isHealthProbeLaunch: () => false,
+    parseTrustedDesktopWorkspaceArg,
     selectDesktopWorkspace: async () => { if (options.hold === "workspace") await gate.promise; return "/fixture"; }, createDesktopRuntime: createRuntime, connectRemoteRuntime: createRuntime,
   });
   // Execute the actual launcher and before-quit registration, not an openDesktop-only slice.

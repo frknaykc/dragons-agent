@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
 import { SessionCheckpoints } from "../../dist/checkpoint.js";
+import { supportedCheckpointTest as checkpointTest } from "./checkpoint-support.js";
 
 // Synthetic, non-functional values only; all fixtures are removed after each test.
 const candidates = [
@@ -25,7 +25,7 @@ const candidates = [
 
 for (const [index, content] of candidates.entries()) {
   for (const image of ["before", "after"] as const) {
-    test(`checkpoint rejects synthetic sensitive ${image} image ${index} before writes or retention`, async (t) => {
+    checkpointTest(`checkpoint rejects synthetic sensitive ${image} image ${index} before writes or retention`, async (t) => {
       const root = await mkdtemp(join(tmpdir(), "dragons-checkpoint-sensitive-"));
       t.after(() => rm(root, { recursive: true, force: true }));
       const history = new SessionCheckpoints(root);
@@ -59,7 +59,7 @@ for (const [index, content] of candidates.entries()) {
   }
 }
 
-test("checkpoint still captures ordinary config and URLs without authority userinfo", async (t) => {
+checkpointTest("checkpoint still captures ordinary config and URLs without authority userinfo", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "dragons-checkpoint-sensitive-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const history = new SessionCheckpoints(root);

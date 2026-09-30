@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { DesktopBridge } from '../dist/desktop/bridge.js';
 import { createDesktopRuntime, desktopLocalControls } from '../dist/desktop/host.js';
 import { connectRemoteRuntime } from '../dist/remote/runtime.js';
-import { selectDesktopWorkspace } from '../dist/desktop/workspace.js';
+import { parseTrustedDesktopWorkspaceArg, selectDesktopWorkspace } from '../dist/desktop/workspace.js';
 import { createDesktopSecretPrompt } from './secret-prompt.mjs';
 import { DesktopUpdateController } from '../dist/desktop/update-controller.js';
 import { isHealthProbeLaunch } from '../dist/desktop/update-health.js';
@@ -131,6 +131,7 @@ if (app.isPackaged || (process.argv[1] && pathToFileURL(resolve(process.argv[1])
     const workingDirectory = process.env.DRAGONS_RUNTIME_URL ? undefined : await selectDesktopWorkspace({
       packaged: app.isPackaged,
       workingDirectory: process.cwd(),
+      trustedWorkspace: app.isPackaged ? parseTrustedDesktopWorkspaceArg(process.argv.slice(1)) : undefined,
       selectDirectory: async () => {
         const selection = await dialog.showOpenDialog({ title: 'Choose a Dragons workspace', properties: ['openDirectory'] });
         return selection.canceled ? undefined : selection.filePaths[0];

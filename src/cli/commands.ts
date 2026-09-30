@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import type { PlanMutationSource, PlanTaskStatus } from "../plan.js";
 import { DEFAULT_PROVIDER_IDS, type ProviderId } from "../provider/registry.js";
 
@@ -19,6 +20,11 @@ export type CliCommand =
   | { kind: "session"; action: "show"; id: string }
   | { kind: "session"; action: "delete"; id: string }
   | { kind: "session"; action: "resume"; id: string }
+  | { kind: "cron"; action: "list" }
+  | { kind: "cron"; action: "serve"; profile?: string; workspace?: string }
+  | { kind: "cron"; action: "startup"; operation: "install" | "remove" | "status" }
+  | { kind: "cron"; action: "add" | "once"; expression: string; prompt: string; skill?: { scope: "USER" | "PROJECT"; id: string } }
+  | { kind: "cron"; action: "pause" | "resume" | "trigger" | "remove"; id: string }
   | { kind: "skills"; action: "list" }
   | { kind: "skills"; action: "show"; id: string; scope?: "project" }
   | { kind: "skills"; action: "activate" | "deactivate"; id: string; sessionId: string; scope?: "project" }
@@ -157,6 +163,25 @@ export function parseCliCommand(arguments_: string[], providerIds: readonly Prov
     return command;
   }
   if (forwardedArguments[0] === "plan") return parsePlanCommand(forwardedArguments);
+  if (forwardedArguments[0] === "cron") {
+    const action = forwardedArguments[1];
+    if (action === "startup" && (forwardedArguments[2] === "install" || forwardedArguments[2] === "remove" || forwardedArguments[2] === "status") && forwardedArguments.length === 3) return { kind: "cron", action, operation: forwardedArguments[2] };
+    if (action === "serve" && forwardedArguments[2] === "--profile" && (forwardedArguments.length === 4 || forwardedArguments.length === 6)
+      && /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(forwardedArguments[3]!)) {
+      if (forwardedArguments.length === 4) return { kind: "cron", action, profile: forwardedArguments[3] };
+      if (forwardedArguments[4] === "--workspace" && isAbsolute(forwardedArguments[5] ?? "")) return { kind: "cron", action, profile: forwardedArguments[3], workspace: forwardedArguments[5] };
+    }
+    if ((action === "list" || action === "serve") && forwardedArguments.length === 2) return { kind: "cron", action };
+    if ((action === "pause" || action === "resume" || action === "trigger" || action === "remove") && forwardedArguments[2] && forwardedArguments.length === 3) return { kind: "cron", action, id: forwardedArguments[2] };
+    if ((action === "add" || action === "once") && forwardedArguments[2]?.trim() && forwardedArguments[3]?.trim()) {
+      const rest = forwardedArguments.slice(4);
+      if (rest.length === 0 || (rest.length === 3 && rest[0] === "--skill" && (rest[1] === "user" || rest[1] === "project") && rest[2])) {
+        return { kind: "cron", action, expression: forwardedArguments[2], prompt: forwardedArguments[3],
+          ...(rest.length === 0 ? {} : { skill: { scope: rest[1] === "project" ? "PROJECT" as const : "USER" as const, id: rest[2]! } }) };
+      }
+    }
+    throw new Error("Use dragons cron list|serve [--profile <name> [--workspace <absolute path>]], cron startup install|remove|status (macOS/Linux/Windows), cron add <quoted UTC expression> <quoted prompt> [--skill user|project <id>], cron once <UTC timestamp> <quoted prompt> [--skill user|project <id>], or cron pause|resume|trigger|remove <id>.");
+  }
   if (forwardedArguments[0] === "mcp") {
     if ((forwardedArguments[1] === "list" || forwardedArguments[1] === "status") && forwardedArguments.length === 2) return { kind: "mcp", action: forwardedArguments[1] };
     if (forwardedArguments[1] === "connect-all" && forwardedArguments.length === 2) return { kind: "mcp", action: "connect-all" };

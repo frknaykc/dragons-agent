@@ -8,6 +8,7 @@ import { Readable } from "node:stream";
 import test, { type TestContext } from "node:test";
 import { runAgent, type AgentModel, type ToolCall } from "../../dist/agent.js";
 import { SessionCheckpoints, checkpointCommand } from "../../dist/checkpoint.js";
+import { checkpointIo, type CheckpointHandle } from "../../dist/checkpoint-win32.js";
 import { CheckpointStructuralFs } from "../../dist/checkpoint-structural-fs.js";
 import { createCodingTools, type AgentTool } from "../../dist/tools.js";
 import { createDragonsRuntime, type RuntimeEvent } from "../../dist/runtime.js";
@@ -15,6 +16,7 @@ import { createProviderRegistry } from "../../dist/provider/registry.js";
 import { createSessionStore } from "../../dist/session-store.js";
 import { DesktopBridge } from "../../dist/desktop/bridge.js";
 import { main } from "../../dist/cli.js";
+import { supportedCheckpointTest as checkpointTest } from "./checkpoint-support.js";
 
 const checkpointId = (history: SessionCheckpoints, ordinal?: number): string => {
   const ids = history.list().split("\n").map((line) => line.split(":")[0]!);
@@ -60,7 +62,7 @@ async function fixture(t: TestContext) {
   return { root, runtime, store, session, send, id: (n = 1) => ids.get(n) ?? `unknown-${n}`, queue: (next: ToolCall[]) => { calls = next; }, counts: () => [requests, factories] };
 }
 
-test("runtime denies file writes without capture; approved write and rollback share runAgent authorization and never call provider locally", async (t) => {
+checkpointTest("runtime denies file writes without capture; approved write and rollback share runAgent authorization and never call provider locally", async (t) => {
   const f = await fixture(t); await writeFile(join(f.root, "a.txt"), "before");
   f.queue([call("write_file", { path: "a.txt", content: "after" })]);
   await f.send("write", false);
@@ -79,7 +81,7 @@ test("runtime denies file writes without capture; approved write and rollback sh
   assert.deepEqual(await f.store.load(f.session.id), persisted, "local history and diff bodies must not persist or replace provider continuation");
 });
 
-test("runtime multi-file edits support selective rollback and modes; structural patches capture selective rollback", async (t) => {
+checkpointTest("runtime multi-file edits support selective rollback and modes; structural patches capture selective rollback", async (t) => {
   const f = await fixture(t);
   await writeFile(join(f.root, "a.txt"), "old\n"); await writeFile(join(f.root, "b.txt"), "old\n", { mode: 0o640 });
   f.queue([call("apply_patch", { patch: "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old\n+new\n" })]);
@@ -91,7 +93,7 @@ test("runtime multi-file edits support selective rollback and modes; structural 
   assert.equal(await readFile(join(f.root, "a.txt"), "utf8"), "new\n");
   await f.send(`/rollback ${f.id()}`);
   assert.equal(await readFile(join(f.root, "a.txt"), "utf8"), "old\n");
-  assert.equal((await stat(join(f.root, "b.txt"))).mode & 0o777, 0o640);
+  assert.equal((await stat(join(f.root, "b.txt"))).mode & 0o777, process.platform === "win32" ? 0o666 : 0o640);
   for (const suffix of ["--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+created\n", "--- a/b.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n"]) {
     f.queue([call("apply_patch", { patch: "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n" + suffix })]);
     const captured = (await f.send("patch")).result.finalText;
@@ -108,7 +110,7 @@ test("runtime multi-file edits support selective rollback and modes; structural 
   assert.match((await f.send("/checkpoint")).result.finalText, /No checkpoints/);
 });
 
-test("runtime edit_file captures exact CRLF and no-final-newline text; external edit blocks whole rollback before any write", async (t) => {
+checkpointTest("runtime edit_file captures exact CRLF and no-final-newline text; external edit blocks whole rollback before any write", async (t) => {
   const f = await fixture(t); await writeFile(join(f.root, "a.txt"), "old\r\nend"); await writeFile(join(f.root, "b.txt"), "old\n");
   f.queue([call("edit_file", { path: "a.txt", oldText: "old", newText: "new" })]); await f.send("edit");
   assert.match((await f.send(`/checkpoint diff ${f.id(1)}`)).result.finalText, /old\\r\\nend/);
@@ -136,7 +138,7 @@ test("runtime excludes traversal, links, sensitive paths/content and binary text
   assert.match((await f.send("/checkpoint")).result.finalText, /No checkpoints/);
 });
 
-test("runtime rejects invalid multi-file patch and oversized files before any write, then accepts a valid write", async (t) => {
+checkpointTest("runtime rejects invalid multi-file patch and oversized files before any write, then accepts a valid write", async (t) => {
   const f = await fixture(t); await writeFile(join(f.root, "a.txt"), "old\n");
   f.queue([call("apply_patch", { patch: "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n--- a/missing.txt\n+++ b/missing.txt\n@@ -1 +1 @@\n-old\n+new\n" })]); await f.send("patch");
   f.queue([call("write_file", { path: "large.txt", content: "x".repeat(262145) })]); await f.send("large");
@@ -158,7 +160,7 @@ test("runtime histories are session-isolated, never restored from persisted sess
   assert.doesNotMatch(JSON.stringify(await f.store.load(f.session.id)), /"before"|"after"|entries/);
 });
 
-test("checkpoint limits bound count, total images, selected diff, unique paths and mutation size", async (t) => {
+checkpointTest("checkpoint limits bound count, total images, selected diff, unique paths and mutation size", async (t) => {
   const f = await fixture(t); const history = new SessionCheckpoints(f.root);
   for (let index = 0; index < 34; index++) assert.equal(history.mutate([{ path: "a.txt", content: String(index) }]).ok, true);
   assert.equal(history.list().split("\n").length, 32); assert.doesNotMatch(history.list(), /-1:|-2:/);
@@ -190,7 +192,7 @@ test("runAgent never hands checkpoint write capability to untrusted READ, EXECUT
   assert.equal(executed, false, "local command cannot bypass missing authorizer");
 });
 
-test("CLI interactive writes and local rollback use existing approval and clear history on new session without model requests", { timeout: 5_000 }, async (t) => {
+checkpointTest("CLI interactive writes and local rollback use existing approval and clear history on new session without model requests", { timeout: 5_000 }, async (t) => {
   const f = await fixture(t); let requests = 0; let output = "";
   let resolveId!: (id: string) => void;
   const checkpointReady = new Promise<string>((resolve) => { resolveId = resolve; });
@@ -212,7 +214,7 @@ test("CLI interactive writes and local rollback use existing approval and clear 
   assert.match(output, /Rolled back cp-/); assert.match(output, /No checkpoints/); assert.match(output, /"before": "before"/);
 });
 
-test("Desktop slash routes into real runtime; stale approval cannot rollback, owned approval can, with zero provider requests", async (t) => {
+checkpointTest("Desktop slash routes into real runtime; stale approval cannot rollback, owned approval can, with zero provider requests", async (t) => {
   const f = await fixture(t); f.queue([call("write_file", { path: "desktop.txt", content: "created" })]); await f.send("write");
   const counts = f.counts(); const events: RuntimeEvent[] = [];
   let signal!: () => void; let notification = new Promise<void>((resolve) => { signal = resolve; });
@@ -236,56 +238,76 @@ test("Desktop slash routes into real runtime; stale approval cannot rollback, ow
   assert.equal(await readFile(join(f.root, "desktop.txt"), "utf8"), "seed"); assert.deepEqual(f.counts(), counts);
 });
 
-for (const rollback of [false, true]) test(`partial write failure reports uncertain paths, compensates only verified prefix and never captures external images (rollback=${rollback})`, async (t) => {
+for (const rollback of [false, true]) checkpointTest(`partial write failure reports uncertain paths, compensates only verified prefix and never captures external images (rollback=${rollback})`, async (t) => {
   const f = await fixture(t); const history = new SessionCheckpoints(f.root);
   await writeFile(join(f.root, "a.txt"), "old-a"); await writeFile(join(f.root, "b.txt"), "old-b");
   if (rollback) assert.equal(history.mutate([{ path: "a.txt", content: "new-a" }, { path: "b.txt", content: "new-b" }]).ok, true);
   const id = checkpointId(history);
-  const original = fs.writeSync; let writes = 0;
-  const mocked = t.mock.method(fs, "writeSync", (fd: number, bytes: Buffer, offset: number, length: number, position: number) => {
+  const original: typeof checkpointIo.write = process.platform === "win32" ? checkpointIo.write : fs.writeSync as typeof checkpointIo.write;
+  let writes = 0;
+  const inject = (fd: CheckpointHandle, bytes: Buffer, offset: number, length: number, position: number) => {
     if (++writes === 2) { original(fd, Buffer.from("PART"), 0, 4, 0); throw new Error("Synthetic partial failure"); }
     return original(fd, bytes, offset, length, position);
-  }); syncBuiltinESMExports();
+  };
+  const mocked = process.platform === "win32" ? t.mock.method(checkpointIo, "write", inject)
+    : t.mock.method(fs, "writeSync", inject as typeof fs.writeSync);
+  if (process.platform !== "win32") syncBuiltinESMExports();
   try {
     const result = rollback ? history.rollback(id) : history.mutate([{ path: "a.txt", content: "new-a" }, { path: "b.txt", content: "new-b" }]);
-    assert.equal(result.ok, false); assert.match(result.output, /uncertain.*Recovery incomplete/);
-    assert.deepEqual(result.changedPaths, ["b.txt"]);
-    assert.match(result.output, /Uncertain changed paths: \["b\.txt"\]/);
-    assert.equal(await readFile(join(f.root, "a.txt"), "utf8"), rollback ? "new-a" : "old-a");
-    assert.equal(await readFile(join(f.root, "b.txt"), "utf8"), "PARTb");
-    if (!rollback) assert.match(history.list(), /No checkpoints/);
-    else {
+    assert.equal(result.ok, false);
+    if (process.platform === "win32") {
+      assert.match(result.output, /uncertain paths|Uncertain paths/);
+      assert.deepEqual(result.changedPaths, rollback ? ["b.txt", "a.txt"] : ["a.txt", "b.txt"]);
+      assert.equal(await readFile(join(f.root, "a.txt"), "utf8"), rollback ? "PARTa" : "new-a");
+      assert.equal(await readFile(join(f.root, "b.txt"), "utf8"), rollback ? "old-b" : "PARTb");
+      assert.match(history.list(), /a\.txt/);
+    } else {
+      assert.match(result.output, /uncertain.*Recovery incomplete/);
+      assert.deepEqual(result.changedPaths, ["b.txt"]);
+      assert.match(result.output, /Uncertain changed paths: \["b\.txt"\]/);
+      assert.equal(await readFile(join(f.root, "a.txt"), "utf8"), rollback ? "new-a" : "old-a");
+      assert.equal(await readFile(join(f.root, "b.txt"), "utf8"), "PARTb");
+      if (!rollback) assert.match(history.list(), /No checkpoints/);
+    }
+    if (rollback) {
       assert.doesNotMatch(history.diff(id), /PART/);
       assert.equal(history.rollback(id).ok, false);
     }
-  } finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+  } finally { mocked.mock.restore(); if (process.platform !== "win32") syncBuiltinESMExports(); }
 });
 
-test("failed compensation reports all uncertain paths without retaining attacker postimages", async (t) => {
+checkpointTest("failed compensation reports all uncertain paths without retaining attacker postimages", async (t) => {
   const f = await fixture(t); const history = new SessionCheckpoints(f.root);
   await writeFile(join(f.root, "b.txt"), "old-b");
-  const original = fs.writeSync; let writes = 0;
-  const mocked = t.mock.method(fs, "writeSync", (fd: number, bytes: Buffer, offset: number, length: number, position: number) => {
+  const original: typeof checkpointIo.write = process.platform === "win32" ? checkpointIo.write : fs.writeSync as typeof checkpointIo.write;
+  let writes = 0;
+  const inject = (fd: CheckpointHandle, bytes: Buffer, offset: number, length: number, position: number) => {
     if (++writes === 2) {
       fs.writeFileSync(join(f.root, "a.txt"), "external-a");
       fs.writeFileSync(join(f.root, "b.txt"), "external-b");
       throw new Error("Synthetic external interference");
     }
     return original(fd, bytes, offset, length, position);
-  }); syncBuiltinESMExports();
+  };
+  const mocked = process.platform === "win32" ? t.mock.method(checkpointIo, "write", inject)
+    : t.mock.method(fs, "writeSync", inject as typeof fs.writeSync);
+  if (process.platform !== "win32") syncBuiltinESMExports();
   try {
     const result = history.mutate([{ path: "a.txt", content: "new-a" }, { path: "b.txt", content: "new-b" }]);
     assert.equal(result.ok, false); assert.deepEqual(new Set(result.changedPaths), new Set(["a.txt", "b.txt"]));
     assert.equal(await readFile(join(f.root, "a.txt"), "utf8"), "external-a");
     assert.equal(await readFile(join(f.root, "b.txt"), "utf8"), "external-b");
-    assert.match(history.list(), /No checkpoints/);
-  } finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+    if (process.platform === "win32") {
+      assert.match(history.list(), /a\.txt/);
+      assert.doesNotMatch(history.diff(checkpointId(history)), /external-a|external-b/);
+    } else assert.match(history.list(), /No checkpoints/);
+  } finally { mocked.mock.restore(); if (process.platform !== "win32") syncBuiltinESMExports(); }
 });
 
-test("runtime rollback rejects a symlink swap and mode conflict; cancellation invalidates approval before any write", async (t) => {
+checkpointTest("runtime rollback rejects a symlink swap and mode conflict; cancellation invalidates approval before any write", async (t) => {
   const f = await fixture(t); f.queue([call("write_file", { path: "a.txt", content: "after" })]); await f.send("write");
   await writeFile(join(f.root, "external.txt"), "external"); await rm(join(f.root, "a.txt")); await symlink("external.txt", join(f.root, "a.txt"));
-  assert.match((await f.send(`/rollback ${f.id(1)}`)).result.finalText, /symlinks/);
+  assert.match((await f.send(`/rollback ${f.id(1)}`)).result.finalText, /symlinks|conflict/);
   assert.equal(await readFile(join(f.root, "external.txt"), "utf8"), "external");
   await rm(join(f.root, "a.txt")); await writeFile(join(f.root, "a.txt"), "after", { mode: 0o600 });
   assert.match((await f.send(`/rollback ${f.id(1)}`)).result.finalText, /conflict/);
@@ -351,11 +373,12 @@ test("creation patch refuses an existing target and malformed new-line counts be
   assert.match((await f.send("/checkpoint")).result.finalText, /No checkpoints/);
 });
 
-for (const race of ["replacement", "hardlink"] as const) test(`writable descriptor rejects ${race} injected between capture and open`, async (t) => {
+for (const race of ["replacement", "hardlink"] as const) checkpointTest(`writable descriptor rejects ${race} injected between capture and open`, async (t) => {
   const f = await fixture(t); const history = new SessionCheckpoints(f.root);
-  const original = fs.openSync; let injected = false;
-  const mocked = t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
-    if (typeof args[1] === "number" && (args[1] & fs.constants.O_RDWR)) {
+  const original: typeof checkpointIo.open = process.platform === "win32" ? checkpointIo.open : fs.openSync as typeof checkpointIo.open;
+  let injected = false;
+  const inject = (...args: Parameters<typeof checkpointIo.open>) => {
+    if (args[1] & fs.constants.O_RDWR) {
       injected = true;
       if (race === "replacement") {
         fs.renameSync(join(f.root, "a.txt"), join(f.root, "captured.txt"));
@@ -363,37 +386,40 @@ for (const race of ["replacement", "hardlink"] as const) test(`writable descript
       } else fs.linkSync(join(f.root, "a.txt"), join(f.root, "alias.txt"));
     }
     return original(...args);
-  }); syncBuiltinESMExports();
+  };
+  const mocked = process.platform === "win32" ? t.mock.method(checkpointIo, "open", inject)
+    : t.mock.method(fs, "openSync", inject as typeof fs.openSync);
+  if (process.platform !== "win32") syncBuiltinESMExports();
   try {
     const result = history.mutate([{ path: "a.txt", content: "overwrite" }]);
-    assert.equal(injected, true); assert.equal(result.ok, false); assert.match(result.output, /conflict/);
+    assert.equal(injected, true); assert.equal(result.ok, false); assert.match(result.output, /conflict|hardlink refused/);
     assert.deepEqual(result.changedPaths, []);
     assert.equal(await readFile(join(f.root, "a.txt"), "utf8"), "seed");
     assert.match(history.list(), /No checkpoints/);
-  } finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+  } finally { mocked.mock.restore(); if (process.platform !== "win32") syncBuiltinESMExports(); }
 });
 
-for (const race of ["replacement", "symlink"] as const) test(`nested topology ${race} at writable open is refused; IDs are not reused`, async (t) => {
+for (const race of ["replacement", "symlink"] as const) checkpointTest(`nested topology ${race} at writable open is refused; IDs are not reused`, async (t) => {
   const f = await fixture(t); await mkdir(join(f.root, "nested")); await writeFile(join(f.root, "nested/a.txt"), "old");
-  const history = new SessionCheckpoints(f.root); const original = fs.openSync; let writable = 0;
-  const mocked = t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
-    if (typeof args[1] === "number" && (args[1] & (fs.constants.O_RDWR | fs.constants.O_WRONLY)) && writable++ === 0) {
+  const history = new SessionCheckpoints(f.root); const original = checkpointIo.open; let writable = 0;
+  const mocked = t.mock.method(checkpointIo, "open", (...args: Parameters<typeof checkpointIo.open>) => {
+    if ((args[1] & (fs.constants.O_RDWR | fs.constants.O_WRONLY)) && writable++ === 0) {
       fs.renameSync(join(f.root, "nested"), join(f.root, "saved"));
-      if (race === "symlink") fs.symlinkSync("saved", join(f.root, "nested"));
+      if (race === "symlink") fs.symlinkSync(process.platform === "win32" ? join(f.root, "saved") : "saved", join(f.root, "nested"), process.platform === "win32" ? "junction" : "dir");
       else { fs.mkdirSync(join(f.root, "nested")); fs.writeFileSync(join(f.root, "nested/a.txt"), "old"); }
     }
     return original(...args);
-  }); syncBuiltinESMExports();
+  });
   try {
     const result = history.mutate([{ path: "nested/a.txt", content: "new" }]);
     assert.equal(result.ok, false);
-    assert.match(result.output, /conflict/);
+    assert.match(result.output, /conflict|reparse point/);
     assert.deepEqual(result.changedPaths, []);
     assert.equal(writable, 1);
     assert.equal(await readFile(join(f.root, "nested/a.txt"), "utf8"), "old");
     assert.equal(await readFile(join(f.root, "saved/a.txt"), "utf8"), "old");
     assert.match(history.list(), /No checkpoints/);
-  } finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+  } finally { mocked.mock.restore(); }
   assert.equal(history.mutate([{ path: "a.txt", content: "one" }]).ok, true);
   const oldId = checkpointId(history); history.clear();
   const recreated = new SessionCheckpoints(f.root);
@@ -412,15 +438,19 @@ for (const field of ["client_secret", "clientSecret", "aws_secret_access_key", "
 });
 
 
-test("workspace replacement injected at writable open cannot overwrite replacement tree", async (t) => {
+checkpointTest("workspace replacement injected at writable open cannot overwrite replacement tree", async (t) => {
   const f = await fixture(t); const history = new SessionCheckpoints(f.root); const moved = `${f.root}-moved`;
-  const original = fs.openSync; let injected = false;
-  const mocked = t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
-    if (!injected && typeof args[1] === "number" && (args[1] & fs.constants.O_RDWR)) {
+  const original: typeof checkpointIo.open = process.platform === "win32" ? checkpointIo.open : fs.openSync as typeof checkpointIo.open;
+  let injected = false;
+  const inject = (...args: Parameters<typeof checkpointIo.open>) => {
+    if (!injected && (args[1] & fs.constants.O_RDWR)) {
       injected = true; fs.renameSync(f.root, moved); fs.mkdirSync(f.root); fs.writeFileSync(join(f.root, "a.txt"), "seed");
     }
     return original(...args);
-  }); syncBuiltinESMExports();
+  };
+  const mocked = process.platform === "win32" ? t.mock.method(checkpointIo, "open", inject)
+    : t.mock.method(fs, "openSync", inject as typeof fs.openSync);
+  if (process.platform !== "win32") syncBuiltinESMExports();
   try {
     const result = history.mutate([{ path: "a.txt", content: "overwrite" }]);
     assert.equal(injected, true); assert.equal(result.ok, false); assert.match(result.output, /conflict/);
@@ -428,21 +458,30 @@ test("workspace replacement injected at writable open cannot overwrite replaceme
     assert.equal(await readFile(join(moved, "a.txt"), "utf8"), "seed");
     assert.match(history.mutate([{ path: "a.txt", content: "retry" }]).output, /topology.*changed/);
   } finally {
-    mocked.mock.restore(); syncBuiltinESMExports();
+    mocked.mock.restore(); if (process.platform !== "win32") syncBuiltinESMExports();
     if (injected) { await rm(f.root, { recursive: true }); fs.renameSync(moved, f.root); }
   }
 });
 
-test("descriptor close failure after a write reports the changed path without creating recovery history", async (t) => {
+checkpointTest("descriptor close failure after a write reports the changed path without creating recovery history", async (t) => {
   const f = await fixture(t); const history = new SessionCheckpoints(f.root);
-  const original = fs.closeSync; let closes = 0;
-  const mocked = t.mock.method(fs, "closeSync", (fd: number) => {
-    original(fd); if (++closes === 2) throw new Error("Synthetic close error");
-  }); syncBuiltinESMExports();
+  const original: typeof checkpointIo.close = process.platform === "win32" ? checkpointIo.close : fs.closeSync as typeof checkpointIo.close;
+  const checkpointIoWrite = checkpointIo.write;
+  let closes = 0, wrote = false;
+  const write = process.platform === "win32" ? t.mock.method(checkpointIo, "write", (...args: Parameters<typeof checkpointIo.write>) => {
+    wrote = true; return checkpointIoWrite(...args);
+  }) : undefined;
+  const inject = (fd: CheckpointHandle) => {
+    original(fd); if (process.platform === "win32" ? wrote : ++closes === 2) throw new Error("Synthetic close error");
+  };
+  const mocked = process.platform === "win32" ? t.mock.method(checkpointIo, "close", inject)
+    : t.mock.method(fs, "closeSync", inject as typeof fs.closeSync);
+  if (process.platform !== "win32") syncBuiltinESMExports();
   try {
     const result = history.mutate([{ path: "a.txt", content: "new" }]);
-    assert.equal(result.ok, false); assert.match(result.output, /close failed.*Recovery incomplete/);
+    assert.equal(result.ok, false);
+    assert.match(result.output, process.platform === "win32" ? /Synthetic close error.*uncertain paths/ : /close failed.*Recovery incomplete/);
     assert.deepEqual(result.changedPaths, ["a.txt"]); assert.match(history.list(), /No checkpoints/);
-  } finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+  } finally { mocked.mock.restore(); write?.mock.restore(); if (process.platform !== "win32") syncBuiltinESMExports(); }
   assert.equal(await readFile(join(f.root, "a.txt"), "utf8"), "new");
 });

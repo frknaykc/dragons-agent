@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { type TestContext } from "node:test";
+import { type TestContext } from "node:test";
 import type { ToolCall } from "../../dist/agent.js";
 import { DesktopBridge } from "../../dist/desktop/bridge.js";
 import { createProviderRegistry } from "../../dist/provider/registry.js";
 import { createDragonsRuntime, type RuntimeEvent } from "../../dist/runtime.js";
 import { createSessionStore } from "../../dist/session-store.js";
 import { createCodingTools } from "../../dist/tools.js";
+
+import { supportedCheckpointTest } from "../checkpoint/checkpoint-support.js";
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "dragons-desktop-diff-"));
@@ -68,7 +70,7 @@ function capturedId(text: string): string {
   return match[1]!;
 }
 
-test("Desktop exact JSON-quoted paths select one image and WRITE-gated rollback from a multi-file checkpoint", { timeout: 10000 }, async t => {
+supportedCheckpointTest("Desktop exact JSON-quoted paths select one image and WRITE-gated rollback from a multi-file checkpoint", { timeout: 10000 }, async t => {
   const f = await fixture(t);
   const paths = ["a  b.txt", "a b.txt"];
   for (const [i, path] of paths.entries()) await writeFile(join(f.root, path), `before ${i}\n`);
@@ -103,7 +105,7 @@ test("Desktop exact JSON-quoted paths select one image and WRITE-gated rollback 
   assert.deepEqual(await f.store.load(f.session.id), persisted, "local diffs and rollback must not persist checkpoint images or alter continuation");
 });
 
-test("Desktop follows bounded UTF-8 diff next commands read-only without provider calls or session persistence", { timeout: 15000 }, async t => {
+supportedCheckpointTest("Desktop follows bounded UTF-8 diff next commands read-only without provider calls or session persistence", { timeout: 15000 }, async t => {
   const f = await fixture(t);
   const path = "a  b.txt";
   const before = "😀é\r\n".repeat(10000) + "before-end";

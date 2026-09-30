@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import { AsyncEntry } from "@napi-rs/keyring";
-import { mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { getDragonsConfigPath, loadDragonsConfig, saveDragonsConfig } from "../../dist/config.js";
+import { createFileCronTaskStore, cronWorkspaceDirectory } from "../../dist/cron-store.js";
 import { createDesktopRuntime, desktopLocalControls } from "../../dist/desktop/host.js";
 import { DesktopBridge } from "../../dist/desktop/bridge.js";
 import { createDragonsProfileStore } from "../../dist/profiles.js";
 import { createSessionStore } from "../../dist/session-store.js";
+import { readProjectSkill } from "../../dist/skills.js";
 
 // Real host composition, with fail-fast guards on all native credential operations.
 // No auth/status/login/model request is needed to change local reasoning preferences.
@@ -56,10 +58,58 @@ test("desktop host config isolation, persistence, credential inactivity and lega
   let id: string;
   try {
     assert.match(await local.profiles(), new RegExp(`Current desktop profile: ${profileName}`));
+    const cron = await bridge.request({ type: "slash", content: "/cron list" });
+    assert.equal(cron.ok, true);
+    if (cron.ok) assert.match(JSON.stringify(cron.value), /No cron tasks in this workspace/);
+    const invalidCron = await bridge.request({ type: "slash", content: "/cron trigger .." });
+    assert.equal(invalidCron.ok, true);
+    if (invalidCron.ok) assert.match(JSON.stringify(invalidCron.value), /Usage: \/cron/);
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const oneOff = await bridge.request({ type: "slash", content: `/cron once ${at} -- Read project status` });
+    assert.equal(oneOff.ok, true);
+    const onceId = oneOff.ok ? JSON.stringify(oneOff.value).match(/[0-9a-f-]{36}/)?.[0] : undefined;
+    assert.ok(onceId);
+    const recurring = await bridge.request({ type: "slash", content: "/cron add */30 * * * * -- Read health" });
+    assert.equal(recurring.ok, true);
+    const cronId = recurring.ok ? JSON.stringify(recurring.value).match(/[0-9a-f-]{36}/)?.[0] : undefined;
+    assert.ok(cronId);
+    assert.notEqual(cronId, onceId);
+    const skillPath = join(root, ".dragons", "skills", "read-health");
+    await mkdir(skillPath, { recursive: true });
+    await writeFile(join(skillPath, "SKILL.md"), "---\nname: Read Health\ndescription: Inspect status\n---\n# Read health safely\n");
+    const pinned = await bridge.request({ type: "slash", content: `/cron once ${at} --skill project read-health -- Read project health` });
+    assert.equal(pinned.ok, true);
+    const pinnedId = pinned.ok ? JSON.stringify(pinned.value).match(/[0-9a-f-]{36}/)?.[0] : undefined;
+    assert.ok(pinnedId);
+    const pinnedTask = await createFileCronTaskStore(cronWorkspaceDirectory(join(dirname(chosen.configPath), "cron"), root)).load(pinnedId);
+    assert.deepEqual(pinnedTask?.skill, { id: "read-health", scope: "PROJECT", digest: (await readProjectSkill(root, "read-health")).digest });
+    const invalidSkill = await bridge.request({ type: "slash", content: `/cron once ${at} --skill project ../other -- Read health` });
+    assert.equal(invalidSkill.ok, true);
+    if (invalidSkill.ok) assert.match(JSON.stringify(invalidSkill.value), /Usage: \/cron/);
+    const scheduled = await bridge.request({ type: "slash", content: "/cron list" });
+    assert.equal(scheduled.ok, true);
+    if (scheduled.ok) { assert.match(JSON.stringify(scheduled.value), new RegExp(onceId)); assert.match(JSON.stringify(scheduled.value), new RegExp(cronId)); }
+    const rejected = await bridge.request({ type: "slash", content: `/cron once ${at} -- api_key=not-a-real-key` });
+    assert.equal(rejected.ok, false);
+    if (!rejected.ok) assert.equal(rejected.error.code, "RUNTIME_ERROR");
+    const paused = await bridge.request({ type: "slash", content: `/cron pause ${cronId}` });
+    assert.equal(paused.ok, true);
+    if (paused.ok) assert.match(JSON.stringify(paused.value), /paused/);
+    assert.equal((await bridge.request({ type: "slash", content: `/cron resume ${cronId}` })).ok, true);
+    assert.equal((await bridge.request({ type: "slash", content: `/cron remove ${cronId}` })).ok, true);
+    assert.equal((await bridge.request({ type: "slash", content: `/cron remove ${onceId}` })).ok, true);
+    assert.equal((await bridge.request({ type: "slash", content: `/cron remove ${pinnedId}` })).ok, true);
     const session = await runtime.createSession();
     id = session.id;
     assert.equal(session.provider, "chatgpt");
     assert.equal((await bridge.request({ type: "resume", sessionId: id })).ok, true);
+    const loop = await bridge.request({ type: "slash", content: "/loop start 3600 1 -- inspect workspace" });
+    assert.equal(loop.ok, true);
+    if (loop.ok) assert.match(JSON.stringify(loop.value), /Loop started/);
+    const loopStatus = await bridge.request({ type: "slash", content: "/loop status" });
+    assert.equal(loopStatus.ok, true);
+    if (loopStatus.ok) assert.match(JSON.stringify(loopStatus.value), /completed: 0/);
+    assert.equal((await bridge.request({ type: "slash", content: "/loop stop" })).ok, true);
     assert.equal((await bridge.request({ type: "slash", content: "/reasoning high", configPath: legacyPath })).ok, false);
     assert.equal((await bridge.request({ type: "slash", content: "/reasoning high" })).ok, true);
     assert.equal((await loadDragonsConfig(chosen.configPath)).reasoning?.chatgpt?.["gpt-5.4"], "high");
@@ -68,6 +118,8 @@ test("desktop host config isolation, persistence, credential inactivity and lega
     assert.equal(await createSessionStore(other.sessionDirectory).load(id), undefined);
     assert.equal(await createSessionStore(join(root, "isolated", "sessions")).load(id), undefined);
   } finally { await bridge.close(); }
+  await assert.rejects(local.cron!({ action: "list" }), /closed/);
+  await assert.rejects(local.loop!({ action: "status", sessionId: id! }), /closed/);
   const restarted = await compose({ configPath, profileName });
   try {
     assert.match(await desktopLocalControls(restarted)!.reasoning!("chatgpt", "gpt-5.4"), /Reasoning: high/);

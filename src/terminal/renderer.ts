@@ -1,3 +1,4 @@
+import { contextUrlFromArguments, INLINE_URL_TOOL } from "../inline-context-url.js";
 import { formatLspApproval, lspApprovalFromArguments } from "../lsp-approval.js";
 import { toolMutationWarning } from "../tool-mutation-warning.js";
 import type { ToolOperation, ToolResult } from "../tools.js";
@@ -165,10 +166,12 @@ export function formatApproval(presentation: ApprovalPresentation, width: number
   const top = `╭─${title}${"─".repeat(Math.max(1, usableWidth - title.length - 3))}╮`;
   const scope = presentation.name === "lsp_diagnostics_start" ? lspApprovalFromArguments(presentation.arguments) : undefined;
   if (presentation.name === "lsp_diagnostics_start" && !scope) return "LSP approval unavailable: scope cannot be safely displayed. Denied.\n";
-  const summary = scope ? formatLspApproval(scope) : conciseArgument(presentation.arguments);
+  const url = presentation.name === INLINE_URL_TOOL ? contextUrlFromArguments(presentation.arguments) : undefined;
+  if (presentation.name === INLINE_URL_TOOL && !url) return "URL approval scope unavailable. Denied.\n";
+  const summary = url ? `HTTPS GET (one request, no redirects): ${url}` : scope ? formatLspApproval(scope) : conciseArgument(presentation.arguments);
   const lines = [top, `│ ${presentation.operation} · ${presentation.name}`];
   if (summary) lines.push(`│ ${summary}`);
-  lines.push(`╰${"─".repeat(Math.max(1, usableWidth - 2))}╯`, scope ? "One document, one process. Allow once? [y]  Deny? [N] " : "Allow once? [y]  Allow matching scope for session? [session]  Deny? [N] ");
+  lines.push(`╰${"─".repeat(Math.max(1, usableWidth - 2))}╯`, url ? "One network request. Allow once? [y]  Deny? [N] " : scope ? "One document, one process. Allow once? [y]  Deny? [N] " : "Allow once? [y]  Allow matching scope for session? [session]  Deny? [N] ");
   return lines.join("\n");
 }
 

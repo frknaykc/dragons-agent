@@ -10,6 +10,7 @@ const signal = () => new AbortController().signal;
 const target = "/Users/test/Applications/Dragons Agent.app";
 const staging = "/Users/test/private/staging";
 const volume = { MountPoint: "/System/Volumes/Data", FilesystemType: "apfs", Internal: true, Writable: true, WritableVolume: true, GlobalPermissionsEnabled: true, Removable: false, Ejectable: false, SystemImage: false, APFSSnapshot: false, Locked: false };
+const macPathTest = process.platform === "win32" ? test.skip : test;
 function fixture() {
   const calls: { command: string; args: readonly string[] }[] = [];
   const states = new Map<string, Partial<{ uid: number; mode: number; dev: number; isSymbolicLink(): boolean; isDirectory(): boolean }>>();
@@ -30,7 +31,7 @@ function fixture() {
   return { d, calls, states, outputs };
 }
 
-test("host identity must be pinned, exact, injection-safe and captured before async work", async () => {
+macPathTest("host identity must be pinned, exact, injection-safe and captured before async work", async () => {
   for (const teamIdentifier of ["", "adhoc", 'ABCDE12345" or true', "ABCDE123456"]) assert.throws(() => createMacOSPreflight({ ...policy, teamIdentifier }), /host-pinned/);
   assert.throws(() => createMacOSPreflight({ ...policy, bundleIdentifier: "other.app" }), /host-pinned/);
   const f = fixture(); const mutable = { ...policy }; const verifier = createMacOSPreflight(mutable, f.d);
@@ -43,7 +44,7 @@ test("host identity must be pinned, exact, injection-safe and captured before as
   assert.match(f.calls[0]!.args[4]!, /anchor apple generic.*ABCDE12345.*100\.6\.2\.6.*100\.6\.1\.13/);
 });
 
-test("OS failure is authoritative, not display metadata", async () => {
+macPathTest("OS failure is authoritative, not display metadata", async () => {
   const f = fixture(); f.d.run = async () => { throw new Error("native rejected"); };
   await assert.rejects(createMacOSPreflight(policy, f.d).verifySignature(target, signal()), /native rejected/);
 });
@@ -63,7 +64,7 @@ test("ad-hoc, wrong, missing, duplicated and oversized OS metadata fail closed",
   }
 });
 
-test("supported target observations never authorize activation; native volume command uses mount point", async () => {
+macPathTest("supported target observations never authorize activation; native volume command uses mount point", async () => {
   const f = fixture();
   const result = await createMacOSPreflight(policy, f.d).inspectInstallTarget(target, staging, signal());
   assert.equal(result.observation, "conservative-target-checks-passed"); assert.equal(result.activation, "unsupported");
@@ -71,7 +72,7 @@ test("supported target observations never authorize activation; native volume co
   assert.deepEqual(f.calls.find((call) => call.command === "/usr/sbin/diskutil")?.args, ["info", "-plist", "/System/Volumes/Data"]);
 });
 
-test("reject unsupported locations, lexical aliases, unsafe ancestors and targets", async () => {
+macPathTest("reject unsupported locations, lexical aliases, unsafe ancestors and targets", async () => {
   for (const path of ["/Applications/Dragons Agent.app", "/Volumes/Test/Dragons Agent.app", "/Users/test/Applications/../Applications/Dragons Agent.app", target + "/", target + "\0"]) {
     const f = fixture(); await assert.rejects(createMacOSPreflight(policy, f.d).inspectInstallTarget(path, staging, signal())); assert.equal(f.calls.length, 0);
   }
@@ -92,7 +93,7 @@ test("reject unsupported locations, lexical aliases, unsafe ancestors and target
   await assert.rejects(createMacOSPreflight(policy, f.d).verifySignature(target, signal()), /alias/);
 });
 
-test("ACLs, flags, unknown listing format and failed effective access are unsupported", async () => {
+macPathTest("ACLs, flags, unknown listing format and failed effective access are unsupported", async () => {
   for (const listing of ["drwx------+ 2 501 20 - 64 date fixture\n 0: group:everyone allow delete\n", "drwx------ 2 501 20 uchg 64 date fixture\n", "", "unexpected"]) {
     const f = fixture(); f.outputs.set("/Users/test", listing);
     await assert.rejects(createMacOSPreflight(policy, f.d).inspectInstallTarget(target, staging, signal()), /ACL or file flags/);
@@ -101,7 +102,7 @@ test("ACLs, flags, unknown listing format and failed effective access are unsupp
   await assert.rejects(createMacOSPreflight(policy, f.d).inspectInstallTarget(target, staging, signal()), /EACCES/);
 });
 
-test("every required volume proof must be present and match; removable/read-only/image/network fail closed", async () => {
+macPathTest("every required volume proof must be present and match; removable/read-only/image/network fail closed", async () => {
   for (const key of Object.keys(volume)) {
     const f = fixture(); const incomplete = { ...volume } as Record<string, unknown>; delete incomplete[key];
     f.outputs.set("volume", JSON.stringify(incomplete));

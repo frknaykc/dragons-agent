@@ -1,3 +1,5 @@
+import { createSessionHistoryRecorder, createSessionSearchTools } from "./session-search.js";
+import { contextUrlFromArguments, INLINE_URL_TOOL } from "./inline-context-url.js";
 import { lspApprovalFromArguments, type LspApproval } from "./lsp-approval.js";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
@@ -27,6 +29,7 @@ import {
 } from "./memory.js";
 import { createPlanTools, createSessionPlanStore, type DragonsPlan } from "./plan.js";
 import { createPlanOrchestrationTools } from "./orchestration.js";
+import { PluginRegistry } from "./plugins.js";
 import { createParallelSubagentTool } from "./parallel-subagents.js";
 import { discoverProjectContext } from "./project-context.js";
 import { createBuiltInProviderRegistry } from "./provider/builtins.js";
@@ -41,7 +44,7 @@ import {
 import { createSkillsContext, getDragonsSkillsDirectory } from "./skills.js";
 import { createSubagentTool } from "./subagents.js";
 import { SessionCheckpoints, checkpointCommand, isCheckpointCommand } from "./checkpoint.js";
-import { createCodingTools, type AgentTool } from "./tools.js";
+import { createCodingTools, createReadTools, type AgentTool } from "./tools.js";
 import { toolMutationWarning } from "./tool-mutation-warning.js";
 import { RuntimeTextRedactor } from "./runtime-redaction.js";
 
@@ -164,7 +167,7 @@ export type RuntimeEvent =
     output?: string;
     mutationWarning?: string;
   }
-  | { type: "approval_requested"; runId: string; sessionId: string; approvalId: string; toolName: string; operation: "WRITE" | "EXECUTE"; lspApproval?: LspApproval }
+  | { type: "approval_requested"; runId: string; sessionId: string; approvalId: string; toolName: string; operation: "WRITE" | "EXECUTE"; lspApproval?: LspApproval; contextUrl?: string }
   | { type: "memory_suggestion"; runId: string; sessionId: string; suggestionId: string; scope: "USER" | "PROJECT"; body: string; reason?: string }
   | { type: "event_stream_truncated"; runId: string; sessionId: string }
   | { type: "run_completed"; runId: string; sessionId: string; result: RuntimeRunResult }
@@ -182,6 +185,8 @@ export type RuntimeRunHandle = {
 export type SendUserInput = {
   sessionId: string;
   content: string;
+  /** For unattended session-local turns: built-in READ tools only, no approval reuse or hooks. */
+  readOnly?: boolean;
 };
 
 export type CreateRuntimeSession = {
@@ -252,12 +257,18 @@ export type DragonsRuntimeOptions = {
   providerRegistry?: ProviderRegistry;
   sessionStore?: SessionStore;
   tools?: AgentTool[];
+  /** Trusted host registrations only; manifests discovered on disk never execute automatically. */
+  pluginRegistry?: PluginRegistry;
+  /** Declarative host-owned event bindings; effects require approval on each trigger. */
+  lifecycleHooks?: readonly import("./lifecycle-hooks.js").LifecycleHook[];
   mcpManager?: McpClientManager;
   backgroundTasks?: BackgroundTaskManager;
   memoryStore?: MemoryStore;
   diagnostics?: RuntimeDiagnosticsService;
   memoryDirectory?: string;
   skillsDirectory?: string;
+  /** Optional host-owned, advisory-only usage recorder; never an authority for activation. */
+  skillCurator?: import("./skill-curator.js").SkillCurator;
   defaultProvider?: ProviderId;
   defaultModel?: string;
   maxTurns?: number;
@@ -431,6 +442,7 @@ function publicResult(result: AgentRunResult): RuntimeRunResult {
 function checkedInput(input: SendUserInput): string {
   if (!input || typeof input.sessionId !== "string" || !input.sessionId) throw new Error("A runtime session ID is required.");
   if (typeof input.content !== "string") throw new Error("Runtime user input must be a string.");
+  if (input.readOnly !== undefined && typeof input.readOnly !== "boolean") throw new Error("Runtime read-only mode must be a boolean.");
   const content = input.content.trim();
   if (!content) throw new Error("Runtime user input must not be empty.");
   if (content.length > MAX_RUNTIME_INPUT_CHARACTERS) throw new Error(`Runtime user input exceeds the ${MAX_RUNTIME_INPUT_CHARACTERS}-character limit.`);
@@ -462,11 +474,14 @@ class DragonsRuntimeCore implements DragonsRuntime {
     private readonly providerRegistry: ProviderRegistry,
     private readonly sessionStore: SessionStore,
     private readonly tools: AgentTool[],
+    private readonly pluginRegistry: PluginRegistry | undefined,
+    private readonly lifecycleHooks: readonly import("./lifecycle-hooks.js").LifecycleHook[] | undefined,
     private readonly mcpManager: McpClientManager | undefined,
     private readonly backgroundTasks: BackgroundTaskManager,
     private readonly memoryStore: MemoryStore,
     private readonly diagnostics: RuntimeDiagnosticsService,
     private readonly skillsDirectory: string,
+    private readonly skillCurator: import("./skill-curator.js").SkillCurator | undefined,
     private readonly defaultProvider: ProviderId,
     private readonly defaultModel: string | undefined,
     private readonly maxTurns: number | undefined,
@@ -645,7 +660,7 @@ class DragonsRuntimeCore implements DragonsRuntime {
       this.enqueueRuntimeEvent(active, { type: "run_started", runId, sessionId: session.id, provider: session.provider, model: session.model });
 
       const releaseExecution = release;
-      active.completion = this.executeRun(runId, session, content, controller.signal, active, checkpoints)
+      active.completion = this.executeRun(runId, session, content, controller.signal, active, checkpoints, input.readOnly === true)
         // Cleanup must settle before terminal success/failure and share their safe error boundary.
         .finally(async () => { await releaseExecution?.(); })
         .then((result) => {
@@ -791,11 +806,12 @@ class DragonsRuntimeCore implements DragonsRuntime {
     signal: AbortSignal,
     active: ActiveRun,
     checkpoints: SessionCheckpoints,
+    readOnly: boolean,
   ): Promise<RuntimeRunResult> {
-    if (isCheckpointCommand(content)) {
+    if (!readOnly && isCheckpointCommand(content)) {
       const local = checkpointCommand(content, checkpoints);
       return publicResult(await runAgent({ task: content, ...local, workingDirectory: this.workingDirectory, checkpoints, signal, maxTurns: 2,
-        authorize: (request) => this.requestAuthorization(runId, session.id, request, signal, active),
+        authorize: (request, approvalSignal) => this.requestAuthorization(runId, session.id, request, approvalSignal ?? signal, active),
         onEvent: (event) => this.forwardAgentEvent(event, runId, session.id, active, new Map(local.tools.map((tool) => [tool.name, tool.operation]))),
       }));
     }
@@ -838,7 +854,8 @@ class DragonsRuntimeCore implements DragonsRuntime {
       workingDirectory: this.workingDirectory,
       onSuggestion: (suggestion) => this.presentMemorySuggestion(runId, session.id, suggestion, signal, active),
     });
-    const advisoryTools = [...this.tools, ...(this.mcpManager?.tools() ?? []), memorySuggestionTool];
+    const historyRecorder = createSessionHistoryRecorder();
+    const advisoryTools = readOnly ? [] : [...this.tools, ...(this.mcpManager?.tools() ?? []), memorySuggestionTool, ...createSessionSearchTools(this.sessionStore, this.workingDirectory), ...(this.pluginRegistry?.tools() ?? [])];
     const getPlan = async (): Promise<DragonsPlan> => ({ version: 1, tasks: await planStore.list() });
     const authorizeNested = (request: { name: string; task: string }) => this.requestAuthorization(runId, session.id, {
       name: request.name,
@@ -876,22 +893,28 @@ class DragonsRuntimeCore implements DragonsRuntime {
       memory,
       getPlan,
     });
-    const runTools = [
+    const normalTools = [
       ...advisoryTools,
       ...createPlanTools(() => planStore),
       subagentTool,
       parallelSubagentTool,
       ...orchestrationTools,
     ];
+    // Never trust a host/plugin READ label for an unattended run: only built-in
+    // workspace-bound tools, without MCP, nested agents or plan mutations.
+    const runTools = readOnly ? await createReadTools(this.workingDirectory) : normalTools;
+    if (new Set(runTools.map((tool) => tool.name)).size !== runTools.length) throw new Error("Plugin tool name conflicts with an existing tool.");
     const toolOperations = new Map(runTools.map((tool) => [tool.name, tool.operation]));
-    const sessionApprovals = this.sessionApprovalsBySession.get(session.id) ?? new Set<string>();
-    this.sessionApprovalsBySession.set(session.id, sessionApprovals);
+    const sessionApprovals = readOnly ? new Set<string>() : (this.sessionApprovalsBySession.get(session.id) ?? new Set<string>());
+    if (!readOnly) this.sessionApprovalsBySession.set(session.id, sessionApprovals);
     const runDiagnostics = this.diagnostics.start({ sessionId: session.id, provider: session.provider, model: session.model });
     const result = await runAgent({
       task: content,
+      inlineContextReferences: !readOnly,
       model: createParentModel(),
       tools: runTools,
-      lsp: this.lsp,
+      lsp: readOnly ? undefined : this.lsp,
+      programmaticTools: !readOnly,
       workingDirectory: this.workingDirectory,
       projectContext,
       skills,
@@ -899,19 +922,23 @@ class DragonsRuntimeCore implements DragonsRuntime {
       plan,
       conversationResponseId: session.continuation?.responseId,
       continuationState: session.continuation?.providerState,
-      maxTurns: this.maxTurns,
+      maxTurns: readOnly ? Math.min(this.maxTurns ?? 8, 8) : this.maxTurns,
+      maxToolCalls: readOnly ? 16 : undefined,
+      lifecycleHooks: readOnly ? undefined : this.lifecycleHooks,
+      sessionStarting: session.messages.length === 0,
       contextBudgetChars: this.contextBudgetChars,
       signal,
       sessionApprovals,
       checkpoints,
-      authorize: (request) => this.requestAuthorization(runId, session.id, request, signal, active),
-      onEvent: (event) => this.forwardAgentEvent(event, runId, session.id, active, toolOperations),
+      authorize: readOnly ? async () => false : (request, approvalSignal) => this.requestAuthorization(runId, session.id, request, approvalSignal ?? signal, active),
+      onEvent: (event) => { historyRecorder.observe(event); this.forwardAgentEvent(event, runId, session.id, active, toolOperations); },
       diagnostics: runDiagnostics,
     });
     const completedAt = new Date().toISOString();
     const updateSession = (current: DragonsSession): DragonsSession => ({
       ...current,
       updatedAt: completedAt,
+      toolHistory: historyRecorder.merge(current),
       messages: compactSessionMessages([
         ...current.messages,
         { role: "user", content, createdAt: completedAt },
@@ -930,6 +957,8 @@ class DragonsRuntimeCore implements DragonsRuntime {
         return next;
       })();
     if (!saved) throw new Error(`Runtime session was not found: ${session.id}`);
+    // Advisory metrics must not turn a completed and saved conversation into a failed run.
+    if (!readOnly && this.skillCurator) await this.skillCurator.recordResolved(skills.skills).catch(() => {});
     return publicResult(result);
   }
 
@@ -1072,6 +1101,8 @@ class DragonsRuntimeCore implements DragonsRuntime {
     if (signal.aborted) return false;
     const lspApproval = request.name === "lsp_diagnostics_start" ? lspApprovalFromArguments(request.arguments) : undefined;
     if (request.name === "lsp_diagnostics_start" && (operation !== "EXECUTE" || !lspApproval)) return false;
+    const contextUrl = request.name === INLINE_URL_TOOL ? contextUrlFromArguments(request.arguments) : undefined;
+    if (request.name === INLINE_URL_TOOL && (operation !== "EXECUTE" || !contextUrl)) return false;
     const approvalId = randomUUID();
     return new Promise<ToolAuthorizationDecision>((resolve) => {
       const settle = (decision: ToolAuthorizationDecision): void => {
@@ -1096,6 +1127,7 @@ class DragonsRuntimeCore implements DragonsRuntime {
         toolName: request.name,
         operation,
         ...(lspApproval ? { lspApproval } : {}),
+        ...(contextUrl ? { contextUrl } : {}),
       });
     });
   }
@@ -1155,11 +1187,14 @@ export async function createDragonsRuntime(options: DragonsRuntimeOptions): Prom
     providerRegistry,
     sessionStore,
     tools,
+    options.pluginRegistry,
+    options.lifecycleHooks,
     options.mcpManager,
     backgroundTasks,
     memoryStore,
     diagnostics,
     options.skillsDirectory ?? getDragonsSkillsDirectory(),
+    options.skillCurator,
     defaultProvider,
     options.defaultModel,
     options.maxTurns,

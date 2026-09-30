@@ -107,6 +107,7 @@ export function createEffectfulBackgroundJobManager(options: EffectfulBackground
           task: input.prompt,
           model: input.createModel(),
           tools: [...input.tools],
+          programmaticTools: false,
           workingDirectory: workspace,
           maxTurns,
           signal: controller.signal,

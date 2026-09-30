@@ -13,7 +13,7 @@ async function settled(c: DesktopUpdateController) {
   for (let i = 0; i < 10000 && !c.status().canCheck; i++) await tick();
   assert.equal(c.status().canCheck, true);
 }
-for (const mode of ["success", "candidate-cleanup", "candidate-close-failure", "identity", "target", "signature", "cancel", "close", "deadline"] as const) test(`actual controller prepare: ${mode}`, async (t) => {
+for (const mode of ["success", "candidate-cleanup", "candidate-close-failure", "identity", "target", "signature", "cancel", "close", "deadline"] as const) test(`actual controller prepare: ${mode}`, { skip: process.platform === "win32" && "macOS staging permissions are not modeled by Windows" }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "dragons-prepare-test-"));
   const sentinel = join(root, "active-data"); await writeFile(sentinel, "unchanged");
   let calls = 0, release!: () => void, entered!: () => void;

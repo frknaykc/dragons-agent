@@ -3,6 +3,12 @@ import test from "node:test";
 import { RuntimeTextRedactor } from "../../dist/runtime-redaction.js";
 
 const samples = [
+  ...["cookie", "set-cookie", "set_cookie", "setCookie", "id_token", "id-token", "idToken"].flatMap(key => [
+    `Before {"${key}":"fixtureCredential with spaces"} after.`,
+    `Before '${key}' = 'fixtureCredential' after.`,
+  ]),
+  "Before Cookie: session=fixtureCredential; other=fixtureCredential\nafter.",
+  "Before Set-Cookie: session=fixtureCredential; Path=/; HttpOnly\nafter.",
   "Before Authorization: Basic fixtureCredential after.",
   'Before {"authorization":"Basic fixtureCredential"} after.',
   "Before Bearer fixtureCredential after.",

@@ -5,6 +5,7 @@ import type { AgentModel } from "./agent.js";
 import type { AgentTool, ToolResult } from "./tools.js";
 import { RuntimeTextRedactor } from "./runtime-redaction.js";
 import { CheckpointStructuralFs, StructuralMutationFailure, reverseStructural, type StructuralSnapshot, type StructuralReceipt } from "./checkpoint-structural-fs.js";
+import { safeCheckpointIoAvailable } from "./checkpoint-win32.js";
 
 // 256 KiB per image; at most 2 MiB per admitted batch and retained history.
 // Capture can coexist with history (4 MiB image payload total), plus one
@@ -20,7 +21,7 @@ const safeJson = (value: unknown): string => JSON.stringify(value, null, 2).repl
   (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
 const imagePages = (bytes: Buffer | null): number => Math.max(1, Math.ceil((bytes?.length ?? 0) / DIFF_SLICE));
 const redactPath = (path: string): string => { const redactor = new RuntimeTextRedactor(); return redactor.push(path) + redactor.finish(); };
-type Image = { bytes: Buffer | null; mode: number; dev?: number; ino?: number };
+type Image = { bytes: Buffer | null; mode: number; dev?: number; ino?: number; fileId?: string };
 class MutationFailure extends Error {
   constructor(message: string, readonly changedPaths: string[]) { super(message); }
 }
@@ -39,7 +40,8 @@ export type CaptureEligibility =
 export type FileMutation = { path: string; content: string | null; expected?: string | null };
 const digest = (bytes: Buffer | null) => bytes === null ? "absent" : createHash("sha256").update(bytes).digest("hex");
 const same = (a: Image, b: Image) => a.mode === b.mode && digest(a.bytes) === digest(b.bytes)
-  && (a.dev === undefined || b.dev === undefined || (a.dev === b.dev && a.ino === b.ino));
+  && (a.dev === undefined || b.dev === undefined || (a.dev === b.dev
+    && (a.fileId || b.fileId ? a.fileId !== undefined && a.fileId === b.fileId : a.ino === b.ino)));
 const missing = (error: unknown) => (error as NodeJS.ErrnoException)?.code === "ENOENT";
 /** Conservative lexical exclusions over bounded UTF-8 images, not a secret detector.
  * Recognizes literal ASCII assignment keys containing password/secret/token and
@@ -47,7 +49,7 @@ const missing = (error: unknown) => (error as NodeJS.ErrnoException)?.code === "
  * Encoded/escaped keys or whole URLs, arbitrary names and unlabelled values can
  * evade this policy; benign matching names/userinfo may also be refused.
  */
-function sensitive(path: string, bytes: Buffer | null): boolean {
+export function sensitiveContext(path: string, bytes: Buffer | null): boolean {
   // Do not retain credential-bearing filenames: redacted labels cannot safely
   // act as exact selectors (they may name a different real file).
   if (redactPath(path) !== path) return true;
@@ -77,9 +79,9 @@ export class SessionCheckpoints {
   #structural?: CheckpointStructuralFs;
   #backend(): CheckpointStructuralFs { return this.#structural ??= new CheckpointStructuralFs(this.#root); }
   readText(path: string): string {
-    const image = constants.O_NOFOLLOW ? this.#backend().capture(path).image : this.#read(path);
+    const image = safeCheckpointIoAvailable ? this.#backend().capture(path).image : this.#read(path);
     if (image.bytes === null) throw Object.assign(new Error("File not found."), { code: "ENOENT" });
-    if (sensitive(path, image.bytes)) throw new Error("Checkpoint excludes sensitive or binary text.");
+    if (sensitiveContext(path, image.bytes)) throw new Error("Checkpoint excludes sensitive or binary text.");
     return image.bytes.toString("utf8");
   }
   readonly #root: string;
@@ -213,11 +215,11 @@ export class SessionCheckpoints {
       if (length > MAX_FILE) throw new Error("Checkpoint file limit exceeded (256 KiB).");
       if (length > remaining) throw new Error("Checkpoint aggregate batch image limit exceeded (2 MiB).");
       remaining -= length;
-      const snapshot = constants.O_NOFOLLOW ? this.#backend().capture(mutation.path, remaining) : undefined;
+      const snapshot = safeCheckpointIoAvailable ? this.#backend().capture(mutation.path, remaining) : undefined;
       const before = snapshot?.image ?? this.#read(mutation.path, remaining);
       remaining -= before.bytes?.length ?? 0;
       const bytes = mutation.content === null ? null : Buffer.from(mutation.content);
-      if (sensitive(mutation.path, before.bytes) || sensitive(mutation.path, bytes)) throw new Error("Checkpoint excludes credential paths, sensitive content and binary files; write refused.");
+      if (sensitiveContext(mutation.path, before.bytes) || sensitiveContext(mutation.path, bytes)) throw new Error("Checkpoint excludes credential paths, sensitive content and binary files; write refused.");
       if (mutation.expected !== undefined && (before.bytes === null ? null : before.bytes.toString("utf8")) !== mutation.expected) throw new Error("Checkpoint conflict: patch/edit source changed.");
       return { path: mutation.path, snapshot, before, after: { ...before, bytes, mode: bytes === null ? 0 : before.mode || 0o600 } };
     });
@@ -231,7 +233,7 @@ export class SessionCheckpoints {
     try {
       this.#inspect(mutations);
       // Structural captures include existing parent directory identities.
-      if (!constants.O_NOFOLLOW) return { kind: "unsupported", reason: "platform" };
+      if (!safeCheckpointIoAvailable) return { kind: "unsupported", reason: "platform" };
       return { kind: "covered" };
     } catch (error) {
       return { kind: "rejected", result: { ok: false, output: error instanceof Error ? error.message : "Checkpoint inspection failed." } };
@@ -242,11 +244,11 @@ export class SessionCheckpoints {
     this.#busy = true;
     try {
       const entries = this.#inspect(mutations);
-      if (!constants.O_NOFOLLOW) throw new Error("Checkpoint platform unsupported.");
+      if (!safeCheckpointIoAvailable) throw new Error("Checkpoint platform unsupported.");
       const checkpoint: Checkpoint = { id: `cp-${this.#namespace}-${this.#next++}`, entries: [] };
       this.#items.push(checkpoint);
       try {
-        if (entries.every((entry) => !entry.path.includes("/") && entry.before.bytes !== null && entry.after.bytes !== null)) {
+        if (constants.O_NOFOLLOW && entries.every((entry) => !entry.path.includes("/") && entry.before.bytes !== null && entry.after.bytes !== null)) {
           this.#apply(entries);
           checkpoint.entries = entries;
         } else {
@@ -324,18 +326,21 @@ export class SessionCheckpoints {
     const image = entry[side];
     if (image.bytes !== null && (image.dev === undefined || image.ino === undefined)) return undefined;
     return { ...entry.snapshot, image: image.bytes === null ? { kind: "absent", bytes: null, mode: 0 }
-      : { kind: "present", bytes: image.bytes, mode: image.mode, dev: image.dev!, ino: image.ino! } };
+      : { kind: "present", bytes: image.bytes, mode: image.mode, dev: image.dev!, ino: image.ino!, fileId: image.fileId } };
   }
   #rebindRestored(id: string, selected: Entry[], completed: StructuralReceipt[]): void {
     const topology = (a: StructuralSnapshot, b: StructuralSnapshot): boolean => a.path === b.path
       && a.directories.length === b.directories.length && a.directories.every((directory, i) => {
         const other = b.directories[i]!;
-        return directory.path === other.path && directory.dev === other.dev && directory.ino === other.ino;
+        return directory.path === other.path && directory.dev === other.dev
+          && (directory.fileId || other.fileId ? directory.fileId !== undefined && directory.fileId === other.fileId : directory.ino === other.ino);
       });
     const exact = (a: StructuralSnapshot, b: StructuralSnapshot): boolean => topology(a, b)
       && a.image.kind === b.image.kind && a.image.mode === b.image.mode
       && (a.image.kind === "absent" || (b.image.kind === "present"
-        && a.image.dev === b.image.dev && a.image.ino === b.image.ino && a.image.bytes.equals(b.image.bytes)));
+        && a.image.dev === b.image.dev
+        && (a.image.fileId || b.image.fileId ? a.image.fileId !== undefined && a.image.fileId === b.image.fileId : a.image.ino === b.image.ino)
+        && a.image.bytes.equals(b.image.bytes)));
     // Only the verified rollback receipt can establish the new identity. Never
     // reread a pathname or equate unrelated generations merely by their bytes.
     const prior = this.#items.slice(0, this.#items.findIndex((item) => item.id === id));
@@ -365,7 +370,7 @@ export class SessionCheckpoints {
       for (const entry of entries) {
         const current = entry.receipt ? this.#backend().capture(entry.path).image : this.#read(entry.path);
         if (!same(current, entry.after)) throw new Error("Checkpoint conflict: file changed since checkpoint; rollback refused.");
-        if (sensitive(entry.path, current.bytes) || sensitive(entry.path, entry.before.bytes)) throw new Error("Sensitive checkpoint excluded.");
+        if (sensitiveContext(entry.path, current.bytes) || sensitiveContext(entry.path, entry.before.bytes)) throw new Error("Sensitive checkpoint excluded.");
       }
       try {
         if (entries.every((entry) => entry.receipt)) {

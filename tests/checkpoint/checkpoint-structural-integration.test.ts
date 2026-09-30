@@ -14,6 +14,7 @@ import { createProviderRegistry } from "../../dist/provider/registry.js";
 import { createSessionStore } from "../../dist/session-store.js";
 import { DesktopBridge } from "../../dist/desktop/bridge.js";
 import { main } from "../../dist/cli.js";
+import { supportedCheckpointTest as checkpointTest } from "./checkpoint-support.js";
 
 const checkpointId = (history: SessionCheckpoints, ordinal?: number): string => {
   const ids = history.list().split("\n").map((line) => line.split(":")[0]!);
@@ -60,7 +61,7 @@ async function fixture(t: TestContext) {
 
 }
 const mixed = "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+created\n--- a/nested/edit.txt\n+++ b/nested/edit.txt\n@@ -1 +1 @@\n-old\n+new\n--- a/delete.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n";
-test("runtime mixed structural batch and selected rollback retain unrelated receipts; local commands do not call provider", async (t) => {
+checkpointTest("runtime mixed structural batch and selected rollback retain unrelated receipts; local commands do not call provider", async (t) => {
   const f = await fixture(t); await mkdir(join(f.root, "nested"));
   await writeFile(join(f.root, "nested/edit.txt"), "old\n"); await writeFile(join(f.root, "delete.txt"), "old\n");
   f.queue([call("apply_patch", { patch: mixed })]);
@@ -77,7 +78,7 @@ test("runtime mixed structural batch and selected rollback retain unrelated rece
   assert.equal(await readFile(join(f.root, "delete.txt"), "utf8"), "old\n");
   assert.deepEqual(f.counts(), counts);
 });
-for (const conflict of ["created", "replaced", "edited"]) test(`structural whole-selection preflight refuses external ${conflict}`, async (t) => {
+for (const conflict of ["created", "replaced", "edited"]) checkpointTest(`structural whole-selection preflight refuses external ${conflict}`, async (t) => {
   const f = await fixture(t); const history = new SessionCheckpoints(f.root);
   await mkdir(join(f.root, "nested")); await writeFile(join(f.root, "nested/a"), "old");
   await writeFile(join(f.root, "gone"), "old");

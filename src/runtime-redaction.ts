@@ -2,6 +2,7 @@ const CREDENTIAL_KEYS = new Set([
   "api_key", "api-key", "apikey", "access_token", "access-token", "accesstoken",
   "refresh_token", "refresh-token", "refreshtoken", "token", "password", "secret",
   "credential", "authorization", "auth",
+  "id_token", "id-token", "idtoken", "cookie", "set-cookie", "set_cookie", "setcookie",
 ]);
 const textDelimiter = /[\s"'`:=,{}\[\]&?]/;
 const valueDelimiter = /[\s"'`,{}\[\]&]/;
@@ -9,13 +10,14 @@ const MAX_PENDING_TEXT = 8_192;
 
 /** Incremental lexical redaction: incomplete keys and values never cross the public boundary. */
 export class RuntimeTextRedactor {
-  private mode: "text" | "key" | "start" | "value" | "quoted" = "text";
+  private mode: "text" | "key" | "start" | "value" | "quoted" | "line" = "text";
   private word = "";
   private pendingKey = "";
   private oversizedWord = false;
   private quote = "";
   private escaped = false;
   private valuePrefix = "";
+  private cookieValue = false;
 
   push(chunk: string): string {
     let output = "";
@@ -23,10 +25,12 @@ export class RuntimeTextRedactor {
       const lower = this.word.toLowerCase();
       if (this.oversizedWord) output += "[runtime text token truncated]";
       else if (CREDENTIAL_KEYS.has(lower)) {
+        this.cookieValue = /^(?:cookie|set[-_]?cookie)$/.test(lower);
         this.pendingKey = this.word;
         this.mode = "key";
       } else if (lower === "bearer" || lower === "basic") {
         output += this.word;
+        this.cookieValue = false;
         this.mode = "start";
       } else output += /^(?:sk|rk)-/i.test(this.word) ? "[REDACTED]" : this.word;
       this.word = "";
@@ -60,9 +64,14 @@ export class RuntimeTextRedactor {
           this.escaped = false;
           this.mode = "quoted";
         } else {
-          this.mode = "value";
+          // Unquoted Cookie/Set-Cookie headers may contain multiple credentials.
+          this.mode = this.cookieValue ? "line" : "value";
           this.valuePrefix = character;
         }
+        continue;
+      }
+      if (this.mode === "line") {
+        if (character === "\n" || character === "\r") { this.mode = "text"; output += character; }
         continue;
       }
       if (this.mode === "quoted") {
@@ -98,6 +107,7 @@ export class RuntimeTextRedactor {
     this.word = "";
     this.pendingKey = "";
     this.valuePrefix = "";
+    this.cookieValue = false;
     this.oversizedWord = false;
     return output;
   }

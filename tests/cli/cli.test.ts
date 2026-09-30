@@ -51,21 +51,21 @@ test("CLI accepts no prompt as an interactive command", () => {
   });
 });
 
-test("CLI reports a missing OpenAI API key even without a home directory", () => {
+test("CLI reports a missing OpenAI API key even without a home directory", { skip: process.platform === "win32" && "Windows resolves a native home even without HOME or USERPROFILE" }, () => {
   const result = runCli(["Say hello"]);
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /OPENAI_API_KEY is not set/);
 });
 
-test("home-less CLI with an environment key proceeds to required local state without consulting secure storage", () => {
+test("home-less CLI with an environment key proceeds to required local state without consulting secure storage", { skip: process.platform === "win32" && "Windows resolves a native home even without HOME or USERPROFILE" }, () => {
   const result = runCli(["Say hello"], { OPENAI_API_KEY: "synthetic-offline-test-key" });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /Unable to determine a home directory for Dragons memories/);
   assert.doesNotMatch(result.stderr, /credential storage|OPENAI_API_KEY is not set/);
 });
 
-test("home-less profile commands still require a profile root", () => {
+test("home-less profile commands still require a profile root", { skip: process.platform === "win32" && "Windows resolves a native home even without HOME or USERPROFILE" }, () => {
   const result = runCli(["profile", "list"]);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /Unable to determine a home directory/);

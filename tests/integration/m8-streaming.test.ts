@@ -98,7 +98,7 @@ test("OpenAI stream deltas, authorization, tool output, and final text flow thro
         name: "write_file",
         arguments: '{"path":"fixture.txt","content":"fixed"}',
       },
-      { type: "tool_completed", name: "write_file", result: { ok: true, output: "Wrote fixture" } },
+      { type: "tool_completed", name: "write_file", result: { ok: true, output: "Wrote fixture" }, observationOutput: "Wrote fixture" },
       { type: "message_delta", text: "Fix verified." },
       { type: "agent_completed", finalText: "Fix verified." },
     ]);

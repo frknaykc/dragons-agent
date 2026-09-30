@@ -147,6 +147,43 @@ async function refresh() {
   } finally { refreshing = false; controls(); }
 }
 $('refresh').onclick = () => refresh().catch(fail);
+let kanbanVersion = 0;
+const kanbanStages = [['todo', 'To do'], ['doing', 'Doing'], ['blocked', 'Blocked'], ['done', 'Done']];
+function renderKanban(tasks) {
+  const columns = $('kanban-columns');
+  columns.replaceChildren();
+  for (const [status, label] of kanbanStages) {
+    const column = document.createElement('section'); column.className = 'kanban-column';
+    const heading = document.createElement('h3'); heading.textContent = `${label} · ${tasks.filter(task => task.status === status).length}`;
+    column.append(heading);
+    for (const task of tasks.filter(item => item.status === status)) {
+      const card = document.createElement('article'); card.className = 'kanban-card';
+      const title = document.createElement('strong'); title.textContent = task.title;
+      const meta = document.createElement('small');
+      meta.textContent = `${task.assignee} · ${task.progress}% · rev ${task.revision}${task.handoffTo ? ` · offered to ${task.handoffTo}` : ''}\n${task.id}${task.dependsOn.length ? ` · depends on ${task.dependsOn.join(', ')}` : ''}`;
+      card.append(title); card.append(meta); column.append(card);
+    }
+    columns.append(column);
+  }
+}
+async function refreshKanban() {
+  if (stopped) return;
+  const version = ++kanbanVersion;
+  $('kanban-refresh').disabled = true;
+  $('kanban-status').textContent = 'Loading board…';
+  try {
+    const tasks = await request({ type: 'kanban_board' });
+    if (stopped || version !== kanbanVersion) return;
+    if (!Array.isArray(tasks)) throw new Error('Invalid Kanban board response.');
+    renderKanban(tasks);
+    $('kanban-status').textContent = `${tasks.length} ${tasks.length === 1 ? 'task' : 'tasks'} · refreshed`;
+  } catch (error) {
+    if (stopped || version !== kanbanVersion) return;
+    $('kanban-columns').replaceChildren();
+    $('kanban-status').textContent = `Board unavailable: ${error.message || 'Unable to load'}`;
+  } finally { if (version === kanbanVersion) $('kanban-refresh').disabled = stopped; }
+}
+$('kanban-refresh').onclick = () => refreshKanban();
 $('provider').onchange = () => { $('model').value = modelDrafts.get($('provider').value) ?? providers.find((p) => p.id === $('provider').value)?.defaultModel ?? ''; modelOptions(); };
 $('model').oninput = () => { modelDrafts.set($('provider').value, $('model').value); };
 $('create').onclick = async () => {
@@ -219,6 +256,7 @@ $('composer').onsubmit = async (event) => {
     } else if (result.kind === 'session') await useSession(result.session);
     else {
       message('assistant', result.text);
+      if (content.trimStart().startsWith('/kanban ')) void refreshKanban();
       if (content.trim().split(/\s+/)[0] === '/reasoning') await refreshReasoning();
       if (result.kind === 'restart') { stopped = true; session = undefined; runId = undefined; approval = undefined; }
     }
@@ -255,6 +293,19 @@ function receive(event) {
   if (event.type === 'tool_activity') $('activity').textContent = ($('activity').textContent + `\n${event.toolName} · ${event.operation || ''} · ${event.phase}\n${event.output || ''}\n${event.mutationWarning || ''}`).slice(-16000);
   if (event.type === 'approval_requested') {
     const scope = event.toolName === 'lsp_diagnostics_start' ? lspApprovalText(event.lspApproval) : undefined;
+    if (event.toolName === 'inline_context_url') {
+      const url = event.contextUrl;
+      if (event.operation !== 'EXECUTE' || typeof url !== 'string' || url.length > 2048 || !/^https:\/\//.test(url) || /[\s\p{C}]/u.test(url)) {
+        approval = undefined;
+        $('approval-label').textContent = '';
+        $('error').textContent = 'URL approval scope unavailable; request denied.';
+        void request({ type: 'approve', sessionId: event.sessionId, runId: event.runId, approvalId: event.approvalId, decision: 'deny' }).catch(fail);
+      } else {
+        approval = event;
+        $('approval-label').textContent = `EXECUTE: HTTPS GET ${url}\nOne request, no redirects; no future network permission.`;
+      }
+      controls(); return;
+    }
     if (event.toolName === 'lsp_diagnostics_start' && (event.operation !== 'EXECUTE' || !scope)) {
       approval = undefined;
       $('approval-label').textContent = '';
@@ -291,5 +342,5 @@ async function start() {
     }
   } catch (error) { stopped = true; fail(error); controls(); }
 }
-window.addEventListener('pagehide', () => { stopped = true; updateRevision++; updateControls(); });
+window.addEventListener('pagehide', () => { stopped = true; kanbanVersion++; updateRevision++; updateControls(); });
 void start();

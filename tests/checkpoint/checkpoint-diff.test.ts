@@ -9,6 +9,7 @@ import { runAgent } from "../../dist/agent.js";
 import { main } from "../../dist/cli.js";
 import { createCodingTools } from "../../dist/tools.js";
 import { RuntimeTextRedactor } from "../../dist/runtime-redaction.js";
+import { supportedCheckpointTest as checkpointTest } from "./checkpoint-support.js";
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "dragons-diff-"));
@@ -21,7 +22,7 @@ async function command(root: string, history: SessionCheckpoints, task: string) 
     authorize: async request => { assert.equal(request.operation, "READ"); return true; } });
 }
 
-test("real local command reconstructs both 256 KiB UTF-8 images through bounded deterministic pages", async (t) => {
+checkpointTest("real local command reconstructs both 256 KiB UTF-8 images through bounded deterministic pages", async (t) => {
   const f = await fixture(t);
   const before = "😀\r\n".repeat(43690) + "end!";
   const after = "é\u001b\r\n ".repeat(43690) + "last";
@@ -51,15 +52,15 @@ test("real local command reconstructs both 256 KiB UTF-8 images through bounded 
   assert.equal(await readFile(join(f.root, "file.txt"), "utf8"), before);
 });
 
-test("quoted exact paths, escaped listing, small compatibility and invalid local arguments", async (t) => {
+checkpointTest("quoted exact paths, escaped listing, small compatibility and invalid local arguments", async (t) => {
   const f = await fixture(t);
-  const paths = ["a  b.txt", "a b.txt", "tab\t.txt", "tail ", "escape\u001b[31m.txt", "bidi\u202e.txt"];
+  const paths = ["a  b.txt", "a b.txt", ...(process.platform === "win32" ? [] : ["tab\t.txt", "tail ", "escape\u001b[31m.txt"]), "bidi\u202e.txt"];
   for (const path of paths) await writeFile(join(f.root, path), "old " + paths.indexOf(path));
   assert.equal(f.history.mutate(paths.map(path => ({ path, content: "new " + paths.indexOf(path) }))).ok, true);
   const id = idOf(f.history);
   const listing = (await command(f.root, f.history, "/checkpoint list")).finalText;
   assert.doesNotMatch(listing, /[\t\u001b\u202e]/);
-  assert.match(listing, /\\t/);
+  if (process.platform !== "win32") assert.match(listing, /\\t/);
   for (const path of paths) {
     const output = (await command(f.root, f.history, `/checkpoint diff ${id} ${JSON.stringify(path)}`)).finalText;
     assert.deepEqual(JSON.parse(output), [{ path, before: "old " + paths.indexOf(path), after: "new " + paths.indexOf(path) }]);
@@ -86,7 +87,7 @@ test("credential-bearing filenames are refused instead of emitting ambiguous red
   }
 });
 
-test("slice boundaries do not trigger streaming secret redaction or replacement interpolation", async (t) => {
+checkpointTest("slice boundaries do not trigger streaming secret redaction or replacement interpolation", async (t) => {
   const f = await fixture(t);
   const text = "x".repeat(4096) + "sk-synthetic $& $` $'\r\n";
   await writeFile(join(f.root, "file.txt"), text);
@@ -97,7 +98,7 @@ test("slice boundaries do not trigger streaming secret redaction or replacement 
   assert.equal(JSON.parse(redacted).text, text.slice(4096));
 });
 
-test("actual interactive CLI accepts page syntax and exact quoted selectors without provider requests", { timeout: 10000 }, async (t) => {
+checkpointTest("actual interactive CLI accepts page syntax and exact quoted selectors without provider requests", { timeout: 10000 }, async (t) => {
   const f = await fixture(t);
   const paths = ["a  b.txt", "a b.txt"];
   for (const path of paths) await writeFile(join(f.root, path), "old");

@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { SessionCheckpoints } from "../../dist/checkpoint.js";
+import { checkpointIo, type CheckpointHandle } from "../../dist/checkpoint-win32.js";
+import { supportedCheckpointTest as checkpointTest } from "./checkpoint-support.js";
 
 const LIMIT = 256 * 1024;
 async function fixture(t: TestContext, content = "seed") {
@@ -17,7 +19,7 @@ async function fixture(t: TestContext, content = "seed") {
 }
 const id = (history: SessionCheckpoints) => history.list().split(":")[0]!;
 
-test("large UTF-8 images retain exact CRLF/no-final-newline diff and restore", async (t) => {
+checkpointTest("large UTF-8 images retain exact CRLF/no-final-newline diff and restore", async (t) => {
   const before = "é ".repeat(6000) + "\r\nend";
   const after = "ø ".repeat(6000) + "\r\nlast";
   const f = await fixture(t, before);
@@ -27,7 +29,7 @@ test("large UTF-8 images retain exact CRLF/no-final-newline diff and restore", a
   assert.equal(await readFile(f.target, "utf8"), before);
 });
 
-test("exact 256 KiB images restore while single-path diff stays capped at 60000 bytes", async (t) => {
+checkpointTest("exact 256 KiB images restore while single-path diff stays capped at 60000 bytes", async (t) => {
   const before = "a\n".repeat(LIMIT / 2), after = "b\n".repeat(LIMIT / 2);
   const f = await fixture(t, before);
   assert.equal(f.history.mutate([{ path: "file.txt", content: after }]).ok, true);
@@ -40,7 +42,7 @@ test("exact 256 KiB images restore while single-path diff stays capped at 60000 
   assert.equal((await readFile(f.target)).length, LIMIT + 1);
 });
 
-test("2 MiB batch admission is inclusive; excess rejects before writing or evicting history", async (t) => {
+checkpointTest("2 MiB batch admission is inclusive; excess rejects before writing or evicting history", async (t) => {
   const f = await fixture(t);
   const before = "a\n".repeat(LIMIT / 2), after = "b\n".repeat(LIMIT / 2);
   const batch = Array.from({ length: 4 }, (_, i) => ({ path: `${i}.txt`, content: after }));
@@ -57,18 +59,26 @@ test("2 MiB batch admission is inclusive; excess rejects before writing or evict
 });
 
 for (const stage of ["capture", "verify"] as const) for (const fault of ["growth", "short", "error"] as const) {
-  test(`bounded ${stage} rejects ${fault}, closes fd, and never writes`, async (t) => {
+  checkpointTest(`bounded ${stage} rejects ${fault}, closes fd, and never writes`, async (t) => {
     const before = "a\n".repeat(35000);
     const f = await fixture(t, before);
-    const originalRead = fs.readSync, originalOpen = fs.openSync, originalClose = fs.closeSync;
+    const windows = process.platform === "win32";
+    const originalRead = windows ? checkpointIo.read : fs.readSync;
+    const originalOpen = windows ? checkpointIo.open : fs.openSync;
+    const originalClose = windows ? checkpointIo.close : fs.closeSync;
     let writable = false, injected = false, bytesRequested = 0;
-    const openFds = new Set<number>();
-    const open = t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
-      writable = typeof args[1] === "number" && Boolean(args[1] & fs.constants.O_RDWR);
-      const fd = originalOpen(...args); openFds.add(fd); return fd;
-    });
-    const close = t.mock.method(fs, "closeSync", (fd: number) => { openFds.delete(fd); return originalClose(fd); });
-    const read = t.mock.method(fs, "readSync", (fd: number, buffer: Buffer, offset: number, length: number, position: number) => {
+    const openFds = new Set<CheckpointHandle>();
+    const trackOpen = (fd: CheckpointHandle, flags: number | string) => {
+      writable = typeof flags === "number" && Boolean(flags & fs.constants.O_RDWR);
+      openFds.add(fd); return fd;
+    };
+    const open = windows
+      ? t.mock.method(checkpointIo, "open", (...args: Parameters<typeof checkpointIo.open>) => trackOpen((originalOpen as typeof checkpointIo.open)(...args), args[1]))
+      : t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => trackOpen((originalOpen as typeof fs.openSync)(...args), args[1]));
+    const close = windows
+      ? t.mock.method(checkpointIo, "close", (fd: CheckpointHandle) => { openFds.delete(fd); return (originalClose as typeof checkpointIo.close)(fd); })
+      : t.mock.method(fs, "closeSync", (fd: number) => { openFds.delete(fd); return (originalClose as typeof fs.closeSync)(fd); });
+    const observeRead = (fd: CheckpointHandle, buffer: Buffer, offset: number, length: number, position: number) => {
       assert.ok(length <= 65536); bytesRequested += length;
       if (!injected && writable === (stage === "verify")) {
         injected = true;
@@ -76,16 +86,22 @@ for (const stage of ["capture", "verify"] as const) for (const fault of ["growth
         if (fault === "short") return 0;
         if (fault === "error") throw new Error("Synthetic read failure");
       }
-      return originalRead(fd, buffer, offset, length, position);
-    });
-    syncBuiltinESMExports();
+      return windows ? (originalRead as typeof checkpointIo.read)(fd, buffer, offset, length, position)
+        : (originalRead as typeof fs.readSync)(fd as number, buffer, offset, length, position);
+    };
+    const read = windows
+      ? t.mock.method(checkpointIo, "read", observeRead)
+      : t.mock.method(fs, "readSync", (fd: number, buffer: Buffer, offset: number, length: number, position: number) => observeRead(fd, buffer, offset, length, position));
+    if (!windows) syncBuiltinESMExports();
     let result;
     try { result = f.history.mutate([{ path: "file.txt", content: "new" }]); }
-    finally { read.mock.restore(); open.mock.restore(); close.mock.restore(); syncBuiltinESMExports(); }
+    finally { read.mock.restore(); open.mock.restore(); close.mock.restore(); if (!windows) syncBuiltinESMExports(); }
     assert.equal(injected, true);
     assert.equal(result.ok, false);
     assert.equal(openFds.size, 0);
-    assert.ok(bytesRequested <= 2 * (before.length + 1));
+    // Structural Windows writes preflight the batch and recheck before opening
+    // the writable handle; both bounded reads precede descriptor verification.
+    assert.ok(bytesRequested <= (process.platform === "win32" ? 4 : 2) * (before.length + 1));
     assert.equal(await readFile(f.target, "utf8"), before + (fault === "growth" ? "extra" : ""));
     assert.match(f.history.list(), /No checkpoints/);
   });

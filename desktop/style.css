@@ -40,6 +40,16 @@ textarea { display: block; width: 100%; height: clamp(64px, 12vh, 120px); resize
 #slash-choices [aria-selected="true"] { background: #edf3ec; border-color: #346538; }
 #error { color: #9f2f2d; font-size: 13px; margin: 0; max-height: 3em; overflow: auto; }
 #error:empty { display: none; }
+.kanban-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.kanban-heading h2 { margin: 0; }
+#kanban-status { font-size: 11px; color: #787774; margin: 8px 0; }
+.kanban-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 8px; }
+.kanban-column { border: 1px solid #eaeaea; border-radius: 6px; padding: 8px; min-width: 0; }
+.kanban-column h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; margin: 0 0 8px; }
+.kanban-card { border-left: 2px solid #346538; padding: 4px 0 4px 8px; margin: 8px 0; overflow-wrap: anywhere; }
+.kanban-card strong { display: block; font-size: 12px; }
+.kanban-card small { display: block; font-size: 10px; letter-spacing: 0; line-height: 1.5; }
+#kanban-board { border-bottom: 1px solid #eaeaea; padding-bottom: 12px; margin-bottom: 16px; }
 @media (max-width: 720px) { body { padding: 12px; gap: 8px; } main { grid-template-columns: 1fr; grid-template-rows: minmax(0, 2fr) minmax(0, 1fr); gap: 8px; } }
 @media (max-height: 600px) {
   body { padding: 10px 16px; gap: 6px; }

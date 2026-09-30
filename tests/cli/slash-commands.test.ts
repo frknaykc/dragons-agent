@@ -16,6 +16,22 @@ test("slash help lists local controls and filters commands", () => {
   assert.match(formatSlashHelp("not-a-command"), /No slash commands match/);
 });
 
+test("CLI advertises local persistent goal controls", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "dragons-slash-goal-help-"));
+  try {
+    const output: string[] = [];
+    await main([], {
+      workingDirectory: workspace,
+      configPath: join(workspace, "config.json"),
+      input: Readable.from(["/help goal\n", "/exit\n"]),
+      write: (text) => output.push(text),
+      tools: [],
+      model: { async respond() { throw new Error("help must not reach the model"); } },
+    });
+    assert.match(output.join(""), /\/goal/);
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});
+
 test("interactive auth slash commands are local", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "dragons-slash-auth-"));
   try {

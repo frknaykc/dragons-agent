@@ -11,7 +11,7 @@
   "files": [
     "desktop/main.mjs", "desktop/preload.cjs", "desktop/index.html", "desktop/renderer.js", "desktop/style.css",
     "desktop/secret-prompt.mjs", "desktop/secret-preload.cjs", "desktop/secret.html", "desktop/secret.js",
-    "dist/**/*.js", "LICENSE", "package.json",
+    "dist/**/*.js", "native/checkpoint-win32/build/Release/checkpoint_win32.node", "LICENSE", "package.json",
     "!dist/**/*.test.js", "!dist/acceptance-*.js", "!dist/provider-acceptance.js",
     "!dist/live-smoke.js", "!dist/chatgpt-stream-trace.js", "!dist/mcp-mock-server.js", "!dist/mcp-official-sdk-server.js"
   ],

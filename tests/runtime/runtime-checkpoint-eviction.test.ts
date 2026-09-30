@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { type TestContext } from "node:test";
+import { type TestContext } from "node:test";
 import { createProviderRegistry } from "../../dist/provider/registry.js";
 import { createDragonsRuntime, type RuntimeRunHandle } from "../../dist/runtime.js";
 import { createSessionStore } from "../../dist/session-store.js";
 import { createCodingTools } from "../../dist/tools.js";
+
+import { supportedCheckpointTest } from "../checkpoint/checkpoint-support.js";
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "dragons-checkpoint-eviction-"));
@@ -68,7 +70,7 @@ function idFrom(output: string): string {
   return match[1]!;
 }
 
-test("17th session fails closed while all 16 histories have active writes awaiting approval", { timeout: 20_000 }, async (t) => {
+supportedCheckpointTest("17th session fails closed while all 16 histories have active writes awaiting approval", { timeout: 20_000 }, async (t) => {
   const f = await fixture(t);
   const prior = idFrom(await f.approve(await f.startWrite(0, "prior")));
   const busy = [];
@@ -90,7 +92,7 @@ test("17th session fails closed while all 16 histories have active writes awaiti
   assert.match(await f.send(16, "/checkpoint list"), /No checkpoints/, "failed admission releases its session reservation");
 });
 
-test("pending admissions pin existing histories before storage completes", { timeout: 20_000 }, async (t) => {
+supportedCheckpointTest("pending admissions pin existing histories before storage completes", { timeout: 20_000 }, async (t) => {
   const f = await fixture(t);
   const ids: string[] = [];
   for (let i = 0; i < 16; i++) ids.push(idFrom(await f.approve(await f.startWrite(i, "prior"))));
@@ -108,7 +110,7 @@ test("pending admissions pin existing histories before storage completes", { tim
   }
 });
 
-test("capacity evicts the oldest idle history, not an active or newly admitted history; expired IDs fail explicitly", { timeout: 20_000 }, async (t) => {
+supportedCheckpointTest("capacity evicts the oldest idle history, not an active or newly admitted history; expired IDs fail explicitly", { timeout: 20_000 }, async (t) => {
   const f = await fixture(t);
   const prior = idFrom(await f.approve(await f.startWrite(0, "prior")));
   const active = await f.startWrite(0, "latest");

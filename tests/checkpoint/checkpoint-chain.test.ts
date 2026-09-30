@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { type TestContext } from "node:test";
+import { type TestContext } from "node:test";
 import { SessionCheckpoints } from "../../dist/checkpoint.js";
 import { CheckpointStructuralFs, StructuralMutationFailure } from "../../dist/checkpoint-structural-fs.js";
+import { supportedCheckpointTest as checkpointTest } from "./checkpoint-support.js";
 
 function fixture(t: TestContext) {
   const root = fs.mkdtempSync(join(tmpdir(), "checkpoint-chain-"));
@@ -20,7 +21,7 @@ function fixture(t: TestContext) {
   return { root, history, mutate, pin, rollback };
 }
 for (const path of ["a", "nested/a"]) for (const operation of ["create", "edit"]) {
-  test(`${operation}/delete rollback chain preserves actual inode: ${path}`, (t) => {
+  checkpointTest(`${operation}/delete rollback chain preserves actual inode: ${path}`, (t) => {
     const f = fixture(t); fs.mkdirSync(join(f.root, "nested"));
     if (operation === "edit") fs.writeFileSync(join(f.root, path), "seed");
     const c1 = f.mutate([{ path, content: "first" }]);
@@ -33,7 +34,7 @@ for (const path of ["a", "nested/a"]) for (const operation of ["create", "edit"]
     else assert.equal(fs.readFileSync(join(f.root, path), "utf8"), "seed");
   });
 }
-test("multiple edit ancestors and selected paths retain their causal chain", (t) => {
+checkpointTest("multiple edit ancestors and selected paths retain their causal chain", (t) => {
   const f = fixture(t);
   const c1 = f.mutate([{ path: "a", content: "one" }, { path: "b", content: "other" }]);
   const c2 = f.mutate([{ path: "a", content: "two" }]);
@@ -42,7 +43,7 @@ test("multiple edit ancestors and selected paths retain their causal chain", (t)
   assert.equal(fs.readFileSync(join(f.root, "b"), "utf8"), "other");
   f.rollback(c1, "b");
 });
-test("completed recreation before a later structural failure repairs only completed chain", (t) => {
+checkpointTest("completed recreation before a later structural failure repairs only completed chain", (t) => {
   const f = fixture(t);
   const c1 = f.mutate([{ path: "a", content: "one" }, { path: "b", content: "two" }]);
   const old = f.pin("b"); f.pin("a");
@@ -57,29 +58,36 @@ test("completed recreation before a later structural failure repairs only comple
   assert.notEqual(fs.statSync(join(f.root, "b")).ino, old);
   f.rollback(c1, "b"); f.rollback(c2, "a"); f.rollback(c1, "a");
 });
-test("external same-content replacement before deletion is not causally rebound", (t) => {
+checkpointTest("external same-content replacement before deletion is not causally rebound", (t) => {
   const f = fixture(t); const c1 = f.mutate([{ path: "a", content: "one" }]);
   fs.renameSync(join(f.root, "a"), join(f.root, "original"));
   fs.writeFileSync(join(f.root, "a"), "one", { mode: 0o600 }); f.pin("a");
   const c2 = f.mutate([{ path: "a", content: null }]); f.rollback(c2);
   assert.equal(f.history.rollback(c1).ok, false);
 });
-for (const change of ["bytes", "mode", "topology"] as const) test(`rebind requires matching historical ${change}, not only path and inode`, (t) => {
+for (const change of ["bytes", "mode", "topology"] as const) checkpointTest(`rebind requires matching historical ${change}, not only path and inode`, (t) => {
   const f = fixture(t); fs.mkdirSync(join(f.root, "nested"));
   const c1 = f.mutate([{ path: "nested/a", content: "one" }]);
-  const old = f.pin("nested/a");
+  const old = change === "topology" ? fs.statSync(join(f.root, "nested/a")).ino : f.pin("nested/a");
   if (change === "bytes") fs.writeFileSync(join(f.root, "nested/a"), "external");
-  if (change === "mode") fs.chmodSync(join(f.root, "nested/a"), 0o640);
+  if (change === "mode") fs.chmodSync(join(f.root, "nested/a"), process.platform === "win32" ? 0o444 : 0o640);
   if (change === "topology") {
     fs.renameSync(join(f.root, "nested"), join(f.root, "old-parent"));
     fs.mkdirSync(join(f.root, "nested"));
     fs.renameSync(join(f.root, "old-parent/a"), join(f.root, "nested/a"));
   }
   assert.equal(fs.statSync(join(f.root, "nested/a")).ino, old);
+  if (change === "mode" && process.platform === "win32") {
+    // Windows denies DELETE on a read-only leaf. Refusal must leave history
+    // intact and must not silently rebind the earlier writable generation.
+    assert.equal(f.history.mutate([{ path: "nested/a", content: null }]).ok, false);
+    assert.equal(f.history.rollback(c1).ok, false);
+    return;
+  }
   const c2 = f.mutate([{ path: "nested/a", content: null }]); f.rollback(c2);
   assert.equal(f.history.rollback(c1).ok, false);
 });
-test("receipt return followed by replacement never adopts a fresh disk image", (t) => {
+checkpointTest("receipt return followed by replacement never adopts a fresh disk image", (t) => {
   const f = fixture(t); const c1 = f.mutate([{ path: "a", content: "one" }]);
   f.pin("a"); const c2 = f.mutate([{ path: "a", content: null }]);
   const original = CheckpointStructuralFs.prototype.apply;
@@ -93,7 +101,7 @@ test("receipt return followed by replacement never adopts a fresh disk image", (
   assert.equal(f.history.rollback(c1).ok, false);
   assert.equal(fs.readFileSync(join(f.root, "a"), "utf8"), "one");
 });
-test("external same-content replacement after restoration and separate sessions remain conflicts", (t) => {
+checkpointTest("external same-content replacement after restoration and separate sessions remain conflicts", (t) => {
   const f = fixture(t); const c1 = f.mutate([{ path: "a", content: "one" }]);
   const other = new SessionCheckpoints(f.root);
   assert.equal(other.mutate([{ path: "a", content: "one" }]).ok, true);

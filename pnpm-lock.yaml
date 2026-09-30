@@ -36,6 +36,9 @@ importers:
       electron-builder:
         specifier: 26.15.3
         version: 26.15.3(electron-builder-squirrel-windows@26.15.3)(supports-color@7.2.0)
+      node-gyp:
+        specifier: 12.4.0
+        version: 12.4.0
       typescript:
         specifier: ^5.9.0
         version: 5.9.3

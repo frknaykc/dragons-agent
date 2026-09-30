@@ -18,10 +18,12 @@ export function auditDesktopArchive(archive) {
       continue;
     }
     if ('files' in statFile(archive, join(...file.split('/')))) {
-      assert.equal(file === 'desktop' || file === 'dist' || file === 'node_modules' || file.startsWith('dist/'), true, 'Unexpected first-party directory');
+      assert.equal(file === 'desktop' || file === 'dist' || file === 'node_modules' || file.startsWith('dist/')
+        || (process.platform === 'win32' && ['native', 'native/checkpoint-win32', 'native/checkpoint-win32/build', 'native/checkpoint-win32/build/Release'].includes(file)), true, 'Unexpected first-party directory');
       continue;
     }
-    assert.equal(file === 'LICENSE' || file === 'package.json' || desktopAssets.includes(file) || /^dist\/.*\.js$/.test(file), true, 'Unexpected first-party desktop file');
+    assert.equal(file === 'LICENSE' || file === 'package.json' || desktopAssets.includes(file) || /^dist\/.*\.js$/.test(file)
+      || (process.platform === 'win32' && file === 'native/checkpoint-win32/build/Release/checkpoint_win32.node'), true, 'Unexpected first-party desktop file');
     assert.equal(/\.test\.js$|^dist\/(acceptance-|provider-acceptance|live-smoke|chatgpt-stream-trace|mcp-mock-server|mcp-official-sdk-server)/.test(file), false, 'Test/acceptance fixture in desktop archive');
   }
   for (const file of [...desktopAssets, 'dist/runtime.js', 'dist/desktop/host.js', 'dist/desktop/workspace.js', 'dist/remote/runtime.js', 'node_modules/@napi-rs/keyring/index.js']) {
@@ -39,6 +41,16 @@ export function auditDesktopArchive(archive) {
     assert.ok(sidecar.size > 0, 'Native credential-store sidecar must not be empty');
     // Code signing can change unpacked Mach-O size after the ASAR header is built.
     // Loadability/signature integrity belongs to the native executable smoke/signature gate.
+  }
+  if (process.platform === 'win32') {
+    const file = 'native/checkpoint-win32/build/Release/checkpoint_win32.node';
+    assert.equal(files.includes(file), true, 'Windows checkpoint binding missing');
+    const binding = statFile(archive, join(...file.split('/')), false);
+    assert.equal(binding.unpacked, true, 'Windows checkpoint binding must be unpacked');
+    assert.equal('link' in binding, false, 'Windows checkpoint binding must be a regular file');
+    const sidecar = lstatSync(join(`${archive}.unpacked`, file));
+    assert.equal(sidecar.isFile(), true, 'Windows checkpoint sidecar must be a regular file');
+    assert.ok(sidecar.size > 0, 'Windows checkpoint sidecar must not be empty');
   }
   const metadata = JSON.parse(extractFile(archive, 'package.json').toString('utf8'));
   assert.equal(metadata.main, 'desktop/main.mjs');

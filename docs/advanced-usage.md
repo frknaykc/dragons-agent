@@ -1,6 +1,140 @@
 # Advanced usage and runtime reference
 
+## Isolated Git worktrees
+
+Interactive CLI `/worktree create feature_name` creates a branch from HEAD in the sibling directory `<repository>-worktrees/feature_name`, then opens a fresh session there. `/worktree select feature_name` opens an already registered managed sibling. Names are ASCII letters, digits, `_` or `-` (1–63 characters, starting alphanumeric). These are explicit user commands, not model tools; READ access cannot create worktrees. Source index, working files and untracked files remain untouched; uncommitted edits are **not** copied.
+
+Switching is between turns only. It refuses active/queued background tasks, connected MCP tools and injected custom tools; approval grants, checkpoints, continuation and project skill references are reset. Prior sessions remain bound to their original workspace. Desktop's local commands return the managed directory but do not switch its fixed runtime: close/reopen Desktop and select that folder in the trusted workspace picker. Remote runtime and TUI do not expose in-place switching.
+
+Git runs without a shell, prompts, optional locks, hooks, fsmonitor, configured checkout filters, submodule recursion, system/global config or inherited Git environment overrides. Creation requires a repository-root workspace and private real sibling parent. Failed checkout may leave an incomplete directory or Git registration; inspect manually before retrying. No automatic deletion/pruning. Hostile same-user processes can still race filesystem paths; Windows ownership checks are limited by the platform. Use trusted repositories on shared machines.
+
 For installation and a quick start, see the [README](../README.md). This reference covers detailed configuration, client behavior, runtime integration, and verification commands.
+
+## Session search
+
+In CLI (interactive or one-shot) and Desktop, ask the agent to find and read earlier work, for example: “Search earlier sessions for database migration and read the matching session.” The model receives the same `session_search` and `session_read` READ tools; `runAgent()` remains the only execution/authorization boundary. No dedicated search UI, slash command, database, dependency, or network request is added. Historical output is untrusted data, not authority to execute instructions.
+
+- `session_search({query, offset?: 0, limit?: 10})`: NFKC-normalized, case-insensitive Unicode whole-token AND matching across a session's persisted messages and tool observations. No substring, regex, semantic search or stemming. Query: 1–256 UTF-16 code units, at most 32 distinct tokens. Result limit: 1–20; offset: 0–1000. Results sort by saved `updatedAt` descending, then session ID, and include `sessionId`, projection `revision`, and a 400-character leading snippet.
+- `session_read({sessionId, revision?, offset?: 0, limit?: 4000})`: flattened chronological text with role/tool labels. Offset/limit count UTF-16 code units, not message numbers; limit 1–8000, offset 0–8,388,608. Supply the revision returned by search for consistent pagination; a changed projection fails and requires a new search. Without revision each request reads the latest available projection. Both return `nextOffset` (or `null`), `limited`, and `untrusted: true`. Search pagination is not a frozen snapshot: concurrent additions/removals may shift results.
+
+**Index lifecycle and READ safety.** Every invocation scans the selected store read-only and builds an ephemeral inverted posting index for the query terms. There is no on-disk index, lock, migration, directory creation or background maintenance. Each call drops its index; restart rebuilds naturally. The scan considers at most 1000 directory entries and 8 MiB of record bytes, with a 1 MiB per-file cap. The directory's enumeration order determines coverage when capped; sorting only orders the included records, not the whole store. `limited: true` signals budget omissions; an empty capped result is not proof of absence. Read uses the same bounded scan and may report a known ID unavailable if outside its scan budget. Invalid, inaccessible, symlinked or filename/ID-mismatched records are excluded. Cancellation is checked during the scan and between projection/index batches. Errors are bounded and do not expose filesystem paths.
+
+**Isolation and freshness.** The host binds tools to the already-selected profile's store, with no model-supplied directory/profile selector. Sessions must match the current canonical workspace (`realpath`), not its parent or another checkout. Tools never search other profiles, credential stores, workspace files, Memory, plans, skills, background journals or opaque provider continuation. Deleted or changed sessions are re-evaluated on the next call; there is no stale cross-call cache. A scan is not a transactional filesystem snapshot: a concurrent change after a file read becomes visible on the next call. The configured store directory and injected custom stores are trusted host inputs; a custom `SessionStore` without bounded `searchSnapshot` fails closed rather than falling back to unbounded listing. This is not a sandbox against a hostile process rewriting the store root.
+
+**What is durable/searchable.** Existing version-1 user/assistant `messages` remain compatible, including their existing compaction limits. Earlier sessions have no historical tool output to reconstruct. New completed interactive CLI/Desktop foreground turns also persist optional `toolHistory`: the latest 100 completed observations, each with tool name (128 characters), redacted output prefix (2000 characters), success flag and timestamp. Arguments, approval decisions/denials and search/read results themselves are not recorded. Failed/cancelled foreground runs and one-shot CLI runs do not persist new observations; child-internal/background events are not independently captured. `/clear` clears this history together with the interactive transcript. Session deletion removes its observations; no index file remains.
+
+Known credential forms are redacted before capture and before indexing/reading, including credential assignments, bearer/basic values, common key/token formats, cookies and private-key blocks. Raw provider continuation is never projected. This is defense in depth, not detection of arbitrary secrets embedded in prose: do not put confidential material into conversations or tool output. Search results enter the selected model's context and existing client tool-output rendering. No live-provider acceptance is implied by deterministic local tests.
+
+## Dynamic tool search
+
+When a `runAgent()` invocation receives more than 24 tools, its initial model request advertises the core coding tools (when present) plus two READ discovery tools instead of the entire catalog. This applies equally to one-shot/interactive CLI and Desktop runtime composition, including connected MCP tools. Small catalogs (24 or fewer tools) keep their existing fully advertised behavior. The catalog is a per-run snapshot: MCP connections changed between runs appear in the next run's inventory, not mid-run; activated schemas are not persisted into sessions or provider continuation.
+
+- `tool_search({query, offset?})` matches all whitespace-separated, case-insensitive substring terms against tool names and the first 1024 description characters. Results sort by exact name, include name, operation, shortened description and activation status, but **not** input schemas. At most 10 results per page; offset 0–2047, query 1–120 characters. `nextOffset` is `null` at the end. Only returned names are eligible for description.
+- `tool_describe({names})` loads exact schemas and activates 1–5 distinct previously discovered names, atomically. A batch fails without activating any member if a name is unknown, not discovered, or a schema is invalid/oversized. Per-run cap: 32 activated catalog tools. The schema limit is 16384 UTF-8 bytes per tool and 96000 bytes per response; the catalog accepts at most 2048 tools with names at most 128 UTF-8 bytes. Exceeding catalog bounds fails the run rather than silently hiding entries.
+
+Only tools advertised at the **start** of a model response can execute in that response: describing a tool does not allow a speculative call in the same batch. The next model turn receives its full schema. A guessed hidden tool name fails closed. Describing is not execution or authorization: every later WRITE/EXECUTE call still passes through `runAgent()`'s ordinary approval, ordering, cancellation, and limits. Search/describe themselves count as model tool calls and consume turns. If a long or invalid schema cannot fit, use a smaller batch or correct the host/MCP definition. Schema/description metadata from extensions is exposed to the selected provider when searched/described; configure only trusted extensions and never place credentials in their metadata.
+
+## Plugin SDK (programmatic hosts)
+
+`dragons-agent/plugins` exports `validatePluginManifest`, `readPluginManifest`, `discoverPlugins`, and `PluginRegistry`. Version-1 `plugin.json` manifests contain exactly `apiVersion: 1`, a lowercase safe `id`, a three-part `version`, a printable `name`, and `capabilities: ["tools"]`. Discovery reads bounded metadata under a host-selected root; it rejects symlink directories/files, incompatible versions and malformed entries. It does **not** import, install or activate code.
+
+Trusted host code can call `registry.register(manifest, () => [tool])` and pass `pluginRegistry: registry` to `createDragonsRuntime(...)`. Factories supply fresh tool instances for each foreground run. All registered tool names are prefixed `plugin_<id>_` (hyphens become underscores), with conflicts rejected; all plugin tool calls are classified **EXECUTE** even if a factory declares READ. `runAgent()` performs the normal approval on each call, with cancellation and tool-call limits. Input schemas and returned text are bounded; plugin-supplied mutation metadata is discarded. This is an integration interface for host-trusted implementations, **not** an executable plugin loader or sandbox: a JavaScript factory already running in the host process has host privileges. Never register code merely because a manifest was discovered in a project or downloaded from a catalog. Session resume does not load plugin code; a later run receives only the host's current explicit registrations.
+
+## Lifecycle hooks (programmatic hosts)
+
+Trusted hosts may pass `lifecycleHooks: [{ on: "file_changed", toolName: "plugin_my_plugin_notify" }]` to `createDragonsRuntime(...)`; the binding types and validator are exported from `dragons-agent/lifecycle-hooks`. Events: `session_started` (deferred until the first active user turn; passive creation cannot prompt for approval), `turn_started`, `turn_completed` (per model response), `tool_started` (after the tool's own authorization), `tool_completed` (including denials), and `file_changed` (a successful tool result reports a path inside the workspace). The tool receives its static JSON arguments plus an `event` object (`type`, and when applicable `toolName`, `ok`, or workspace-relative `path`). Reported changed paths are evidence from the tool, **not** a verified filesystem watcher or proof that a change occurred. No event includes provider text, tool arguments or output.
+
+Bindings reference existing host-registered tools, not arbitrary shell strings or downloaded scripts. At most 16 bindings, 4 KiB static arguments per binding and 64 triggered actions per run; actions execute sequentially within `runAgent()` under its normal READ/WRITE/EXECUTE tool authority. WRITE/EXECUTE requests prompt **on each trigger**, even after a session-scoped approval for the same tool. A denial skips that action without granting another; hook actions do not recursively trigger hooks, forge model tool results or enter durable session-search observations. They remain visible as tool activity to the active client. Hooks use host trust and are not a sandbox: an already loaded tool implementation has the host's privileges. CLI/Desktop do not discover hook definitions from workspace files or expose a script loader. Session-end and passive/resumed-session hooks are not available in this programmatic version.
+
+## Reviewed plugin catalog (programmatic hosts)
+
+`dragons-agent/plugin-catalog` exports `ReviewedPluginCatalog`. The shipped offline catalog currently contains the small `hello` example in versions `1.0.0` and `1.1.0`; each manifest's SHA-256 is pinned in the trusted module. No external registry or downloaded code is used.
+
+```ts
+import { ReviewedPluginCatalog } from "dragons-agent/plugin-catalog";
+import { PluginRegistry } from "dragons-agent/plugins";
+
+const catalog = new ReviewedPluginCatalog(hostOwnedPluginDirectory);
+catalog.list();
+await catalog.install("hello", "1.0.0");
+await catalog.update("hello", "1.1.0");
+const registry = new PluginRegistry();
+await catalog.activate("hello", registry); // pass registry as pluginRegistry to createDragonsRuntime
+await catalog.remove("hello");
+```
+
+Install, update and removal affect only validated metadata inside the host-owned directory. Source and installed manifest bytes must match the pinned digest; symlinks, hardlinks, tampering, foreign files, unknown versions and downgrades fail closed. Only compiled, reviewed host code supplies tool factories; activation never imports installed files as code, and registered tool calls still require EXECUTE approval from `runAgent()`. The installation directory must be trusted, single-writer host state; these checks are not a defense against a hostile concurrent writer swapping parent directories. CLI/Desktop do not automatically install or activate catalog entries.
+
+## Skills Hub (programmatic hosts)
+
+`dragons-agent/skill-hub` exports `SkillHub`. Its built-in `bundled` source offers the reviewed `quick-notes` instruction package in versions `1.0.0` and `1.1.0`. A trusted host may register additional **local** source directories with explicit `(source, id, version, sha256)` records. There is no remote download, search across arbitrary registries, executable package format, or automatic source loading from a workspace.
+
+```ts
+import { SkillHub } from "dragons-agent/skill-hub";
+import { getDragonsSkillsDirectory } from "dragons-agent/skills";
+
+const hub = new SkillHub(getDragonsSkillsDirectory());
+hub.listSources();
+hub.list("bundled");
+await hub.install("bundled", "quick-notes", "1.0.0");
+await hub.update("bundled", "quick-notes", "1.1.0");
+await hub.remove("quick-notes");
+```
+
+The hub validates the pinned digest and skill metadata before installation, rejects symlinks/hardlinks and foreign files, and refuses to overwrite a modified or pre-existing user skill. Upgrading changes the skill digest: existing session references are not silently reactivated, and the user must activate the new version explicitly. Local sources and their pins are supplied by the trusted host and do not persist between processes unless that host persists its own reviewed registry. Use a host-owned, single-writer skill directory; hostile concurrent filesystem swaps are outside this API's guarantees.
+
+`dragons-agent/skill-management` exports `SkillManager` and `createSkillManagementTools(directory)`. A trusted host can pass those five tools to `createDragonsRuntime({ tools: [...] })`; the default runtime does not register them. `skill_validate` is READ and returns the installed or proposed document's SHA-256 digest. `skill_create`, `skill_edit`, `skill_archive`, and `skill_delete` are WRITE and require the existing per-call authorization; edit, archive, and delete also require the current digest. They manage one-file **user** skills under the explicit host-owned directory only, reject extra files and links, and archive to `.archive/<id>/<uuid>/SKILL.md` instead of activating the archived content. Deletion is permanent. These user-directory changes are outside workspace checkpoints/change review; host applications should confirm destructive actions. Project skills can still be managed through ordinary workspace file tools. Validation checks formatting, not the trustworthiness of the instructions.
+
+`dragons-agent/skill-curator` exports `SkillCurator`. Pass a host-owned, single-writer state directory (separate from the skill directory) to its constructor and opt in via `createDragonsRuntime({ skillCurator: curator })`. After a successfully saved run, it records only the scope, ID, SHA-256 digest, count and timestamps for skills actually included in the resolved context. A failed curator write never changes the saved run; inspect `usage()` for its current state. `suggest(await listSkills(...), now)` offers non-mutating maintenance for untracked/changed or 90-day-unused skills, archive review for at most two uses and 180 days of inactivity, and merge review for duplicate bytes in the same scope. Hosts can combine user and project inventories explicitly. No skill is edited, activated or archived by a suggestion. Corrupt state fails closed rather than being silently reset; state is capped at 256 records. Usage metadata is local and not sent to any provider by the curator, though active skill context remains part of the normal model request.
+
+## External Memory provider contract (programmatic hosts)
+
+`dragons-agent/external-memory` exports `ExternalMemoryProvider`, `shareMemoryWithProvider` and `removeMemoryFromProvider`. A trusted host supplies an adapter and an `approve` callback; no adapter, credentials, network access, model tool, CLI/Desktop integration, automatic import, or scheduled/bidirectional sync ships with Dragons. The deterministic, network-free fake lives **only** under `tests/fixtures/` and is not a production provider.
+
+Sharing is a **manual, one-record push**, not a bulk export. The host must present each `approve` request's exact provider ID, action, scope, body and expiry to the user; the callback must be a fresh decision, not a saved setting or model-produced text. Denial performs no remote write. The local record is reread after approval and a changed record fails closed. The requested retention must be 1–365 whole days and is capped by the local memory's expiry; USER and PROJECT scopes are kept separate. Remote removal likewise requires fresh approval for the remote record and never deletes local memory. No incoming records are imported into the local store. The transfer API is not registered as an agent tool by default and never grants WRITE/EXECUTE authority.
+
+This contract does **not** prove a future service actually enforces expiry, deletion, isolation, or non-retention of backups; each adapter needs its own transport/authentication, privacy policy, error handling, and live acceptance. A provider operation can succeed remotely even if the client is cancelled immediately afterward. Host code and adapters run with host privileges and are not sandboxed; the lexical secret check is not comprehensive. A real external service integration is explicitly outside this development scope and remains open.
+
+## Programmatic tool execution
+
+`execute_program` is a READ-dispatched tool available to `runAgent()` in CLI and Desktop, including small and discovered catalogs. Its operation describes the interpreter only; **each nested call receives its own READ/WRITE/EXECUTE authorization**. The model supplies JSON steps, not JavaScript, shell code, a Node `vm` script, imports, or host-object handles. Program variables live only for that invocation in an in-memory map; they are not shared with another turn/session. This is bounded orchestration, **not** an OS security sandbox; an approved shell tool still executes on the host.
+
+Example (the `inventory` tool must be visible to this model turn and return a JSON array of `{id, enabled}` objects):
+
+```json
+{"steps":[
+  {"op":"call","as":"inventoryResult","tool":"inventory","args":{}},
+  {"op":"filter","as":"enabled","from":"inventoryResult.data","field":"enabled","equals":true},
+  {"op":"each","as":"observations","from":"enabled","item":"item","steps":[
+    {"op":"call","as":"observation","tool":"inspect","args":{"id":{"$ref":"item.id"}}}
+  ]},
+  {"op":"aggregate","as":"ids","from":"enabled","kind":"collect","field":"id"}
+],"return":"ids"}
+```
+
+- Every step has a variable name `as` (ASCII letter followed by up to 31 letters/digits/underscores). `call` accepts `tool` and optional JSON `args`; it stores `{ok:true, output:string, data?:parsedJSON}`. Other steps use a dotted `from` variable/property reference: `filter` keeps object entries whose `field` equals `equals` (strict JSON equality); `each` binds `item`, executes its nested steps in input order and stores their final values in an array; `aggregate` accepts `count`, numeric `sum` or `collect` with a field. Use `{"$ref":"variable.property"}` in arguments/equals. `return` is an optional dotted variable/property reference; absent it returns the final step value. Array indexing and arbitrary expressions are intentionally unsupported.
+- Limits per invocation: 16 KiB input; 1–16 top-level steps; up to 8 steps per loop body and two nested loop levels; 64 executed steps and 24 nested calls total; at most 20 items in any filtered, aggregated or iterated array; 32 variable names; 16 KiB per stored value/arguments/tool output and 24 KiB final result. Limit/invalid input/tool failure stops further steps with a bounded error. These are limits on **program state**, not a replacement for each tool's existing limits. Avoid large raw outputs when you only need bounded data.
+- Calls execute sequentially via the same `runAgent()` tool path as direct calls: ordered tool events, authorization, workspace checks, checkpoint/change evidence, LSP approvals/diagnostics, cancellation and redaction. Nested calls count against `maxToolCalls`; a denied call stops the program and no later step runs. Program recursion is rejected. The program's wrapper result is not duplicated in durable tool observations; nested calls retain their normal safe observations. Program output still enters the selected provider context.
+- Hidden catalog tools remain unavailable until `tool_search` discovers them and `tool_describe` activates their schemas. Activation inside a program cannot be used by later steps or calls in the same provider response; use the next model turn. Tool search/describe also consume nested call budget. CLI and Desktop use the same runtime composition; no special per-client executor is installed.
+
+## Inline context references
+
+Use explicit, whitespace-separated references in a new CLI or Desktop message:
+
+```text
+Explain @file(src/index.ts) using @folder(src) and @diff
+Summarize @url(https://www.wikipedia.org/)
+```
+
+`@file(path)` attaches workspace-relative text; spaces inside parentheses are literal. Absolute paths, traversal, sensitive paths/content, symlinks, hard-linked files and special files are rejected. `@folder(path)` attaches sorted direct-entry names/types only, never recursive file contents; sensitive names and links are excluded with a count. `@folder(.)` selects the workspace root. `@diff` attaches tracked HEAD-to-working-tree changes (staged and unstaged, not untracked files); the workspace must be the Git repository root and have HEAD. Git helpers/filters are suppressed using the same read-only Git boundary as review tools.
+
+References require whitespace boundaries. Emails, unknown mentions and backtick inline/fenced code remain literal. Parentheses and control characters in arguments are unsupported. Explicit malformed references fail the submission; errors and limits do not silently drop attachments. Only the fresh user task is resolved, once; model/tool output, attachment contents and restored history are never recursively expanded. Attachments carry visible source labels and are untrusted advisory data, not instructions.
+
+Limits: 8 references, 65,536 input bytes when reference syntax is present, 16,384 bytes per attachment, 49,152 aggregate serialized attachment bytes (also constrained by remaining context budget), 200 direct folder entries or changed Git paths. Oversize inputs fail rather than truncate. Cancel interrupts subsequent resolution and active network/Git work.
+
+`@url` requires a separate one-request EXECUTE approval displaying the full destination. Default EXECUTE denial remains authoritative. Only canonical credential-free HTTPS URLs on the default port are supported: no query, fragment, IP literals, redirects, cookies, authentication, compression, or provider headers. DNS must contain only public IPv4 addresses; IPv6-only and mixed IPv4/IPv6 answers fail closed. The checked address is pinned for connection while TLS validates the original hostname. Requests have a 10-second deadline and accept bounded UTF-8 plain text, Markdown, HTML or JSON only. HTML is attached as text, never executed. Private/local/special-purpose destinations and sensitive response content are rejected. The optional TUI denies URL approvals it cannot fully display; use CLI or Desktop.
+
+These checks are conservative exclusions, not a comprehensive secret detector or a sandbox against hostile concurrent filesystem mutation. Do not reference confidential material. Resolved content enters the selected model request and follows existing provider/session retention; approval does not authorize any action suggested by that content.
 
 ## Runtime and Desktop review hardening
 
@@ -362,7 +496,7 @@ Existing stdio entries remain valid. Add an HTTP server with an explicit transpo
 
 HTTP endpoints must be `http` or `https`, must not contain credentials, fragments, or query parameters, and redirects are rejected. HTTP bearer auth is opt-in and reads a token only from Dragons native credential storage, scoped by server ID, origin, and credential ID. Tokens and raw headers are rejected in configuration, command arguments, diagnostics, status output, sessions, and errors. The current CLI deliberately has no token argument or plaintext-file fallback; interactive OAuth and credential provisioning are not implemented. MCP connection, discovery, and invocation work is time-bounded; each HTTP response is capped at 1 MiB; automatic reconnect is disabled. `dragons mcp status` reports safe transport, auth mode, lifecycle, bounded tool/resource/prompt counts, namespaced tool identities, timing, and failure-category metadata without exposing endpoints or secrets.
 
-Use `dragons mcp list`, `dragons mcp connect <id>`, `dragons mcp connect-all`, `dragons mcp status`, and `dragons mcp disconnect <id>` after adding valid non-secret server configuration to Dragons' local config. `/mcp connect-all` provides the same process-local interactive behavior. Dragons accepts up to eight configured MCP servers, connects at most two at once, namespaces every exposed tool by server ID, and caps the combined active MCP tool set at 128. A failed server remains isolated; connected servers and their authorization requirements stay active.
+Use `dragons mcp list`, `dragons mcp connect <id>`, `dragons mcp connect-all`, `dragons mcp status`, and `dragons mcp disconnect <id>` after adding valid non-secret server configuration to Dragons' local config. `/mcp connect-all` provides the same process-local interactive behavior. Dragons accepts up to eight configured MCP servers, connects at most two at once, namespaces every exposed tool by server ID, and caps the combined active MCP tool set at 128. A failed server remains isolated; connected servers and their authorization requirements stay active. For a disposable, opt-in published-server/ChatGPT probe that does not change your profile, see [external MCP acceptance](live-mcp-acceptance.md).
 
 ## Memory
 

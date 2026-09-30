@@ -142,6 +142,12 @@ function parseSkill(raw: string, id: string, maximumBodyCharacters?: number): Om
   return { name, description, body };
 }
 
+/** Validate a proposed instruction document before installing it into a user skill directory. */
+export function validateSkillDocument(raw: string, id: string, maximumBodyCharacters = DEFAULT_MAX_SKILL_BODY_CHARS): Pick<Skill, "name" | "description" | "body"> {
+  if (!isSafeSkillId(id)) throw new Error("Skill ID must use lowercase letters, numbers, and single hyphens only.");
+  return parseSkill(raw, id, maximumBodyCharacters);
+}
+
 export async function readSkill(directory: string, id: string, options: { scope?: SkillScope; location?: string; maximumBodyCharacters?: number; maximumFileBytes?: number; workspaceRoot?: string } = {}): Promise<Skill> {
   if (!isSafeSkillId(id)) throw new Error("Skill ID must use lowercase letters, numbers, and single hyphens only.");
   const root = await ownedRoot(directory, options.workspaceRoot);

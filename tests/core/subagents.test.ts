@@ -202,11 +202,14 @@ test("M28 bounds a child report even when the configured cap is smaller than its
 
 test("M28 propagates the parent abort signal into the child run", async () => {
   let childSawSignal = false;
+  let enteredModel!: () => void;
+  const entered = new Promise<void>((resolve) => { enteredModel = resolve; });
   const controller = new AbortController();
   const tool = createSubagentTool({
     createModel: () => ({
       respond(request) {
         childSawSignal = request.signal === controller.signal;
+        enteredModel();
         return new Promise((_resolve, reject) => {
           const abort = (): void => reject(new DOMException("Aborted", "AbortError"));
           request.signal?.addEventListener("abort", abort, { once: true });
@@ -217,10 +220,27 @@ test("M28 propagates the parent abort signal into the child run", async () => {
   });
 
   const run = tool.execute({ task: "Wait for cancellation." }, { signal: controller.signal });
+  await entered;
   controller.abort();
 
   await assert.rejects(run, AgentRunCancelledError);
   assert.equal(childSawSignal, true);
+});
+
+test("M28 abort before the child model starts never invokes the provider", async () => {
+  const controller = new AbortController();
+  let responses = 0;
+  const tool = createSubagentTool({
+    createModel: () => ({ async respond() {
+      responses += 1;
+      return { responseId: "unexpected", text: "", toolCalls: [] };
+    } }),
+    tools: [readTool()],
+  });
+  const run = tool.execute({ task: "Stop before model entry." }, { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(run, AgentRunCancelledError);
+  assert.equal(responses, 0);
 });
 
 test("M28 refreshes the child model factory after interactive model and provider changes", async () => {

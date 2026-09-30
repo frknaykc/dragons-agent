@@ -385,10 +385,12 @@ export class TuiController {
         this.activity(`${event.toolName} ${event.operation ?? ""}: ${event.phase}${event.allowed === undefined ? "" : event.allowed ? " (allowed)" : " (denied)"}${event.ok === undefined ? "" : event.ok ? " (ok)" : " (failed)"}${event.output ? `\n${event.output}` : ""}`);
         break;
       case "approval_requested":
-        if (event.toolName === "lsp_diagnostics_start") {
+        if (event.toolName === "lsp_diagnostics_start" || event.toolName === "inline_context_url") {
           // This optional screen cannot display the complete bounded scope. Never offer a blind approval.
           const denied = this.runtime.resolveAuthorization({ runId: event.runId, approvalId: event.approvalId, decision: "deny" });
-          this.message("notice", "LSP startup denied: use CLI or Desktop to review the complete execution scope.");
+          this.message("notice", event.toolName === "inline_context_url"
+            ? "Inline URL denied: use CLI or Desktop to review the complete network scope."
+            : "LSP startup denied: use CLI or Desktop to review the complete execution scope.");
           if (!denied) this.cancel();
           break;
         }

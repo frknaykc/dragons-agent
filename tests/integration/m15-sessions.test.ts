@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -130,7 +130,7 @@ test("M15 resumes a saved session with current project instructions and provider
     });
 
     const resumed = await createSessionStore(sessionDirectory).load(session.id);
-    assert.equal(resumed?.workingDirectory, workspace);
+    assert.equal(resumed?.workingDirectory, await realpath(workspace));
     assert.equal(resumed?.provider, "chatgpt");
     assert.equal(resumed?.model, "fixture-model");
     assert.equal(resumed?.messages.length, 4);

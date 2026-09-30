@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -42,7 +42,7 @@ if (process.versions.electron) {
       assert.equal(await result, undefined);
       assert.equal(window.isDestroyed(), true);
     }
-    console.log('SECRET_LAYOUT_CANCEL_OK');
+    writeSync(1, 'SECRET_LAYOUT_CANCEL_OK\n');
     parent.destroy(); app.exit(0);
   } catch (error) { console.error(error); app.exit(1); }
   })();

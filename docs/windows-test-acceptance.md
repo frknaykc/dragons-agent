@@ -1,0 +1,28 @@
+# Windows kaynak test kabulü — 2026-09-24
+
+## Doğrulanan kapsam
+
+- Windows 10 x64 (`10.0.19045.0`), Node `v24.19.0`, pnpm `11.17.0`, Git for Windows `2.52.0.windows.1` üzerinde OneDrive dışındaki izole geçici kaynak kopyası kullanıldı. Başka bir proje deposuna dokunulmadı.
+- `pnpm build:tests` başarılı. Derlenmiş **168** `*.test.js` ve kaynakta kalan **8** `*.test.mjs` dosyasının her biri ayrı `node --test --test-reporter=tap` sürecinde, dosya başına **90 saniye** sınırla çalıştırıldı. **176 dosya**, **1.275 test**, **1.123 başarılı**, **152 atlanan**, **0 hata**, **0 zaman aşımı**; süreç çıkışı `0`. Ayrıca 12 sınırlı grup çalıştırmasında aynı toplam görüldü.
+- Windows Node, `O_NOFOLLOW` sunmadığından checkpoint mutasyonu fail-closed kalır. Checkpoint test klasöründe **98 atlama** vardır; platformun güvenli ret ve eski yol davranışı testleri çalışmaya devam eder. Diğer klasörlerdeki **54 atlama** da platforma özgü veya checkpoint gerektiren vakalardır; atlanan testler Windows checkpoint desteği kanıtı değildir.
+- macOS üzerinde son `pnpm release:check`: **1.275 test / 1.272 başarılı / 3 atlanan / 0 hata**; typecheck, build ve paket doğrulaması başarılı (`RELEASE_CHECK_OK`). Bu sonuç Windows paket doğrulaması değildir.
+
+## Açık sınırlar
+
+İlk tek-parça Windows `pnpm test` denemesi başarısız/ilerlemesiz kaldı ve durduruldu; daha sonra yapılan **dosya başına sınırlı tam envanter** başarılıdır, fakat tek komutluk eşzamanlı runner kabulü olarak sunulmaz. Windows checkpoint yakalama/geri alma desteği eklenmedi; onaylı yazma checkpoint dışında ilerleyebilir ve uyarı gösterir. Windows paketlenmiş uygulama/kurulum, Linux, gerçek sağlayıcıyla bütünleşik geniş senaryo ve üretim/yayın kabulü ayrı kapılardır. Windows gerçek Electron penceresindeki sentetik insan onayı kanıtı [ayrı kayıttadır](desktop-visual-approval-acceptance.md).
+
+## Windows checkpoint çalışması — devam ediyor
+
+Yukarıdaki sayılar **eski kaynak anına** aittir. Yeni HANDLE tabanlı yerel bileşen ve dosya işlemleri `native/checkpoint-win32/`, `src/checkpoint-win32.ts` ve `src/checkpoint-structural-fs.ts` altında geliştirilmektedir. Bileşen açıkken yapılan deneysel checkpoint odaklı taramada **126 testten 96 geçti, 29 başarısız, 1 atlandı**; eski `fs` enjeksiyon testleri, Windows dosya modu/topoloji davranışı ve CLI/diff uyumluluğu henüz çözülemedi. Bu yüzden son kodda bileşen yüklense bile Windows checkpoint mutasyonu güvenli biçimde reddedilir. Son Windows yeniden derlemesi başarılıdır; bu kapalı durumdaki odaklı tarama **127 test / 26 geçti / 3 başarısız / 98 atlandı**. Üç yeni Windows işlev testi, destek güvenlik nedeniyle devre dışıyken beklenen şekilde başarısızdır; bu sonuç destek kanıtı değildir. Paketlenmiş Electron içindeki yüklenebilirlik, güncel kaynak için tek-komut `pnpm test` ve Windows tam test envanteri doğrulanmadı. Native bileşeni yayınlamak için tüm bu kapılar kapatılmalı; geçmişteki 1.123/152 sonucu yeni koda taşınamaz.
+
+Güncel macOS `pnpm release:check`: **1.278 test / 1.272 başarılı / 6 atlanan / 0 hata**, typecheck ve paket doğrulaması geçti (`RELEASE_CHECK_OK`). Bu Windows başarısızlıklarını kapatmaz.
+
+## Windows checkpoint ve paket kabulü — son kaynak anı (2026-09-24)
+
+Yukarıdaki eski envanter, başarısız deney ve açık sınır paragrafları **tarihsel** kaynak anlarıdır. Aşağıdaki sonuçlar Windows 10.0.19045.6466 x64 / Node v24.19.0 / pnpm 11.17.0 üzerinde izole kaynak kopyası ve ondan üretilen `desktop-artifacts/win-unpacked` içindir; asıl Windows çalışma deposu değiştirilmedi. Kullanıcının izni yalnız izole kopyadaki `._*` aktarım yan dosyaları içindi. Win32 normal yol çözümlemesinin kaldıramadığı `._.` dosyası, tam yolun `\\?\` önekiyle `.NET File.Delete` üzerinden kaldırıldı; son sayım **0**.
+
+- Son kaynakta tek komut `pnpm test`: **1.280 test / 1.232 başarılı / 48 platform/koşul atlaması / 0 hata**, çıkış 0; `pnpm typecheck` çıkış 0. Windows native capture→mutation→rollback, junction ve yazma öncesi replacement reddi, açık handle ile ata dizin kimliği/file ID denetimi **çalıştı ve geçti**. Diğer checkpoint yarış/kısmi yazma/telafi regresyonları da koştu; yalnız `unsupported checkpoint platform` testi, destek mevcut olduğu için beklendiği gibi atlandı. Bu 48 genel atlama **atlamasız tüm platform kabulü** olarak sunulmaz; Windows rollback/junction/race hedefleri atlanmadı.
+- `pnpm desktop:pack` ile üretilen unpacked Windows x64 Desktop arşivi `node scripts/verify-desktop-package.mjs desktop-artifacts/win-unpacked/resources/app.asar` ile denetlendi: **3.939 arşiv girdisi**, Windows native binding + ASAR sidecar bulundu. `verify-desktop-installed.mjs` çıkış 0 ile geçti. Paketlenmiş Electron executable'ı `ELECTRON_RUN_AS_NODE=1` ile başlatan `node scripts/verify-windows-packaged-checkpoint.mjs <win-unpacked-exe>` kaynak ağacındaki addon yerine **arşiv içinden çözümlenen** binding ile capture→mutation→rollback yapıp `WINDOWS_PACKAGED_CHECKPOINT_PASS` verdi. Bu test unpacked paketi doğrular; Windows installer kurulumu, imza veya updater değildir.
+- macOS son maddi kaynak için `pnpm release:check`: **1.278 test / 1.272 başarılı / 6 atlanan / 0 hata**; typecheck, build ve paket doğrulaması geçti. Windows native kanıtının yerine geçmez.
+
+Güvenlik sınırı değişmedi: checkpoint mutasyonu native no-follow binding yoksa kapalıdır; onaylı legacy yazma varsa coverage `unsupported` olarak görünür. Read-only Windows yaprakları native yol tarafından yazılamaz/silinemez, geri yüklenmiş gibi raporlanamaz. Dış düşmanca yazarın tüm kontrol–syscall yarışlarına atomik garanti, credential için eksiksiz algılama, installer/kurulu üretim sürümü, Linux native kabulü ve M78 imzalı yayın/güncelleme kapıları **açık**. Bu kayıt yayın izni vermez.

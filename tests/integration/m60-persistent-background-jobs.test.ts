@@ -65,9 +65,10 @@ test("M60 denies duplicate active execution, preserves scope isolation, and safe
   const directory = await mkdtemp(join(tmpdir(), "dragons-m60-isolation-"));
   let release!: () => void;
   const pending = new Promise<void>((resolve) => { release = resolve; });
+  let manager: PersistentBackgroundJobManager | undefined;
   try {
     await writeFile(join(directory, "malformed.json"), "not json");
-    const manager = new PersistentBackgroundJobManager({ store: createPersistentBackgroundJobStore(directory), createId: (() => { const ids = [JOB_ID, OTHER_JOB_ID]; return () => ids.shift()!; })() });
+    manager = new PersistentBackgroundJobManager({ store: createPersistentBackgroundJobStore(directory), createId: (() => { const ids = [JOB_ID, OTHER_JOB_ID]; return () => ids.shift()!; })() });
     const first = await manager.start({ sessionId: SESSION_ID, workingDirectory: directory, prompt: "Wait safely.", createModel: () => ({ async respond() { await pending; return { responseId: "first", text: "done", toolCalls: [] }; } }), tools: [readTool] });
     await waitForState(manager, first.id, "running");
     await assert.rejects(manager.resume(first.id, { createModel: () => ({ async respond() { throw new Error("must not run"); } }), tools: [readTool] }), /not interrupted/i);
@@ -81,8 +82,7 @@ test("M60 denies duplicate active execution, preserves scope isolation, and safe
     assert.equal(await manager.cancel(first.id), true);
     assert.equal(await manager.cleanup({ sessionId: OTHER_SESSION_ID, limit: 1 }), 1);
     assert.equal(manager.show(OTHER_JOB_ID), undefined);
-    release();
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { release(); await manager?.wait(JOB_ID); await rm(directory, { recursive: true, force: true }); }
 });
 
 test("M60 exposes explicitly persistent jobs through bounded slash management after session reload", async () => {

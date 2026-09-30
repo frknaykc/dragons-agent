@@ -10,6 +10,7 @@ const builder = JSON.parse(await readFile(new URL('../../electron-builder.json',
 const desktopAssets = builder.files.filter((file) => file.startsWith('desktop/'));
 const desktopEntries = Object.fromEntries(await Promise.all(desktopAssets.map(async (file) => [file, await readFile(new URL(`../../${file}`, import.meta.url), 'utf8')])));
 const binding = `node_modules/@napi-rs/keyring-${process.platform}-${process.arch}/keyring.${process.platform}-${process.arch}.node`;
+const checkpointBinding = 'native/checkpoint-win32/build/Release/checkpoint_win32.node';
 
 async function fixture(extra, action, unpack = true) {
   const root = await mkdtemp(join(tmpdir(), 'dragons-archive-test-'));
@@ -18,6 +19,7 @@ async function fixture(extra, action, unpack = true) {
       ...desktopEntries,
       'dist/runtime.js': '', 'dist/desktop/host.js': '', 'dist/desktop/workspace.js': '', 'dist/remote/runtime.js': '',
       'node_modules/@napi-rs/keyring/index.js': '', [binding]: 'synthetic sidecar fixture, not a loadable native binary',
+      ...(process.platform === 'win32' ? { [checkpointBinding]: 'synthetic checkpoint sidecar fixture, not a loadable native binary' } : {}),
       'package.json': JSON.stringify({ main: 'desktop/main.mjs', version: '0.1.0', type: 'module', dependencies: {} }),
       ...extra,
     };
@@ -84,3 +86,12 @@ test('M77 archive audit rejects a non-file sidecar', async () => {
     assert.throws(() => auditDesktopArchive(archive));
   });
 });
+
+if (process.platform === 'win32') {
+  test('M77 archive audit rejects a missing Windows checkpoint binding', async () => {
+    await fixture({ [checkpointBinding]: null }, (archive) => assert.throws(() => auditDesktopArchive(archive), /Windows checkpoint binding missing/));
+  });
+  test('M77 archive audit rejects an empty Windows checkpoint sidecar', async () => {
+    await fixture({ [checkpointBinding]: '' }, (archive) => assert.throws(() => auditDesktopArchive(archive), /Windows checkpoint sidecar must not be empty/));
+  });
+}

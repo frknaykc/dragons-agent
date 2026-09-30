@@ -538,6 +538,7 @@ export class PersistentBackgroundJobManager {
             task: job.prompt,
             model: options.createModel(),
             tools: readOnlyTaskTools(options.tools),
+            programmaticTools: false,
             workingDirectory: job.workingDirectory,
             projectContext: cloneSnapshot(options.projectContext),
             skills: cloneSnapshot(options.skills),

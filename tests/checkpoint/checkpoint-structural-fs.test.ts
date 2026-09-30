@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { type TestContext } from "node:test";
+import { type TestContext } from "node:test";
 import { CheckpointStructuralFs, reverseStructural, StructuralMutationFailure, STRUCTURAL_MAX_FILE } from "../../dist/checkpoint-structural-fs.js";
+import { checkpointIo, type CheckpointHandle } from "../../dist/checkpoint-win32.js";
+import { supportedCheckpointTest as checkpointTest } from "./checkpoint-support.js";
 
 function fixture(t: TestContext) {
   const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), "structural-checkpoint-")));
@@ -15,7 +17,7 @@ function fixture(t: TestContext) {
 }
 const desired = (value: string | null) => ({ bytes: value === null ? null : Buffer.from(value), mode: value === null ? 0 : 0o600 });
 
-test("mixed nested create/edit/delete produces owned receipts and selective reverse conflicts", (t) => {
+checkpointTest("mixed nested create/edit/delete produces owned receipts and selective reverse conflicts", (t) => {
   const { store, file, read, root } = fixture(t);
   file("nested/edit", "old"); file("delete", "gone");
   const receipts = store.apply([
@@ -40,7 +42,7 @@ test("mixed nested create/edit/delete produces owned receipts and selective reve
   assert.equal(fs.existsSync(join(root, "delete")), false);
 });
 
-test("expected absence refuses later creation and delete rollback refuses occupied name", (t) => {
+checkpointTest("expected absence refuses later creation and delete rollback refuses occupied name", (t) => {
   const { store, file, read } = fixture(t);
   const expected = store.capture("new"); file("new", "outside");
   assert.throws(() => store.apply([{ expected, desired: desired("ours") }]), /conflict/);
@@ -51,17 +53,17 @@ test("expected absence refuses later creation and delete rollback refuses occupi
   assert.equal(read("new"), "replacement");
 });
 
-test("same-content replaced inode and changed mode refuse mutation", (t) => {
+checkpointTest("same-content replaced inode and changed mode refuse mutation", (t) => {
   const { store, root, file, read } = fixture(t);
   file("item", "old"); const expected = store.capture("item");
   fs.renameSync(join(root, "item"), join(root, "original")); file("item", "old");
   assert.throws(() => store.apply([{ expected, desired: desired(null) }]), /conflict/);
-  const current = store.capture("item"); fs.chmodSync(join(root, "item"), 0o644);
+  const current = store.capture("item"); fs.chmodSync(join(root, "item"), process.platform === "win32" ? 0o444 : 0o644);
   assert.throws(() => store.apply([{ expected: current, desired: desired("new") }]), /conflict/);
   assert.equal(read("item"), "old");
 });
 
-test("ancestor replacement is refused even when original leaf inode is moved back", (t) => {
+checkpointTest("ancestor replacement is refused even when original leaf inode is moved back", (t) => {
   const { store, root, file, read } = fixture(t);
   file("nested/item", "old"); const expected = store.capture("nested/item");
   fs.renameSync(join(root, "nested"), join(root, "old-dir")); fs.mkdirSync(join(root, "nested"));
@@ -70,7 +72,7 @@ test("ancestor replacement is refused even when original leaf inode is moved bac
   assert.equal(read("nested/item"), "old");
 });
 
-test("links, traversal, non-files, and missing parents are refused without mkdir", (t) => {
+checkpointTest("links, traversal, non-files, and missing parents are refused without mkdir", (t) => {
   const { store, root, file } = fixture(t); file("item", "data");
   fs.symlinkSync(join(root, "item"), join(root, "sym"));
   fs.symlinkSync(join(root, "nested"), join(root, "symdir"));
@@ -81,14 +83,14 @@ test("links, traversal, non-files, and missing parents are refused without mkdir
   assert.equal(fs.existsSync(join(root, "missing")), false);
 });
 
-test("failed second mutation preserves completed receipt and marks only attempted uncertain path", (t) => {
+checkpointTest("failed second mutation preserves completed receipt and marks only attempted uncertain path", (t) => {
   const { store, root, read } = fixture(t);
   const mutations = ["one", "two", "three"].map((path) => ({ expected: store.capture(path), desired: desired(path) }));
-  const original = fs.writeSync;
+  const original = checkpointIo.write;
   let calls = 0;
-  t.mock.method(fs, "writeSync", (...args: Parameters<typeof fs.writeSync>) => {
+  t.mock.method(checkpointIo, "write", (...args: Parameters<typeof checkpointIo.write>) => {
     if (++calls === 2) throw new Error("injected second write failure");
-    return Reflect.apply(original, fs, args);
+    return original(...args);
   });
   let failure: StructuralMutationFailure | undefined;
   try { store.apply(mutations); } catch (error) { assert.ok(error instanceof StructuralMutationFailure); failure = error; }
@@ -101,15 +103,15 @@ test("failed second mutation preserves completed receipt and marks only attempte
   assert.equal(fs.existsSync(join(root, "one")), false);
 });
 
-test("creation uses exclusive open and does not overwrite a last-moment arrival", (t) => {
+checkpointTest("creation uses exclusive open and does not overwrite a last-moment arrival", (t) => {
   const { store, root, file, read } = fixture(t);
-  const expected = store.capture("new"), original = fs.openSync;
-  t.mock.method(fs, "openSync", (path: fs.PathLike, flags: string | number, mode?: fs.Mode) => {
-    if (path === join(root, "new") && typeof flags === "number" && (flags & fs.constants.O_CREAT)) {
-      assert.ok(flags & fs.constants.O_EXCL); assert.ok(flags & fs.constants.O_NOFOLLOW);
+  const expected = store.capture("new"), original = checkpointIo.open;
+  t.mock.method(checkpointIo, "open", (path: string, flags: number, mode?: number) => {
+    if (path === join(root, "new") && (flags & fs.constants.O_CREAT)) {
+      assert.ok(flags & fs.constants.O_EXCL);
       // Use original descriptor calls, not recursive writeFile/open mocks.
-      const other = original(path, "wx", 0o600);
-      fs.writeSync(other, "external"); fs.closeSync(other);
+      const other = original(path, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+      checkpointIo.write(other, Buffer.from("external"), 0, 8, 0); checkpointIo.close(other);
     }
     return original(path, flags, mode);
   });
@@ -117,10 +119,10 @@ test("creation uses exclusive open and does not overwrite a last-moment arrival"
   assert.equal(read("new"), "external"); void file;
 });
 
-test("descriptor receipt refuses replaced pathname after successful write", (t) => {
+checkpointTest("descriptor receipt refuses replaced pathname after successful write", (t) => {
   const { store, root, file, read } = fixture(t); file("item", "old");
-  const expected = store.capture("item"), original = fs.fchmodSync;
-  t.mock.method(fs, "fchmodSync", (fd: number, mode: fs.Mode) => {
+  const expected = store.capture("item"), original = checkpointIo.chmod;
+  t.mock.method(checkpointIo, "chmod", (fd: CheckpointHandle, mode: number) => {
     original(fd, mode);
     fs.renameSync(join(root, "item"), join(root, "owned")); file("item", "external");
   });
@@ -131,14 +133,15 @@ test("descriptor receipt refuses replaced pathname after successful write", (t) 
   assert.equal(read("owned"), "ours"); assert.equal(read("item"), "external");
 });
 
-test("leaf replacement at writable open is refused before any write or unlink", (t) => {
+checkpointTest("leaf replacement at writable open is refused before any write or unlink", (t) => {
   const { store, root, file, read } = fixture(t); file("item", "old");
-  const expected = store.capture("item"), original = fs.openSync;
-  t.mock.method(fs, "openSync", (path: fs.PathLike, flags: string | number, mode?: fs.Mode) => {
+  const expected = store.capture("item"), original = checkpointIo.open;
+  t.mock.method(checkpointIo, "open", (path: string, flags: number, mode?: number) => {
     const fd = original(path, flags, mode);
-    if (path === join(root, "item") && typeof flags === "number" && (flags & fs.constants.O_RDWR)) {
+    if (path === join(root, "item") && (flags & fs.constants.O_RDWR)) {
       fs.renameSync(join(root, "item"), join(root, "original"));
-      const other = original(path, "wx", 0o600); fs.writeSync(other, "external"); fs.closeSync(other);
+      const other = original(path, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+      checkpointIo.write(other, Buffer.from("external"), 0, 8, 0); checkpointIo.close(other);
     }
     return fd;
   });
@@ -148,10 +151,10 @@ test("leaf replacement at writable open is refused before any write or unlink", 
   assert.equal(read("original"), "old"); assert.equal(read("item"), "external");
 });
 
-test("growing file bounded read refuses an extra byte rather than reading an unbounded tail", (t) => {
+checkpointTest("growing file bounded read refuses an extra byte rather than reading an unbounded tail", (t) => {
   const { store, root, file } = fixture(t); file("item", "old");
-  const original = fs.readSync; let first = true; let requested = 0;
-  t.mock.method(fs, "readSync", (fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: number) => {
+  const original = checkpointIo.read; let first = true; let requested = 0;
+  t.mock.method(checkpointIo, "read", (fd: CheckpointHandle, buffer: Buffer, offset: number, length: number, position: number) => {
     requested += length;
     const count = original(fd, buffer, offset, length, position);
     if (first) { first = false; fs.appendFileSync(join(root, "item"), Buffer.alloc(STRUCTURAL_MAX_FILE)); }
@@ -161,7 +164,7 @@ test("growing file bounded read refuses an extra byte rather than reading an unb
   assert.equal(requested, 4);
 });
 
-test("bounds reject before mutation, including aggregate, count and duplicate paths", (t) => {
+checkpointTest("bounds reject before mutation, including aggregate, count and duplicate paths", (t) => {
   const { store, root } = fixture(t);
   const expected = store.capture("new");
   assert.throws(() => store.apply([{ expected, desired: { bytes: Buffer.alloc(STRUCTURAL_MAX_FILE + 1), mode: 0o600 } }]), /limit/);

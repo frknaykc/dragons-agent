@@ -16,6 +16,7 @@ export const SLASH_COMMANDS: readonly SlashCommandHelp[] = [
   { group: "Session", name: "/clear", usage: "/clear", description: "Clear the current conversation." },
   { group: "Session", name: "/sessions", usage: "/sessions", description: "List saved sessions." },
   { group: "Session", name: "/resume", usage: "/resume <id>", description: "Resume a saved session." },
+  { group: "Session", name: "/worktree", usage: "/worktree <create|select> <name>", description: "Create or select an isolated Git worktree; Desktop requires reopen to switch." },
   { group: "Configuration", name: "/login", usage: "/login <provider>", description: "Choose provider sign-in or supported API-key setup." },
   { group: "Configuration", name: "/logout", usage: "/logout [provider]", description: "Sign out or remove the selected provider's stored API key." },
   { group: "Configuration", name: "/auth", usage: "/auth [status] [provider]", description: "Show local credential status, not account access." },
@@ -35,6 +36,13 @@ export const SLASH_COMMANDS: readonly SlashCommandHelp[] = [
   { group: "Tools", name: "/mcp", usage: "/mcp <subcommand>", description: "Manage MCP connections." },
   { group: "Tools", name: "/tasks", usage: "/tasks <subcommand>", description: "Manage background tasks." },
   { group: "Tools", name: "/jobs", usage: "/jobs <subcommand>", description: "Manage persistent background jobs." },
+  { group: "Tools", name: "/cron", usage: "/cron [list|status|once <UTC ISO timestamp> -- <prompt>|add <five UTC cron fields> -- <prompt>|pause <id>|resume <id>|trigger <id>|remove <id>]", description: "Manage scheduled read-only tasks for this Desktop workspace. Creation accepts optional --skill user|project <id> before -- <prompt>." },
+  { group: "Tools", name: "/goal", usage: "/goal [list|status <id>|add <max-turns> <UTC ISO deadline> -- <objective> -- <criterion>|run <id>|pause <id>|resume <id>|interrupt <id>|complete <id>]", description: "Manage persistent READ-only goals in this session; runs require a command and completion requires your explicit verification." },
+  { group: "Tools", name: "/kanban", usage: "/kanban [list|status <id>|add <assignee> -- <title>|assign <id> <revision> <assignee>|depend <id> <revision> <dependency-id>|progress <id> <revision> <todo|doing|blocked|done> <0-100>|handoff offer <id> <revision> <profile>|handoff accept <id> <revision>|handoff cancel <id> <revision>|lock status|lock recover|worker recover <id> <revision> <pid>|worker start <id> <revision>|worker lane <id>:<revision> [<id>:<revision> ...]]", description: "Manage shared workspace tasks; handoff needs target acceptance. Explicit Local worker start or bounded lane uses separate READ-only processes in CLI or Desktop. Recovery needs typed confirmation; Desktop uses /kanban worker confirm RECOVER within 60 seconds." },
+  { group: "Tools", name: "/moa", usage: "/moa <duo|trio|quartet> <provider>... --aggregate <provider> -- <question>", description: "CLI only: after SHARE confirmation run 2–4 selected READ-only providers and synthesize their reports without tools." },
+  { group: "Tools", name: "/batch", usage: "/batch [list|status <id>|add <max-runs> -- <task> [-- <task> ...]|run <id> <revision>|recover <id> <revision>|lock status|lock recover]", description: "Checkpoint up to 8 READ-only tasks; RUN confirmation starts fresh models, RECOVER marks a stopped owner's task interrupted." },
+  { group: "Tools", name: "/loop", usage: "/loop [status|stop|start <interval-seconds> <max-runs> -- <prompt>]", description: "Run bounded, session-local READ-only turns while Desktop or interactive CLI remains open." },
+  { group: "Tools", name: "/heartbeat", usage: "/heartbeat [status|stop|start <interval-seconds> <idle-seconds> <max-runs> -- <prompt>]", description: "Run bounded READ-only turns after inactivity while Desktop or interactive CLI remains open." },
   { group: "Exit", name: "/exit", aliases: ["/quit"], usage: "/exit", description: "Exit Dragons." },
 ];
 

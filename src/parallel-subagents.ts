@@ -121,6 +121,7 @@ export function createParallelSubagentTool(options: CreateParallelSubagentToolOp
                 task: tasks[index]!,
                 model: options.createModel(),
                 tools: childTools,
+                programmaticTools: false,
                 projectContext: cloneSnapshot(options.projectContext),
                 skills: cloneSnapshot(options.skills),
                 memory: cloneSnapshot(options.memory),

@@ -9,6 +9,7 @@ import { createProviderRegistry } from "../../dist/provider/registry.js";
 import { createDragonsRuntime } from "../../dist/runtime.js";
 import { createSessionStore } from "../../dist/session-store.js";
 import { createCodingTools } from "../../dist/tools.js";
+import { supportedCheckpointTest as checkpointTest } from "./checkpoint-support.js";
 
 function barrier() {
   let release!: () => void;
@@ -64,7 +65,7 @@ test("dispose rejects admission suspended in acquireExecution and releases its l
 // Existing CLI contract: /clear resets conversation/continuation only. It does
 // not start a new session, discard checkpoints, or bypass WRITE authorization.
 // /new and /resume have separate history-reset coverage in checkpoint.test.ts.
-test("CLI /clear retains same-session checkpoint; selective rollback still requires WRITE approval without provider calls", { timeout: 5_000 }, async (t) => {
+checkpointTest("CLI /clear retains same-session checkpoint; selective rollback still requires WRITE approval without provider calls", { timeout: 5_000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "dragons-clear-lifecycle-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(join(root, "a.txt"), "old-a\n");

@@ -1,3 +1,4 @@
+import { INLINE_URL_TOOL, validateContextUrl } from "../inline-context-url.js";
 import { validateLspApproval } from "../lsp-approval.js";
 import type {
   DragonsRuntime,
@@ -11,6 +12,15 @@ import { formatSlashHelp } from "../slash-commands.js";
 import { formatProviderList, loginSetup, slashChoices } from "../slash-choices.js";
 import { isApiKeyProvider, isApiKeySlot, type ApiKeyProvider, type SecretPrompt } from "../provider/api-key-auth.js";
 import { isSafeProfileName } from "../profiles.js";
+import type { DesktopCronCommand } from "./cron-service.js";
+import type { DesktopSessionLoopCommand } from "./session-loop-service.js";
+import type { DesktopGoalCommand } from "./persistent-goal-service.js";
+import { KANBAN_USAGE, parseInteractiveKanbanCommand, parseKanbanWorkerLane, parseKanbanWorkerStart } from "../cli/kanban-commands.js";
+import { MIXTURE_USAGE, parseInteractiveMixtureCommand } from "../cli/mixture-commands.js";
+import type { DesktopMixtureCommand } from "./mixture-service.js";
+import type { DesktopKanbanCommand } from "./kanban-service.js";
+import type { DesktopBatchCommand } from "./batch-service.js";
+import { BATCH_USAGE, parseInteractiveBatchCommand } from "../cli/batch-commands.js";
 import { observeRuntimeRun } from "../runtime-observation.js";
 
 export const MAX_DESKTOP_CONTENT_CHARACTERS = 64_000;
@@ -19,6 +29,7 @@ export const MAX_DESKTOP_MESSAGE_BYTES = 256_000;
 /** Decoded JSON only; unknown keys, nested values and session-wide approval are rejected. */
 export type DesktopCommand =
   | { type: "choices"; content: string; provider?: string }
+  | { type: "kanban_board" }
   | { type: "slash"; content: string }
   | { type: "update_status" | "update_check" | "update_prepare" | "update_cancel" }
   | { type: "providers" }
@@ -92,6 +103,7 @@ function commandFrom(input: unknown): DesktopCommand | undefined {
     case "update_prepare":
     case "update_cancel":
     case "providers":
+    case "kanban_board":
     case "status":
     case "background":
       valid = exact(["type"]);
@@ -148,6 +160,15 @@ export type DesktopLocalControls = {
   listApiKeySlots?: (provider: ApiKeyProvider) => Promise<string>;
   removeApiKeySlot?: (provider: ApiKeyProvider, slot: string) => Promise<void>;
   reasoning?: (provider: string, model: string, level?: string) => Promise<string>;
+  worktree?: (action: "create" | "select", name: string) => Promise<string>;
+  cron?: (command: DesktopCronCommand) => Promise<string>;
+  goal?: (command: DesktopGoalCommand) => Promise<string>;
+  kanban?: (command: DesktopKanbanCommand) => Promise<string>;
+  mixture?: (command: DesktopMixtureCommand) => Promise<string>;
+  batch?: (command: DesktopBatchCommand) => Promise<string>;
+  kanbanBoard?: () => Promise<import("../kanban.js").KanbanTask[]>;
+  loop?: (command: DesktopSessionLoopCommand) => Promise<string>;
+  loopActivity?: (sessionId: string) => void;
   sessions(): Promise<string>;
   defaultProvider?: string;
   auth(provider?: string): Promise<string>;
@@ -184,13 +205,21 @@ export class DesktopBridge {
     if (command.type === "update_check") return success(this.updates.check());
     if (command.type === "update_cancel") return success(this.updates.cancel());
 
+    if (command.type === "kanban_board") {
+      if (!this.local?.kanbanBoard) return failure("INVALID_MESSAGE");
+      try {
+        const tasks = await this.local.kanbanBoard();
+        return this.#closed ? failure("CLOSED") : success(tasks);
+      } catch { return failure(this.#closed ? "CLOSED" : "RUNTIME_ERROR"); }
+    }
+
     if (command.type === "choices") {
       try {
         // Model and reasoning choices belong to the attached host session.
         const session = (command.content.startsWith("/reasoning ") || command.content.startsWith("/model ")) && this.#sessionId
           ? (await this.#runtime.status({ sessionId: this.#sessionId })).session : undefined;
         if (this.#closed) return failure("CLOSED");
-        return success(slashChoices(command.content, ["/help", "/checkpoint", "/rollback", "/new", "/resume", "/status", "/provider", "/model", ...(this.local?.reasoning ? ["/reasoning"] : []), ...(this.local ? ["/sessions", "/login", "/logout", "/auth", "/profile"] : [])], this.#runtime.providers(), session?.provider ?? command.provider, session?.model));
+        return success(slashChoices(command.content, ["/help", "/checkpoint", "/rollback", "/new", "/resume", "/status", "/provider", "/model", ...(this.local?.reasoning ? ["/reasoning"] : []), ...(this.local ? ["/sessions", "/login", "/logout", "/auth", "/profile", "/worktree"] : []), ...(this.local?.cron ? ["/cron"] : []), ...(this.local?.goal ? ["/goal"] : []), ...(this.local?.kanban ? ["/kanban"] : []), ...(this.local?.mixture ? ["/moa"] : []), ...(this.local?.batch ? ["/batch"] : []), ...(this.local?.loop ? ["/loop", "/heartbeat"] : [])], this.#runtime.providers(), session?.provider ?? command.provider, session?.model));
       } catch { return failure("RUNTIME_ERROR"); }
     }
     if (command.type === "slash" && isCheckpointCommand(command.content)) command = { type: "send", content: command.content };
@@ -234,6 +263,8 @@ export class DesktopBridge {
           })
           : await this.#runtime.resumeSession(command.sessionId);
         if (this.#closed) return failure("CLOSED");
+        if (session.id !== this.#sessionId && this.#sessionId) await this.local?.loop?.({ action: "stop", sessionId: this.#sessionId });
+        if (this.#closed) return failure("CLOSED");
         this.#sessionId = session.id;
         if (command.type === "resume") {
           const handle = observeRuntimeRun(this.#runtime, session.id);
@@ -264,6 +295,7 @@ export class DesktopBridge {
       }
       if (command.type === "send") {
         const sessionId = this.#sessionId!;
+        this.local?.loopActivity?.(sessionId);
         // Input is admitted only against the revision acknowledged by this client's facade.
         const handle = await this.#runtime.sendUserInput({ sessionId, content: command.content });
         // Observe rejection before any lifecycle check, event iteration, or further await.
@@ -291,8 +323,163 @@ export class DesktopBridge {
       const redactor = new RuntimeTextRedactor();
       return success({ kind: "text", text: (redactor.push(value) + redactor.finish()).slice(0, 32000) });
     };
-    const supported = ["/help", "/checkpoint", "/rollback", "/new", "/resume", "/status", "/provider", "/model", ...(this.local?.reasoning ? ["/reasoning"] : []), ...(this.local ? ["/sessions", "/login", "/logout", "/auth", "/profile"] : [])];
+    const supported = ["/help", "/checkpoint", "/rollback", "/new", "/resume", "/status", "/provider", "/model", ...(this.local?.reasoning ? ["/reasoning"] : []), ...(this.local ? ["/sessions", "/login", "/logout", "/auth", "/profile", "/worktree"] : []), ...(this.local?.cron ? ["/cron"] : []), ...(this.local?.goal ? ["/goal"] : []), ...(this.local?.kanban ? ["/kanban"] : []), ...(this.local?.mixture ? ["/moa"] : []), ...(this.local?.batch ? ["/batch"] : []), ...(this.local?.loop ? ["/loop", "/heartbeat"] : [])];
     if (name === "/help") return text(formatSlashHelp(args.join(" "), supported));
+    if (name === "/batch" && this.local?.batch) {
+      if (!this.#sessionId) return failure("NO_SESSION");
+      const sessionId = this.#sessionId;
+      const input = content.trim();
+      const command = input === "/batch confirm RUN" ? { action: "confirm" as const }
+        : input === "/batch confirm RECOVER" ? { action: "recover_confirm" as const }
+        : input === "/batch lock status" ? { action: "lock_status" as const }
+        : input === "/batch lock recover" ? { action: "lock_recover" as const }
+        : input === "/batch lock confirm RECOVER" ? { action: "lock_confirm" as const }
+        : (() => { const request = parseInteractiveBatchCommand(input); return request ? { action: "request" as const, request } : undefined; })();
+      if (!command) return text(`${BATCH_USAGE} Confirm with /batch confirm RUN or /batch confirm RECOVER. Lock: /batch lock status | recover | confirm RECOVER.`);
+      if (this.#admitting || this.#active) return failure("BUSY");
+      this.#admitting = true;
+      try {
+        const status = await this.#runtime.status({ sessionId });
+        if (this.#closed || this.#sessionId !== sessionId) return failure(this.#closed ? "CLOSED" : "STALE_SESSION");
+        if (!status.session) return failure("NO_SESSION");
+        const result = await this.local.batch({ ...command, sessionId, provider: status.session.provider, model: status.session.model });
+        return this.#closed || this.#sessionId !== sessionId ? failure(this.#closed ? "CLOSED" : "STALE_SESSION") : text(result);
+      } catch { return failure(this.#closed ? "CLOSED" : "RUNTIME_ERROR"); }
+      finally { this.#admitting = false; }
+    }
+    if (name === "/moa" && this.local?.mixture) {
+      if (!this.#sessionId) return failure("NO_SESSION");
+      const sessionId = this.#sessionId;
+      const command: DesktopMixtureCommand | undefined = content.trim() === "/moa confirm SHARE"
+        ? { action: "confirm", sessionId }
+        : (() => { const request = parseInteractiveMixtureCommand(content.trim(), this.#runtime.providers().map(({ id }) => id));
+          return request ? { action: "prepare", sessionId, request } : undefined; })();
+      if (!command) return text(MIXTURE_USAGE);
+      if (this.#admitting || this.#active) return failure("BUSY");
+      this.#admitting = true;
+      try {
+        const result = await this.local.mixture(command);
+        return this.#closed || this.#sessionId !== sessionId ? failure(this.#closed ? "CLOSED" : "STALE_SESSION") : text(result);
+      } catch { return failure(this.#closed ? "CLOSED" : "RUNTIME_ERROR"); }
+      finally { this.#admitting = false; }
+    }
+    if (name === "/kanban" && this.local?.kanban) {
+      const input = content.trim();
+      const lock = input === "/kanban lock status" ? { action: "lock_status" } as const
+        : input === "/kanban lock recover" ? { action: "lock_recover" } as const
+        : input === "/kanban lock confirm RECOVER" ? { action: "lock_confirm" } as const
+        : input === "/kanban worker confirm RECOVER" ? { action: "worker_confirm" } as const : undefined;
+      const start = parseKanbanWorkerStart(input);
+      const lane = parseKanbanWorkerLane(input);
+      const command: DesktopKanbanCommand | undefined = lock ?? (start ? { action: "worker_start", ...start }
+        : lane ? { action: "worker_lane", tasks: lane } : parseInteractiveKanbanCommand(input));
+      if (!command) return text(input.startsWith("/kanban lock")
+        ? "Usage: /kanban lock status | /kanban lock recover | /kanban lock confirm RECOVER."
+        : input.startsWith("/kanban worker") ? "Usage: /kanban worker start <id> <revision> | lane <id>:<revision> [<id>:<revision> ...] (up to 8) | recover <id> <revision> <pid> | confirm RECOVER." : KANBAN_USAGE);
+      if (this.#admitting || this.#active) return failure("BUSY");
+      this.#admitting = true;
+      try {
+        const result = await this.local.kanban(command);
+        return this.#closed ? failure("CLOSED") : text(result);
+      } catch { return failure(this.#closed ? "CLOSED" : "RUNTIME_ERROR"); }
+      finally { this.#admitting = false; }
+    }
+    if (name === "/goal" && this.local?.goal) {
+      if (!this.#sessionId) return failure("NO_SESSION");
+      const sessionId = this.#sessionId;
+      const usage = "Usage: /goal list | status|run|pause|resume|complete|interrupt <id> | add <max-turns> <UTC ISO deadline> -- <objective> -- <completion criterion>.";
+      const action = args[0] ?? "list";
+      let goalCommand: DesktopGoalCommand;
+      if (action === "list" && args.length <= 1) goalCommand = { action, sessionId };
+      else if (["status", "run", "pause", "resume", "complete", "interrupt"].includes(action) && args.length === 2 && sessionIdPattern.test(args[1]!))
+        goalCommand = { action: action as "status" | "run" | "pause" | "resume" | "complete" | "interrupt", sessionId, id: args[1]! };
+      else if (action === "add") {
+        const first = content.indexOf(" -- ");
+        const second = first < 0 ? -1 : content.indexOf(" -- ", first + 4);
+        const fields = first < 0 ? [] : content.slice(0, first).trim().split(/\s+/);
+        const objective = second < 0 ? "" : content.slice(first + 4, second).trim();
+        const criterion = second < 0 ? "" : content.slice(second + 4).trim();
+        if (fields.length !== 4 || !/^[1-9][0-9]{0,1}$/.test(fields[2]!) || !objective || !criterion
+          || objective.length > 4_000 || criterion.length > 1_000
+          || /[\u0000-\u001f\u007f]/.test(objective + criterion)) return text(usage);
+        goalCommand = { action, sessionId, maxTurns: Number(fields[2]), deadlineAt: fields[3]!, objective, criterion };
+      } else return text(usage);
+      if (this.#admitting || this.#active) return failure("BUSY");
+      this.#admitting = true;
+      try {
+        if (goalCommand.action === "run" && this.local.loop) await this.local.loop({ action: "stop", sessionId });
+        const output = await this.local.goal(goalCommand);
+        return this.#closed || this.#sessionId !== sessionId ? failure(this.#closed ? "CLOSED" : "STALE_SESSION") : text(output);
+      } catch { return failure(this.#closed ? "CLOSED" : "RUNTIME_ERROR"); }
+      finally { this.#admitting = false; }
+    }
+    if ((name === "/loop" || name === "/heartbeat") && this.local?.loop) {
+      if (!this.#sessionId) return failure("NO_SESSION");
+      const usage = name === "/loop" ? "Usage: /loop [status|stop|start <interval-seconds> <max-runs> -- <prompt>]."
+        : "Usage: /heartbeat [status|stop|start <interval-seconds> <idle-seconds> <max-runs> -- <prompt>].";
+      const action = args[0] ?? "status";
+      let loopCommand: DesktopSessionLoopCommand;
+      if ((action === "status" || action === "stop") && args.length <= 1) loopCommand = { action, sessionId: this.#sessionId };
+      else if (action === "start") {
+        const marker = content.indexOf(" -- ");
+        if (marker === -1) return text(usage);
+        const fields = content.slice(0, marker).trim().split(/\s+/).slice(2);
+        const prompt = content.slice(marker + 4).trim();
+        if (fields.length !== (name === "/loop" ? 2 : 3) || fields.some((field) => !/^[1-9][0-9]{0,5}$/.test(field))
+          || !prompt || prompt.length > 4_000 || /[\u0000-\u001f\u007f]/.test(prompt)) return text(usage);
+        const values = fields.map(Number);
+        loopCommand = { action: "start", sessionId: this.#sessionId, prompt,
+          intervalMs: values[0]! * 1_000, maxRuns: values[name === "/loop" ? 1 : 2]!,
+          ...(name === "/heartbeat" ? { idleMs: values[1]! * 1_000 } : {}) };
+      } else return text(usage);
+      if (this.#admitting || (this.#active && action === "start")) return failure("BUSY");
+      this.#admitting = true;
+      try { const result = await this.local.loop(loopCommand); return this.#closed ? failure("CLOSED") : text(result); }
+      catch { return failure(this.#closed ? "CLOSED" : "RUNTIME_ERROR"); }
+      finally { this.#admitting = false; }
+    }
+    if (name === "/cron" && this.local?.cron) {
+      const action = args[0] ?? "list";
+      const usage = "Usage: /cron [list|status|pause <id>|resume <id>|trigger <id>|remove <id>|once <UTC ISO timestamp> [--skill user|project <id>] -- <prompt>|add <minute> <hour> <day> <month> <weekday> [--skill user|project <id>] -- <prompt>].";
+      let command: DesktopCronCommand;
+      if ((action === "list" || action === "status") && args.length <= 1) command = { action };
+      else if ((action === "pause" || action === "resume" || action === "trigger" || action === "remove") && args.length === 2 && sessionIdPattern.test(args[1]!))
+        command = { action, id: args[1]! };
+      else if (action === "add" || action === "once") {
+        const marker = content.indexOf(" -- ");
+        if (marker === -1) return text(usage);
+        const fields = content.slice(0, marker).trim().split(/\s+/).slice(2);
+        const prompt = content.slice(marker + 4).trim();
+        const count = action === "add" ? 5 : 1;
+        if (!prompt || prompt.length > 4_000 || /[\u0000-\u001f\u007f]/.test(prompt)
+          || (fields.length !== count && fields.length !== count + 3)) return text(usage);
+        let skill: { scope: "USER" | "PROJECT"; id: string } | undefined;
+        if (fields.length === count + 3) {
+          const scope = fields[count + 1];
+          const id = fields[count + 2]!;
+          if (fields[count] !== "--skill" || (scope !== "user" && scope !== "project") || !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(id)) return text(usage);
+          skill = { scope: scope === "user" ? "USER" : "PROJECT", id };
+        }
+        command = { action, expression: fields.slice(0, count).join(" "), prompt, ...(skill === undefined ? {} : { skill }) };
+      } else return text(usage);
+      if (this.#admitting || this.#active) return failure("BUSY");
+      this.#admitting = true;
+      try {
+        const result = await this.local.cron(command);
+        return this.#closed ? failure("CLOSED") : text(result);
+      } catch { return failure(this.#closed ? "CLOSED" : "RUNTIME_ERROR"); }
+      finally { this.#admitting = false; }
+    }
+    if (name === "/worktree" && this.local?.worktree) {
+      if (args.length !== 2 || (args[0] !== "create" && args[0] !== "select")) return text("Usage: /worktree create <name> | /worktree select <name>");
+      if (this.#admitting || this.#active) return failure("BUSY");
+      this.#admitting = true;
+      try {
+        const target = await this.local.worktree(args[0], args[1]!);
+        return this.#closed ? failure("CLOSED") : text(`Worktree: ${target}. Desktop is still bound to its original workspace. Reopen and select this folder to switch.`);
+      } catch { return failure(this.#closed ? "CLOSED" : "RUNTIME_ERROR"); }
+      finally { this.#admitting = false; }
+    }
     if (name === "/reasoning" && this.local?.reasoning) {
       if (this.#admitting || this.#active) return failure("BUSY");
       if (!this.#sessionId) return failure("NO_SESSION");
@@ -446,6 +633,11 @@ export class DesktopBridge {
           if (run.cancelled) continue;
           if ((event.toolName === "lsp_diagnostics_start" && (event.operation !== "EXECUTE" || !validateLspApproval(event.lspApproval)))
             || (event.toolName !== "lsp_diagnostics_start" && event.lspApproval !== undefined)) {
+            this.#runtime.resolveAuthorization({ runId: event.runId, approvalId: event.approvalId, decision: "deny" });
+            run.handle.cancel(); continue;
+          }
+          if ((event.toolName === INLINE_URL_TOOL && (event.operation !== "EXECUTE" || !validateContextUrl(event.contextUrl)))
+            || (event.toolName !== INLINE_URL_TOOL && event.contextUrl !== undefined)) {
             this.#runtime.resolveAuthorization({ runId: event.runId, approvalId: event.approvalId, decision: "deny" });
             run.handle.cancel(); continue;
           }

@@ -33,7 +33,12 @@
 <p id="session">Create or resume a session. Credentials are configured on the trusted host, never in this window.</p>
 <main>
 <section class="conversation"><h2>Conversation</h2><div id="messages" role="log" aria-label="Conversation"></div></section>
-<aside><h2>Tool activity</h2><pre id="activity" aria-live="polite">No activity.</pre></aside>
+<aside><section id="kanban-board" aria-label="Workspace Kanban board">
+<div class="kanban-heading"><h2>Workspace board</h2><button type="button" id="kanban-refresh">Refresh board</button></div>
+<p id="kanban-status" role="status">Refresh to load tasks across profiles.</p>
+<div id="kanban-columns" class="kanban-columns" aria-label="Kanban task columns"></div>
+<p class="setup-help">View only. Use /kanban in the conversation to change tasks; refresh to see other profiles' changes.</p>
+</section><h2>Tool activity</h2><pre id="activity" aria-live="polite">No activity.</pre></aside>
 </main>
 <section id="approval" hidden aria-label="Operation approval"><strong id="approval-label"></strong><p>Allow only if you trust this operation. Approval applies once to this exact request.</p><button id="deny">Deny</button><button id="allow">Allow once</button></section>
 <form id="composer"><label for="prompt">Coding request</label><textarea id="prompt" maxlength="16000" rows="3" placeholder="Describe the change to make in the launch workspace…" required></textarea><div><button id="send" type="submit" disabled>Send request</button><button id="cancel" type="button" disabled>Cancel run</button></div></form>

@@ -7,13 +7,15 @@ import { join, resolve } from "node:path";
 import { collectLspDiagnostics, parseLspConfig, type LspConfig } from "../../dist/lsp-diagnostics.js";
 import { parseDragonsConfig } from "../../dist/config.js";
 import { runAgent, AgentRunCancelledError, type AgentRequest, type ToolAuthorizationRequest } from "../../dist/agent.js";
+import { createSessionStore } from "../../dist/session-store.js";
+import { createSessionHistoryRecorder } from "../../dist/session-search.js";
 import { createCodingTools } from "../../dist/tools.js";
 const fixture = resolve("tests/fixtures/lsp-server.mjs");
 const config = (mode = "pull", marker?: string): LspConfig => parseLspConfig({ command: process.execPath, args: [fixture, mode, ...(marker ? [marker] : [])], languageId: "typescript", extensions: [".ts"], timeoutMilliseconds: 1000 });
 async function workspace(fn: (directory: string) => Promise<void>) {
   const directory = await mkdtemp(join(tmpdir(), "dragons-lsp-"));
   try { await writeFile(join(directory, "a.ts"), "const a: number = 'wrong';\n"); await fn(directory); }
-  finally { await rm(directory, { recursive: true, force: true }); }
+  finally { await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
 }
 test("explicit LSP config is validated, copied and default remains absent", () => {
   assert.equal(parseDragonsConfig({}).lsp, undefined);
@@ -57,14 +59,20 @@ test("cancellation cleans up fixture process", () => workspace(async (dir) => {
 }));
 for (const allow of [false, true]) test(`runAgent WRITE does not authorize LSP EXECUTE (${allow}) and reports to model/event`, () => workspace(async (dir) => {
   const requests: AgentRequest[] = []; const approvals: ToolAuthorizationRequest[] = []; let report = "";
+  const recorder = createSessionHistoryRecorder();
   await runAgent({ task: "edit", workingDirectory: dir, tools: await createCodingTools(dir), lsp: config(),
     authorize: (request) => { approvals.push(request); return request.operation !== "EXECUTE" || allow; },
-    onEvent: (e) => { if (e.type === "tool_completed") report = e.result.lspDiagnostics ?? ""; },
+    onEvent: (e) => { recorder.observe(e); if (e.type === "tool_completed") report = e.result.lspDiagnostics ?? ""; },
     model: { async respond(request) { requests.push(request); return requests.length === 1 ? { responseId: "1", text: "", toolCalls: [{ callId: "w", name: "write_file", arguments: JSON.stringify({ path: "a.ts", content: "const bad: number = 'x';" }) }] } : { responseId: "2", text: "done", toolCalls: [] }; } },
   });
   assert.deepEqual(approvals.map((r) => [r.name, r.operation]), [["write_file", "WRITE"], ["lsp_diagnostics_start", "EXECUTE"]]);
   assert.match(report, allow ? /Type mismatch/ : /EXECUTE denied/);
   assert.ok(requests[1]!.toolOutputs[0]!.output.includes(report));
+  const history = recorder.merge(await createSessionStore(join(dir, "sessions")).create({ workingDirectory: dir, provider: "openai-api", model: "fixture" }));
+  assert.equal(history.length, 1); assert.equal(history[0]!.name, "write_file");
+  assert.match(history[0]!.output, /Checkpoint .*1 file\(s\) changed/);
+  assert.doesNotMatch(history[0]!.output, /EXECUTE denied/);
+  if (allow) assert.match(history[0]!.output, /Type mismatch/);
   assert.match(await readFile(join(dir, "a.ts"), "utf8"), /const bad/);
 }));
 test("runAgent refuses unsafe or oversized approval scopes before authorizer/startup", () => workspace(async (dir) => {
