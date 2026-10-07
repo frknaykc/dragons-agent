@@ -150,21 +150,32 @@ export function createFilePersistentGoalStore(directory: string, options: { maxG
   async function locked<T>(operation: () => Promise<T>): Promise<T> {
     await directoryReady(directory, true);
     const lockPath = join(directory, LOCK_FILE);
+    const busy = "Persistent goal storage is busy; recover an abandoned lock explicitly.";
+    // On Windows, exclusive open can follow a dangling link instead of reporting EEXIST.
+    // Check the directory entry itself before opening; never interpret ENOENT via stat().
+    try { await lstat(lockPath); throw new Error(busy); }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     let lock;
     try { lock = await open(lockPath, "wx", 0o600); }
     catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Persistent goal storage is busy; recover an abandoned lock explicitly.");
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(busy);
       throw error;
     }
-    const identity = await lock.stat();
+    let identity: Awaited<ReturnType<typeof lock.stat>> | undefined;
     try {
+      identity = await lock.stat();
+      const named = await lstat(lockPath);
+      if (!named.isFile() || named.isSymbolicLink() || named.nlink !== 1 || named.dev !== identity.dev || named.ino !== identity.ino)
+        throw new Error(busy);
       await lock.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), token: randomUUID() }));
       return await operation();
     } finally {
       await lock.close();
       try {
         const current = await lstat(lockPath);
-        if (current.isFile() && !current.isSymbolicLink() && current.dev === identity.dev && current.ino === identity.ino) await rm(lockPath);
+        if (identity && current.isFile() && !current.isSymbolicLink() && current.dev === identity.dev && current.ino === identity.ino) await rm(lockPath);
       } catch (error: unknown) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }

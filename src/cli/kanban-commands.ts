@@ -7,7 +7,7 @@ const PID = /^[1-9][0-9]{0,8}$/;
 const PERCENT = /^(?:100|[1-9]?[0-9])$/;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 
-export const KANBAN_USAGE = "Usage: /kanban [list|status <id>|add <assignee> -- <title>|assign <id> <revision> <assignee>|depend <id> <revision> <dependency-id>|progress <id> <revision> <todo|doing|blocked|done> <0-100>|handoff offer <id> <revision> <profile>|handoff accept <id> <revision>|handoff cancel <id> <revision>|worker recover <id> <revision> <pid>|worker start <id> <revision>|worker lane <id>:<revision> [<id>:<revision> ...]].";
+export const KANBAN_USAGE = "Usage: /kanban [list|status <id>|add <assignee> -- <title>|assign <id> <revision> <assignee>|depend <id> <revision> <dependency-id>|progress <id> <revision> <todo|doing|blocked|done> <0-100>|handoff offer <id> <revision> <profile>|handoff accept <id> <revision>|handoff cancel <id> <revision>|lock status|lock recover|lane lock status|lane lock recover|worker recover <id> <revision> <pid>|worker start <id> <revision>|worker lane <id>:<revision> [<id>:<revision> ...]].";
 
 /** Explicit one-shot launch, parsed separately from ordinary board commands. */
 export function parseKanbanWorkerStart(input: string): { id: string; revision: number } | undefined {

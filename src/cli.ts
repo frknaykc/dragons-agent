@@ -46,7 +46,8 @@ import { createPersistentGoalService } from "./persistent-goal-service.js";
 import { goalWorkspaceDirectory, inspectPersistentGoalLock, recoverAbandonedPersistentGoalLock } from "./persistent-goal-store.js";
 import { GOAL_USAGE, parseInteractiveGoalCommand } from "./cli/goal-commands.js";
 import { KANBAN_USAGE, parseKanbanWorkerLane, parseKanbanWorkerStart, parseInteractiveKanbanCommand, runInteractiveKanbanCommand } from "./cli/kanban-commands.js";
-import { createFileKanbanBoard, inspectKanbanLock, kanbanWorkspaceDirectory, recoverAbandonedKanbanLock } from "./kanban.js";
+import { createFileKanbanBoard, inspectKanbanLaneLock, inspectKanbanLock, kanbanWorkspaceDirectory,
+  recoverAbandonedKanbanLaneLock, recoverAbandonedKanbanLock } from "./kanban.js";
 import { launchKanbanWorker } from "./kanban-worker-process.js";
 import { runKanbanWorkerLane } from "./kanban-worker-lane.js";
 import { runMixtureOfAgents } from "./mixture-of-agents.js";
@@ -923,9 +924,11 @@ async function runInteractiveConversation(
           } finally { activeController = undefined; }
           continue;
         }
-        if (task.startsWith("/kanban lock")) {
-          if (task !== "/kanban lock status" && task !== "/kanban lock recover") {
-            write("Usage: /kanban lock status | /kanban lock recover.\n");
+        if (task.startsWith("/kanban lock") || task.startsWith("/kanban lane lock")) {
+          const laneLock = task.startsWith("/kanban lane lock");
+          const prefix = laneLock ? "/kanban lane lock" : "/kanban lock";
+          if (task !== `${prefix} status` && task !== `${prefix} recover`) {
+            write(`Usage: ${prefix} status | ${prefix} recover.\n`);
             continue;
           }
           activeController = new AbortController();
@@ -934,18 +937,21 @@ async function runInteractiveConversation(
             if (await realpath(workingDirectory) !== workingDirectory)
               throw new Error("Kanban requires a canonical session workspace; start a new session from this directory.");
             const directory = kanbanWorkspaceDirectory(dependencies.profileStore.paths(DEFAULT_DRAGONS_PROFILE).configPath, workingDirectory);
-            const lock = await inspectKanbanLock(directory);
-            if (!lock) write("No Kanban lock for this workspace.\n");
-            else if (task === "/kanban lock status") write(`Kanban lock owner: PID ${lock.pid} on ${JSON.stringify(lock.host)}. No recovery attempted.\n`);
+            const lock = await (laneLock ? inspectKanbanLaneLock(directory) : inspectKanbanLock(directory));
+            const label = laneLock ? "Kanban lane lock" : "Kanban lock";
+            if (!lock) write(`No ${label} for this workspace.\n`);
+            else if (task === `${prefix} status`) write(`${label} owner: PID ${lock.pid} on ${JSON.stringify(lock.host)}. No recovery attempted.\n`);
             else {
-              write(`Kanban lock owner: PID ${lock.pid} on ${JSON.stringify(lock.host)}. Only recover if this process has stopped. Type RECOVER to confirm: `);
+              write(`${label} owner: PID ${lock.pid} on ${JSON.stringify(lock.host)}. Only recover if this process has stopped. Type RECOVER to confirm: `);
               const answer = await answers.next(activeController.signal);
-              if (answer.done || answer.value.trim() !== "RECOVER") write("Kanban lock recovery not confirmed.\n");
+              if (answer.done || answer.value.trim() !== "RECOVER") write(`${label} recovery not confirmed.\n`);
               else {
                 activeController.signal.throwIfAborted();
-                write(await recoverAbandonedKanbanLock(directory, lock.token)
-                  ? "Abandoned Kanban lock removed; no worker was stopped or started.\n"
-                  : "No Kanban lock for this workspace.\n");
+                write(await (laneLock ? recoverAbandonedKanbanLaneLock(directory, lock.token)
+                  : recoverAbandonedKanbanLock(directory, lock.token))
+                  ? (laneLock ? "Abandoned Kanban lane lock removed; no worker was stopped or started. Inspect task claims separately.\n"
+                    : "Abandoned Kanban lock removed; no worker was stopped or started.\n")
+                  : `No ${label} for this workspace.\n`);
               }
             }
           } catch (error: unknown) {

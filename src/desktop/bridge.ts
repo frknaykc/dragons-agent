@@ -368,12 +368,17 @@ export class DesktopBridge {
       const lock = input === "/kanban lock status" ? { action: "lock_status" } as const
         : input === "/kanban lock recover" ? { action: "lock_recover" } as const
         : input === "/kanban lock confirm RECOVER" ? { action: "lock_confirm" } as const
+        : input === "/kanban lane lock status" ? { action: "lane_lock_status" } as const
+        : input === "/kanban lane lock recover" ? { action: "lane_lock_recover" } as const
+        : input === "/kanban lane lock confirm RECOVER" ? { action: "lane_lock_confirm" } as const
         : input === "/kanban worker confirm RECOVER" ? { action: "worker_confirm" } as const : undefined;
       const start = parseKanbanWorkerStart(input);
       const lane = parseKanbanWorkerLane(input);
       const command: DesktopKanbanCommand | undefined = lock ?? (start ? { action: "worker_start", ...start }
         : lane ? { action: "worker_lane", tasks: lane } : parseInteractiveKanbanCommand(input));
-      if (!command) return text(input.startsWith("/kanban lock")
+      if (!command) return text(input.startsWith("/kanban lane lock")
+        ? "Usage: /kanban lane lock status | /kanban lane lock recover | /kanban lane lock confirm RECOVER."
+        : input.startsWith("/kanban lock")
         ? "Usage: /kanban lock status | /kanban lock recover | /kanban lock confirm RECOVER."
         : input.startsWith("/kanban worker") ? "Usage: /kanban worker start <id> <revision> | lane <id>:<revision> [<id>:<revision> ...] (up to 8) | recover <id> <revision> <pid> | confirm RECOVER." : KANBAN_USAGE);
       if (this.#admitting || this.#active) return failure("BUSY");

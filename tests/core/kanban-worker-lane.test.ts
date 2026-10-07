@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { lstat, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { runKanbanWorkerLane } from "../../dist/kanban-worker-lane.js";
-import { createFileKanbanBoard, kanbanWorkspaceDirectory } from "../../dist/kanban.js";
+import { createFileKanbanBoard, inspectKanbanLaneLock, kanbanWorkspaceDirectory,
+  recoverAbandonedKanbanLaneLock } from "../../dist/kanban.js";
 import { runKanbanWorker } from "../../dist/kanban-worker.js";
 import { createDragonsProfileStore } from "../../dist/profiles.js";
 
@@ -135,4 +139,102 @@ test("lane does not accept a callback that returns without its claimed worker co
   }), /lane/i);
   assert.equal((await board.get("alpha", first.id))?.status, "done");
   assert.equal((await board.get("alpha", second.id))?.status, "todo");
+});
+
+test("lane holds the workspace lock across children and rejects a competing profile without launch", async (t) => {
+  const { board, first, second, base } = await fixture(t);
+  const other = await board.create("beta", "Other", "beta", []);
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void;
+  const wait = new Promise<void>((resolve) => { release = resolve; });
+  const primary = runKanbanWorkerLane({ ...base, tasks: [{ id: first.id, revision: 0 }, { id: second.id, revision: 0 }],
+    run: async (request) => {
+      if (request.id === first.id) { entered(); await wait; }
+      await base.run(request);
+    },
+  });
+  t.after(() => release());
+  await started;
+  const directory = kanbanWorkspaceDirectory(base.configPath, base.workingDirectory);
+  assert.ok(await inspectKanbanLaneLock(directory));
+  let launched = false;
+  await assert.rejects(runKanbanWorkerLane({ ...base, profile: "beta", tasks: [{ id: other.id, revision: 0 }],
+    run: async () => { launched = true; } }), /lane is busy/i);
+  assert.equal(launched, false);
+  release();
+  assert.deepEqual(await primary, [first.id, second.id]);
+  assert.equal(await inspectKanbanLaneLock(directory), undefined);
+});
+
+test("lane lock is released after child failure and cancellation", async (t) => {
+  const { first, second, base } = await fixture(t);
+  const directory = kanbanWorkspaceDirectory(base.configPath, base.workingDirectory);
+  await assert.rejects(runKanbanWorkerLane({ ...base, tasks: [{ id: first.id, revision: 0 }],
+    run: async () => { throw new Error("secret error"); } }), /lane stopped/i);
+  assert.equal(await inspectKanbanLaneLock(directory), undefined);
+  const cancelled = new AbortController();
+  await assert.rejects(runKanbanWorkerLane({ ...base, signal: cancelled.signal,
+    tasks: [{ id: second.id, revision: 0 }], run: async (request) => {
+      cancelled.abort();
+      await base.run(request);
+    } }), /lane/i);
+  assert.equal(await inspectKanbanLaneLock(directory), undefined);
+});
+
+test("another process cannot enter a workspace lane while its owner is alive", async (t) => {
+  const { base, first } = await fixture(t);
+  const directory = kanbanWorkspaceDirectory(base.configPath, base.workingDirectory);
+  const moduleUrl = new URL("../../dist/kanban.js", import.meta.url).href;
+  const script = `import { withKanbanLaneLock } from ${JSON.stringify(moduleUrl)};
+    await withKanbanLaneLock(process.argv[1], async () => {
+      process.stdout.write("ready\\n");
+      await new Promise(() => { setInterval(() => {}, 1000); });
+    });`;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script, directory],
+    { stdio: ["ignore", "pipe", "ignore"] });
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  assert.ok(child.stdout);
+  let timer!: ReturnType<typeof setTimeout>;
+  const ready = await Promise.race([
+    once(child.stdout, "data").then(([bytes]) => String(bytes)),
+    once(child, "exit").then(() => { throw new Error("Lane owner exited before ready."); }),
+    new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Lane owner did not start.")), 5_000); }),
+  ]).finally(() => clearTimeout(timer));
+  assert.match(ready, /ready/);
+  let launched = false;
+  await assert.rejects(runKanbanWorkerLane({ ...base, tasks: [{ id: first.id, revision: 0 }],
+    run: async () => { launched = true; } }), /lane is busy/i);
+  assert.equal(launched, false);
+  const exited = once(child, "exit");
+  child.kill();
+  await exited;
+  const lock = await inspectKanbanLaneLock(directory);
+  assert.ok(lock);
+  await assert.rejects(runKanbanWorkerLane({ ...base, tasks: [{ id: first.id, revision: 0 }] }), /lane is busy/i);
+  assert.equal(await recoverAbandonedKanbanLaneLock(directory, lock.token), true);
+  assert.deepEqual(await runKanbanWorkerLane({ ...base, tasks: [{ id: first.id, revision: 0 }] }), [first.id]);
+});
+
+test("abandoned lane lock requires explicit inspected-token recovery; unsafe and live locks fail closed", async (t) => {
+  const { base, first } = await fixture(t);
+  const directory = kanbanWorkspaceDirectory(base.configPath, base.workingDirectory);
+  const path = join(directory, ".kanban-lane.lock");
+  const target = join(base.workingDirectory, "outside");
+  const token = randomUUID();
+  await writeFile(target, "unmodified");
+  await symlink(target, path);
+  await assert.rejects(runKanbanWorkerLane({ ...base, tasks: [{ id: first.id, revision: 0 }] }), /lane is busy/i);
+  await assert.rejects(inspectKanbanLaneLock(directory), /Unsafe Kanban lock/i);
+  await rm(path);
+  assert.equal(await readFile(target, "utf8"), "unmodified");
+  await writeFile(path, JSON.stringify({ pid: process.pid, host: hostname(), token }));
+  await assert.rejects(recoverAbandonedKanbanLaneLock(directory, token), /still active/i);
+  await writeFile(path, JSON.stringify({ pid: 2_147_483_647, host: hostname(), token }));
+  assert.equal((await inspectKanbanLaneLock(directory))?.token, token);
+  await assert.rejects(recoverAbandonedKanbanLaneLock(directory, "wrong-token"), /token changed/i);
+  await assert.rejects(runKanbanWorkerLane({ ...base, tasks: [{ id: first.id, revision: 0 }] }), /lane is busy/i);
+  assert.equal(await recoverAbandonedKanbanLaneLock(directory, token), true);
+  await assert.rejects(lstat(path), { code: "ENOENT" });
+  assert.deepEqual(await runKanbanWorkerLane({ ...base, tasks: [{ id: first.id, revision: 0 }] }), [first.id]);
 });

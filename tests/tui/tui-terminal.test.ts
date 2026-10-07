@@ -47,7 +47,7 @@ test("M72 real CLI/TUI composition preserves draft on resize and restores termin
     sessionDirectory: join(root, "sessions"), memoryDirectory: join(root, "memory"), skillsDirectory: join(root, "skills") });
   const observed = running.catch((error: unknown) => { throw error; });
   try {
-    await until(() => output.text.includes("fixture-model"), () => output.text);
+    await until(() => output.text.includes("fixture / fixture-model | READY"), () => output.text);
     input.write("Merhaba 世界");
     await until(() => output.text.includes("Merhaba 世界"), () => output.text);
     output.columns = 1; output.rows = 1; output.emit("resize");
@@ -96,7 +96,7 @@ test("M72 TUI honors configured provider/model, context budget and maximum turns
     input, tuiOutput: output, sessionDirectory: join(root, "sessions"), memoryDirectory: join(root, "memory"), skillsDirectory: join(root, "skills") });
   void running.catch(() => {});
   try {
-    await until(() => output.text.includes("configured-model"), () => output.text);
+    await until(() => output.text.includes("fixture / configured-model | READY"), () => output.text);
     output.text = "";
     input.write("read repeatedly\r");
     await until(() => calls > 0 && output.text.includes("Error:"), () => output.text);
@@ -126,7 +126,7 @@ test("TUI CLI profile selection exits and restores terminal without admitting ol
   });
   void running.catch(() => {});
   try {
-    await until(() => output.text.includes("fixture-model"), () => output.text);
+    await until(() => output.text.includes("fixture / fixture-model | READY"), () => output.text);
     input.write("/profile create isolated\r");
     await until(() => output.text.includes("Profile created: isolated"), () => output.text);
     input.write("/profile select isolated\rshould not reach model\r");

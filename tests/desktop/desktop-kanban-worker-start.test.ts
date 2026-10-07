@@ -59,9 +59,12 @@ test("Desktop close aborts an active worker before disposal finishes", async (t)
   const configPath = join(root, "settings", "config.json");
   const profiles = createDragonsProfileStore({ configPath });
   const profile = await profiles.create("alpha");
+  let markStarted = () => {};
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
   const server = createServer((_request, response) => {
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.write(": waiting\n\n");
+    markStarted();
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }));
@@ -74,14 +77,13 @@ test("Desktop close aborts an active worker before disposal finishes", async (t)
   const bridge = new DesktopBridge(runtime, () => assert.fail("Worker must not run interactive model."), desktopLocalControls(runtime));
   t.after(() => bridge.close());
   const pending = bridge.request({ type: "slash", content: `/kanban worker start ${task.id} 0` });
-  let claimed = false;
-  for (let i = 0; i < 100; i++) {
-    try { claimed = (await board.get("alpha", task.id))?.worker !== undefined; }
-    catch (error: unknown) { if (!(error instanceof Error) || !/changed during read/.test(error.message)) throw error; }
-    if (claimed) break;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  assert.equal(claimed, true);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([started, new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error("Worker did not reach the Local model.")), 10_000);
+    })]);
+  } finally { clearTimeout(timeout); }
+  assert.notEqual((await board.get("alpha", task.id))?.worker, undefined);
   await bridge.close();
   assert.equal((await pending).ok, false);
   assert.notEqual((await board.get("alpha", task.id))?.status, "done");

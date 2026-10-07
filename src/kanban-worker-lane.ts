@@ -1,4 +1,4 @@
-import type { KanbanBoard, KanbanTask } from "./kanban.js";
+import { kanbanWorkspaceDirectory, withKanbanLaneLock, type KanbanBoard, type KanbanTask } from "./kanban.js";
 import { launchKanbanWorker, type LaunchKanbanWorkerOptions } from "./kanban-worker-process.js";
 import { isSafeProfileName } from "./profiles.js";
 
@@ -30,6 +30,13 @@ export async function runKanbanWorkerLane(options: KanbanWorkerLaneOptions): Pro
       throw new Error("Invalid Kanban worker lane plan.");
     ids.add(item.id);
   }
+  if (signal?.aborted) throw new Error("Kanban worker lane cancelled.");
+  return withKanbanLaneLock(kanbanWorkspaceDirectory(options.configPath, options.workingDirectory),
+    () => runLockedLane(options));
+}
+
+async function runLockedLane(options: KanbanWorkerLaneOptions): Promise<string[]> {
+  const { tasks, board, profile, signal } = options;
   if (signal?.aborted) throw new Error("Kanban worker lane cancelled.");
   // Check the whole requested order before launching anything; do not discover or auto-run unrelated tasks.
   const snapshot = new Map((await board.list(profile)).map((task) => [task.id, task]));

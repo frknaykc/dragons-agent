@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { renameSync, writeFileSync } from "node:fs";
-import { link, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -261,6 +261,27 @@ test("board serializes concurrent writers and rejects linked or corrupted state 
   await mkdir(join(root, "elsewhere"));
   await symlink(join(root, "elsewhere"), directory);
   await assert.rejects(board.list("alpha"), /directory/);
+});
+
+test("board refuses symlinked locks without creating a dangling link target", async (t) => {
+  const { root, directory, board } = await fixture(t);
+  const first = await board.create("alpha", "First", "alpha", []);
+  const lock = join(directory, ".kanban.lock");
+  for (const exists of [false, true]) {
+    const target = join(root, exists ? "occupied-target" : "missing-target");
+    if (exists) await writeFile(target, "untouched");
+    try { await symlink(target, lock); }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") { t.skip("Symlink creation denied on this host."); return; }
+      throw error;
+    }
+    await assert.rejects(board.create("alpha", "Second", "alpha", []), /busy/);
+    assert.equal((await lstat(lock)).isSymbolicLink(), true);
+    if (exists) assert.equal(await readFile(target, "utf8"), "untouched");
+    else await assert.rejects(readFile(target), { code: "ENOENT" });
+    await rm(lock);
+  }
+  assert.deepEqual((await board.list("alpha")).map((task) => task.id), [first.id]);
 });
 
 test("board rejects oversized task metadata and workspace boundaries remain separate", async (t) => {

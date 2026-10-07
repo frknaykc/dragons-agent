@@ -21,7 +21,8 @@ test("cron startup CLI requires explicit operation and refuses extra arguments",
 
 test("macOS login startup is opt-in, escapes paths, and stops a loaded agent on removal", async () => {
   const root = await mkdtemp(join(tmpdir(), "dragons-cron-startup-"));
-  const workspace = join(root, "work & <project>");
+  // Workspace must be creatable on Windows; test XML-only characters in the executable path.
+  const workspace = join(root, "work & 'project'");
   const calls: string[][] = [];
   try {
     await mkdir(workspace);
@@ -29,7 +30,7 @@ test("macOS login startup is opt-in, escapes paths, and stops a loaded agent on 
       calls.push(args);
       return { stdout: "service found" };
     } };
-    const args = { workspace, profile: "review", executable: "/usr/local/bin/node", cliPath: "/app/dist/cli.js", host };
+    const args = { workspace, profile: "review", executable: join(root, "bin <node>"), cliPath: "/app/dist/cli.js", host };
     assert.match(await macCronStartup({ ...args, operation: "status" }), /not installed/);
     assert.match(await macCronStartup({ ...args, operation: "install" }), /sign out/i);
     const directory = join(root, "Library", "LaunchAgents");
@@ -37,7 +38,8 @@ test("macOS login startup is opt-in, escapes paths, and stops a loaded agent on 
     assert.equal(entries.length, 1);
     const plist = await readFile(join(directory, entries[0]!), "utf8");
     if (process.platform === "darwin") assert.match(execFileSync("plutil", ["-lint", join(directory, entries[0]!)], { encoding: "utf8" }), /OK/);
-    assert.match(plist, /work &amp; &lt;project&gt;/);
+    assert.match(plist, /work &amp; &apos;project&apos;/);
+    assert.match(plist, /bin &lt;node&gt;/);
     assert.match(plist, /<string>cron<\/string><string>serve<\/string><string>--profile<\/string><string>review<\/string>/);
     assert.match(plist, /<key>KeepAlive<\/key><true\/>/);
     assert.deepEqual(calls, []);

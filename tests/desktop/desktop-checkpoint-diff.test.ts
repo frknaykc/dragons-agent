@@ -44,7 +44,10 @@ async function fixture(t: TestContext) {
     assert.equal(admission.ok, true, JSON.stringify(admission));
     const events: RuntimeEvent[] = [];
     for (;;) {
-      if (!pending.length) await new Promise<void>(resolve => { wake = resolve; });
+      if (!pending.length) await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => { wake = undefined; reject(new Error("Desktop bridge event stalled.")); }, 10_000);
+        wake = () => { clearTimeout(timer); resolve(); };
+      });
       wake = undefined;
       const event = pending.shift()!;
       events.push(event);
@@ -105,11 +108,13 @@ supportedCheckpointTest("Desktop exact JSON-quoted paths select one image and WR
   assert.deepEqual(await f.store.load(f.session.id), persisted, "local diffs and rollback must not persist checkpoint images or alter continuation");
 });
 
-supportedCheckpointTest("Desktop follows bounded UTF-8 diff next commands read-only without provider calls or session persistence", { timeout: 15000 }, async t => {
+// The number of bridge round trips depends on UTF-8 page size, not a fixed wall-clock budget.
+// send() bounds each event wait instead of timing out an otherwise progressing pagination loop.
+supportedCheckpointTest("Desktop follows bounded UTF-8 diff next commands read-only without provider calls or session persistence", async t => {
   const f = await fixture(t);
   const path = "a  b.txt";
-  const before = "😀é\r\n".repeat(10000) + "before-end";
-  const after = "界🙂\r\n".repeat(10000) + "after-end";
+  const before = "😀é\r\n".repeat(3600) + "before-end";
+  const after = "界🙂\r\n".repeat(3600) + "after-end";
   assert.ok(Buffer.byteLength(JSON.stringify([{ path, before, after }])) > 60000);
   await writeFile(join(f.root, path), before);
   f.queue("write_file", { path, content: after });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -92,6 +92,29 @@ test("batch queue serializes capacity check and does not delete a foreign lock",
     await writeFile(join(f.directory, ".batch.lock"), "foreign", { flag: "wx" });
     await assert.rejects(() => f.queue.create(["later"], 1), /busy/);
     assert.equal(await readFile(join(f.directory, ".batch.lock"), "utf8"), "foreign");
+  } finally { await f.close(); }
+});
+
+test("batch queue refuses symlinked locks without creating a dangling link target", async (t) => {
+  const f = await fixture();
+  try {
+    await f.queue.create(["first"], 1);
+    const lock = join(f.directory, ".batch.lock");
+    for (const exists of [false, true]) {
+      const target = join(f.root, exists ? "occupied-target" : "missing-target");
+      if (exists) await writeFile(target, "untouched");
+      try { await symlink(target, lock); }
+      catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === "EPERM") { t.skip("Symlink creation denied on this host."); return; }
+        throw error;
+      }
+      await assert.rejects(f.queue.create(["second"], 1), /busy/);
+      assert.equal((await lstat(lock)).isSymbolicLink(), true);
+      if (exists) assert.equal(await readFile(target, "utf8"), "untouched");
+      else await assert.rejects(readFile(target), { code: "ENOENT" });
+      await rm(lock);
+    }
+    assert.equal((await f.queue.list()).length, 1);
   } finally { await f.close(); }
 });
 

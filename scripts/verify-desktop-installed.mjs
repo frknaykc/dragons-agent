@@ -80,7 +80,14 @@ try {
   stage = 'renderer-discovery';
   let page;
   for (let attempt = 0; attempt < 100; attempt++) {
-    const pages = await (await fetch(new URL('/json/list', origin), { signal: AbortSignal.timeout(2000) })).json();
+    let pages;
+    try {
+      pages = await (await fetch(new URL('/json/list', origin), { signal: AbortSignal.timeout(8000) })).json();
+    } catch (error) {
+      // A single-core VM can briefly stall DevTools while its renderer starts.
+      if (error?.name !== 'TimeoutError') throw error;
+      continue;
+    }
     page = pages.find((entry) => entry.type === 'page' && entry.url.endsWith('/desktop/index.html'));
     if (page) break;
     await new Promise((r) => setTimeout(r, 100));

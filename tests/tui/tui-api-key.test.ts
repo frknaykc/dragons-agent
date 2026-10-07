@@ -25,7 +25,7 @@ for (const outcome of ["save", "cancel", "store-error"] as const) test(`TUI mask
   const running = main(["--tui"], { workingDirectory: root, configPath: join(root, "config.json"), config: {}, providerRegistry: providers, apiKeyAuth: auth, input, tuiOutput: output, tools: [] });
   void running.catch(() => {});
   try {
-    await until(() => output.text.includes("fixture-model"));
+    await until(() => output.text.includes("fixture / fixture-model | READY"));
     input.write("/login anthropic \r");
     await until(() => output.text.includes("API key (Enter saves"));
     input.write("synthetic-private-key");

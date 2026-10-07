@@ -9,7 +9,8 @@ import test from "node:test";
 
 import { main } from "../../dist/cli.js";
 import { parseKanbanWorkerLane, parseKanbanWorkerStart, parseInteractiveKanbanCommand } from "../../dist/cli/kanban-commands.js";
-import { createFileKanbanBoard, inspectKanbanLock, kanbanWorkspaceDirectory } from "../../dist/kanban.js";
+import { createFileKanbanBoard, inspectKanbanLaneLock, inspectKanbanLock,
+  kanbanWorkspaceDirectory } from "../../dist/kanban.js";
 import { createDragonsProfileStore } from "../../dist/profiles.js";
 import { createProviderRegistry } from "../../dist/provider/registry.js";
 
@@ -228,6 +229,50 @@ test("interactive Kanban lock inspection hides token and recovery requires typed
   assert.match(recovered, /Abandoned Kanban lock removed/);
   assert.doesNotMatch(recovered, new RegExp(token));
   assert.equal(await inspectKanbanLock(directory), undefined);
+});
+
+test("CLI lane lock recovery is explicit, token-hidden and separate from board locks", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dragons-cli-kanban-lane-lock-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = await realpath(root);
+  const configPath = join(root, "config.json");
+  const profiles = createDragonsProfileStore({ configPath });
+  await profiles.create("alpha");
+  await profiles.select("alpha");
+  const directory = kanbanWorkspaceDirectory(configPath, workspace);
+  await createFileKanbanBoard(directory, profiles).create("alpha", "First", "alpha", []);
+  const lockPath = join(directory, ".kanban-lane.lock");
+  const token = randomUUID();
+  const lock = (pid: number, host = hostname(), value = token) =>
+    writeFile(lockPath, JSON.stringify({ pid, host, token: value }));
+  const run = async (lines: string[]): Promise<string> => {
+    const output: string[] = [];
+    await main([], {
+      input: PassThrough.from([...lines.map((line) => `${line}\n`), "/exit\n"]),
+      write: (text) => output.push(text), workingDirectory: workspace, configPath,
+      profileStore: profiles, tools: [],
+      model: { async respond() { throw new Error("Lane lock commands reached the model."); } },
+    });
+    return output.join("");
+  };
+  assert.match(await run(["/kanban lane lock status"]), /No Kanban lane lock/);
+  await lock(999999999);
+  const status = await run(["/kanban lane lock status", "/kanban lane lock extra"]);
+  assert.match(status, /PID 999999999/);
+  assert.match(status, /Usage: \/kanban lane lock status/);
+  assert.doesNotMatch(status, new RegExp(token));
+  assert.match(await run(["/kanban lane lock recover", "NO"]), /not confirmed/i);
+  assert.ok(await inspectKanbanLaneLock(directory));
+  await lock(process.pid);
+  assert.match(await run(["/kanban lane lock recover", "RECOVER"]), /still active/i);
+  await lock(999999999, "other-host");
+  assert.match(await run(["/kanban lane lock recover", "RECOVER"]), /another host/i);
+  await lock(999999999);
+  const recovered = await run(["/kanban lane lock recover", "RECOVER"]);
+  assert.match(recovered, /Abandoned Kanban lane lock removed/);
+  assert.doesNotMatch(recovered, new RegExp(token));
+  assert.equal(await inspectKanbanLaneLock(directory), undefined);
+  assert.match(await run(["/kanban lock status"]), /No Kanban lock/);
 });
 
 test("interactive Kanban handoff requires the assignee and explicit acceptance by the target profile", async (t) => {

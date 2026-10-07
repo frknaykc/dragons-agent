@@ -18,10 +18,13 @@ test("Desktop close aborts a lane child without starting its next task", async (
   const profiles = createDragonsProfileStore({ configPath });
   const profile = await profiles.create("alpha");
   let requests = 0;
+  let markStarted = () => {};
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
   const server = createServer((_request, response) => {
     requests++;
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.write(": waiting\n\n");
+    markStarted();
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }));
@@ -36,14 +39,13 @@ test("Desktop close aborts a lane child without starting its next task", async (
   const bridge = new DesktopBridge(runtime, () => assert.fail("Lane must not use interactive model."), desktopLocalControls(runtime));
   t.after(() => bridge.close());
   const pending = bridge.request({ type: "slash", content: `/kanban worker lane ${first.id}:0 ${second.id}:${dependent.revision}` });
-  let claimed = false;
-  for (let i = 0; i < 100; i++) {
-    try { claimed = (await board.get("alpha", first.id))?.worker !== undefined; }
-    catch (error: unknown) { if (!(error instanceof Error) || !/changed during read/.test(error.message)) throw error; }
-    if (claimed) break;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  assert.equal(claimed, true);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([started, new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error("Lane child did not reach the Local model.")), 10_000);
+    })]);
+  } finally { clearTimeout(timeout); }
+  assert.notEqual((await board.get("alpha", first.id))?.worker, undefined);
   await bridge.close();
   assert.equal((await pending).ok, false);
   assert.notEqual((await board.get("alpha", first.id))?.status, "done");

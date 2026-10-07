@@ -47,7 +47,7 @@ test("Windows rename retry queues behind cancellation across canonical store ins
     };
     fs.realpath = async (...args) => {
       const result = await original.realpath(...args);
-      if (retryResumed && cancellationHeld) retryEntered.release();
+      if (retryResumed && cancellationHeld && args[0] === root) retryEntered.release();
       return result;
     };
     fs.writeFile = async (path, ...args) => {

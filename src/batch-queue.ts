@@ -215,21 +215,31 @@ export function createFileBatchQueue(directory: string, canonicalWorkspace: stri
   async function locked<T>(operation: () => Promise<T>): Promise<T> {
     await ready(directory, true);
     const path = join(directory, LOCK_FILE);
+    const busy = "Batch storage is busy; recover an abandoned lock explicitly.";
+    // Windows exclusive open may follow a dangling symlink; inspect the entry itself.
+    try { await lstat(path); throw new Error(busy); }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     let lock;
     try { lock = await open(path, "wx", 0o600); }
     catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Batch storage is busy; recover an abandoned lock explicitly.");
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(busy);
       throw error;
     }
-    const identity = await lock.stat();
+    let identity: Awaited<ReturnType<typeof lock.stat>> | undefined;
     try {
+      identity = await lock.stat();
+      const named = await lstat(path);
+      if (!named.isFile() || named.isSymbolicLink() || named.nlink !== 1 || named.dev !== identity.dev || named.ino !== identity.ino)
+        throw new Error(busy);
       await lock.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), token: randomUUID() }));
       return await operation();
     } finally {
       await lock.close();
       try {
         const current = await lstat(path);
-        if (current.isFile() && !current.isSymbolicLink() && current.dev === identity.dev && current.ino === identity.ino) await rm(path);
+        if (identity && current.isFile() && !current.isSymbolicLink() && current.dev === identity.dev && current.ino === identity.ino) await rm(path);
       } catch (error: unknown) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }

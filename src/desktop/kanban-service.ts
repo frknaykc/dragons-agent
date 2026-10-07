@@ -1,5 +1,6 @@
 import { runInteractiveKanbanCommand, type InteractiveKanbanCommand } from "../cli/kanban-commands.js";
-import { inspectKanbanLock, recoverAbandonedKanbanLock, type KanbanBoard, type KanbanTask } from "../kanban.js";
+import { inspectKanbanLaneLock, inspectKanbanLock, recoverAbandonedKanbanLaneLock,
+  recoverAbandonedKanbanLock, type KanbanBoard, type KanbanTask } from "../kanban.js";
 import { launchKanbanWorker } from "../kanban-worker-process.js";
 import { runKanbanWorkerLane, type KanbanLaneTask } from "../kanban-worker-lane.js";
 
@@ -7,6 +8,9 @@ export type DesktopKanbanCommand = InteractiveKanbanCommand
   | { action: "lock_status" }
   | { action: "lock_recover" }
   | { action: "lock_confirm" }
+  | { action: "lane_lock_status" }
+  | { action: "lane_lock_recover" }
+  | { action: "lane_lock_confirm" }
   | { action: "worker_start"; id: string; revision: number }
   | { action: "worker_lane"; tasks: KanbanLaneTask[] }
   | { action: "worker_confirm" };
@@ -17,6 +21,7 @@ export function createDesktopKanbanService(board: KanbanBoard, actor: string, di
   let closed = false;
   let activeWorker: AbortController | undefined;
   let pending: { token: string; expiresAt: number } | undefined;
+  let pendingLane: { token: string; expiresAt: number } | undefined;
   let pendingWorker: { id: string; revision: number; pid: number; expiresAt: number } | undefined;
   const inFlight = new Set<Promise<string>>();
 
@@ -60,6 +65,26 @@ export function createDesktopKanbanService(board: KanbanBoard, actor: string, di
       return await recoverAbandonedKanbanLock(directory, candidate.token)
         ? "Kanban lock recovered." : "No Kanban lock for this workspace.";
     }
+    if (command.action === "lane_lock_status" || command.action === "lane_lock_recover") {
+      pendingLane = undefined;
+      const lock = await inspectKanbanLaneLock(directory);
+      if (closed) throw new Error("Desktop Kanban is closed.");
+      if (!lock) return "No Kanban lane lock for this workspace.";
+      const owner = `Kanban lane lock owner: PID ${lock.pid} on ${JSON.stringify(lock.host)}.`;
+      if (command.action === "lane_lock_status") return `${owner} No recovery attempted.`;
+      pendingLane = { token: lock.token, expiresAt: Date.now() + 60_000 };
+      return `${owner} Only recover if this process has stopped. Type /kanban lane lock confirm RECOVER within 60 seconds to confirm. Worker claims require separate inspection.`;
+    }
+    if (command.action === "lane_lock_confirm") {
+      const candidate = pendingLane;
+      pendingLane = undefined;
+      if (!candidate || Date.now() > candidate.expiresAt)
+        return "Kanban lane lock recovery not pending; run /kanban lane lock recover first.";
+      if (closed) throw new Error("Desktop Kanban is closed.");
+      return await recoverAbandonedKanbanLaneLock(directory, candidate.token)
+        ? "Kanban lane lock recovered; no worker was stopped or started. Inspect task claims separately."
+        : "No Kanban lane lock for this workspace.";
+    }
     if (command.action === "worker_recover") {
       pendingWorker = undefined;
       const task = await board.get(actor, command.id);
@@ -102,9 +127,11 @@ export function createDesktopKanbanService(board: KanbanBoard, actor: string, di
       closed = true;
       activeWorker?.abort();
       pending = undefined;
+      pendingLane = undefined;
       pendingWorker = undefined;
       await Promise.allSettled([...inFlight]);
       pending = undefined;
+      pendingLane = undefined;
       pendingWorker = undefined;
     },
   };

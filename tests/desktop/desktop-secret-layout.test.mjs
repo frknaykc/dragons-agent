@@ -38,7 +38,8 @@ if (process.versions.electron) {
       assert.equal(geometry.autocomplete, 'off');
       assert.equal(geometry.blank, true);
       // Exercise the real renderer click listener and IPC, not a synthetic host cancel.
-      await window.webContents.executeJavaScript("document.querySelector('#cancel').click(); true").catch(() => {});
+      // Closing the view during the click may leave executeJavaScript's reply unresolved.
+      void window.webContents.executeJavaScript("document.querySelector('#cancel').click(); true").catch(() => {});
       assert.equal(await result, undefined);
       assert.equal(window.isDestroyed(), true);
     }

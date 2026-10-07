@@ -9,7 +9,8 @@ import { saveDragonsConfig } from "../../dist/config.js";
 import { DesktopBridge } from "../../dist/desktop/bridge.js";
 import type { DesktopLocalControls } from "../../dist/desktop/bridge.js";
 import { createDesktopRuntime, desktopLocalControls } from "../../dist/desktop/host.js";
-import { createFileKanbanBoard, inspectKanbanLock, kanbanWorkspaceDirectory } from "../../dist/kanban.js";
+import { createFileKanbanBoard, inspectKanbanLaneLock, inspectKanbanLock,
+  kanbanWorkspaceDirectory } from "../../dist/kanban.js";
 import { createDragonsProfileStore } from "../../dist/profiles.js";
 
 const idPattern = /[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}/i;
@@ -165,6 +166,65 @@ test("Desktop Kanban lock recovery needs an inspected lock and a separate typed 
     await bridge?.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("Desktop lane lock recovery is bounded, single-use, token-checked and distinct from board recovery", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "dragons-desktop-kanban-lane-lock-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = await realpath(root);
+  const configPath = join(root, "settings", "config.json");
+  const profiles = createDragonsProfileStore({ configPath });
+  const profile = await profiles.create("alpha");
+  await saveDragonsConfig({ provider: "local", model: "fixture" }, profile.configPath);
+  const runtime = await createDesktopRuntime(workspace, { configPath, profileName: "alpha" });
+  const bridge = new DesktopBridge(runtime, () => assert.fail("Lock commands must not run a model."), desktopLocalControls(runtime));
+  t.after(() => bridge.close());
+  const directory = kanbanWorkspaceDirectory(configPath, workspace);
+  await text(bridge, "/kanban add alpha -- Seed board");
+  const lockPath = join(directory, ".kanban-lane.lock");
+  const token = randomUUID();
+  const save = (pid: number, host = hostname(), value = token) =>
+    writeFile(lockPath, JSON.stringify({ pid, host, token: value }));
+  assert.match(await text(bridge, "/kanban lane lock status"), /No Kanban lane lock/);
+  assert.match(await text(bridge, "/kanban lane lock confirm RECOVER"), /not pending/);
+  await save(999999999);
+  const status = await text(bridge, "/kanban lane lock status");
+  assert.match(status, /PID 999999999/);
+  assert.doesNotMatch(status, new RegExp(token));
+  assert.match(await text(bridge, "/kanban lane lock confirm NO"), /Usage: \/kanban lane lock/);
+  assert.match(await text(bridge, "/kanban lane lock recover"), /confirm RECOVER within 60 seconds/);
+  assert.match(await text(bridge, "/kanban lock confirm RECOVER"), /not pending/);
+  assert.match(await text(bridge, "/kanban lane lock confirm RECOVER"), /recovered/);
+  assert.equal(await inspectKanbanLaneLock(directory), undefined);
+  assert.match(await text(bridge, "/kanban lane lock confirm RECOVER"), /not pending/);
+
+  await save(999999999);
+  await text(bridge, "/kanban lane lock recover");
+  await text(bridge, "/kanban lane lock status");
+  assert.match(await text(bridge, "/kanban lane lock confirm RECOVER"), /not pending/);
+  await text(bridge, "/kanban lane lock recover");
+  await save(999999999, hostname(), randomUUID());
+  assert.equal((await bridge.request({ type: "slash", content: "/kanban lane lock confirm RECOVER" })).ok, false);
+  assert.ok(await inspectKanbanLaneLock(directory));
+
+  await save(999999999);
+  await text(bridge, "/kanban lane lock recover");
+  const clock = Date.now();
+  const mockClock = t.mock.method(Date, "now", () => clock + 61_000);
+  try {
+    assert.match(await text(bridge, "/kanban lane lock confirm RECOVER"), /not pending/);
+  } finally {
+    mockClock.mock.restore();
+  }
+  assert.ok(await inspectKanbanLaneLock(directory));
+
+  await save(process.pid);
+  await text(bridge, "/kanban lane lock recover");
+  assert.equal((await bridge.request({ type: "slash", content: "/kanban lane lock confirm RECOVER" })).ok, false);
+  await save(999999999, "other-host");
+  await text(bridge, "/kanban lane lock recover");
+  assert.equal((await bridge.request({ type: "slash", content: "/kanban lane lock confirm RECOVER" })).ok, false);
+  assert.ok(await inspectKanbanLaneLock(directory));
 });
 
 test("Desktop worker claim recovery is profile-bound, single-use and revision-checked", async (t) => {

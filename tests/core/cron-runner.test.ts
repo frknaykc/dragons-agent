@@ -90,17 +90,21 @@ test("scheduled runner resolves a pinned project skill, then refuses drift befor
   } finally { await rm(workspace, { recursive: true, force: true }); }
 });
 
-test("a timed-out model is cancelled and reported while the next due cron task still runs", async () => {
+test("a timed-out model is cancelled and reported while the next due cron task still runs", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const workspace = await mkdtemp(join(tmpdir(), "dragons-cron-runner-"));
   const ids = [ID, "22222222-2222-4222-8222-222222222222"];
   const reports: string[] = [];
   const errors: string[] = [];
   let aborted = false;
+  let entered!: () => void;
+  const modelEntered = new Promise<void>((resolve) => { entered = resolve; });
   let now = new Date("2026-09-25T11:14:00.000Z");
   try {
     const run = createReadOnlyCronRunner({ workingDirectory: workspace, maxRunMs: 250,
       createModel: () => ({ async respond(request) {
         if (request.task === "Hang.") {
+          entered();
           await new Promise<void>((_resolve, reject) => {
             const cancel = () => { aborted = true; reject(new Error("provider aborted")); };
             request.signal?.addEventListener("abort", cancel, { once: true });
@@ -116,12 +120,16 @@ test("a timed-out model is cancelled and reported while the next due cron task s
       workingDirectory: workspace, prompt, schedule: { kind: "cron", expression: "* * * * *" },
     });
     now = new Date("2026-09-25T11:15:00.000Z");
-    assert.equal(await scheduler.tick((error) => errors.push((error as Error).message)), 1);
+    const tick = scheduler.tick((error) => errors.push((error as Error).message));
+    await modelEntered;
+    assert.equal(aborted, false, "the model was actually running before its deadline");
+    t.mock.timers.tick(250);
+    assert.equal(await tick, 1);
     assert.equal(aborted, true);
     assert.deepEqual(errors, ["Cron run timed out."]);
     assert.deepEqual(reports, ["22222222-2222-4222-8222-222222222222"]);
     assert.equal(await scheduler.tick(), 0, "failed reserved slots do not replay");
-  } finally { await rm(workspace, { recursive: true, force: true }); }
+  } finally { t.mock.timers.reset(); await rm(workspace, { recursive: true, force: true }); }
 });
 
 test("host shutdown cancels cron without a timeout report or a late model result", async () => {

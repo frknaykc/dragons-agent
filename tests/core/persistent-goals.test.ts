@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -86,6 +86,28 @@ test("goal store rejects linked root, refuses contention and enforces record cou
     await assert.rejects(createFilePersistentGoalStore(f.directory, { maxGoals: 1 }).save(goal(OTHER)), /limit/);
     assert.equal((await f.store.list()).length, 1);
   } finally { await rm(link, { force: true }); await rm(f.directory, { recursive: true, force: true }); }
+});
+
+test("goal store never acquires a symlinked lock, including a dangling Windows link", async (t) => {
+  const f = await fixture();
+  const lock = join(f.directory, ".persistent-goals.lock");
+  try {
+    for (const exists of [false, true]) {
+      const target = join(f.directory, exists ? "occupied-target" : "missing-target");
+      if (exists) await writeFile(target, "untouched");
+      try { await symlink(target, lock); }
+      catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === "EPERM") { t.skip("Symlink creation denied on this host."); return; }
+        throw error;
+      }
+      await assert.rejects(f.store.save(goal()), /busy/);
+      assert.equal((await lstat(lock)).isSymbolicLink(), true);
+      if (exists) assert.equal(await readFile(target, "utf8"), "untouched");
+      else await assert.rejects(readFile(target), { code: "ENOENT" });
+      await rm(lock);
+    }
+    assert.equal(await f.store.load(ID), undefined);
+  } finally { await rm(f.directory, { recursive: true, force: true }); }
 });
 
 test("explicit goal lock recovery refuses a live owner, other host, malformed data and links", async () => {

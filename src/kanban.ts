@@ -11,6 +11,7 @@ const MAX_DEPENDENCIES = 16;
 const MAX_BOARD_BYTES = 128_000;
 const BOARD_FILE = "board.json";
 const LOCK_FILE = ".kanban.lock";
+const LANE_LOCK_FILE = ".kanban-lane.lock";
 const MAX_LOCK_BYTES = 512;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 
@@ -151,9 +152,9 @@ async function directoryReady(directory: string, create: boolean): Promise<boole
 export type KanbanLockIdentity = { pid: number; host: string; token: string };
 
 /** Inspect an app-owned lock without removing it. Never print its token in a user-facing prompt. */
-export async function inspectKanbanLock(directory: string): Promise<KanbanLockIdentity | undefined> {
+async function inspectLock(directory: string, filename: typeof LOCK_FILE | typeof LANE_LOCK_FILE): Promise<KanbanLockIdentity | undefined> {
   if (!await directoryReady(directory, false)) return undefined;
-  const path = join(directory, LOCK_FILE);
+  const path = join(directory, filename);
   let named;
   try { named = await lstat(path); }
   catch (error: unknown) {
@@ -184,10 +185,19 @@ export async function inspectKanbanLock(directory: string): Promise<KanbanLockId
   return { pid: record.pid as number, host: record.host, token: record.token };
 }
 
+export function inspectKanbanLock(directory: string): Promise<KanbanLockIdentity | undefined> {
+  return inspectLock(directory, LOCK_FILE);
+}
+
+/** A lane lock spans child processes; its identity is for trusted recovery, never board views. */
+export function inspectKanbanLaneLock(directory: string): Promise<KanbanLockIdentity | undefined> {
+  return inspectLock(directory, LANE_LOCK_FILE);
+}
+
 /** Explicit local operator action only: an old lock is not proof its owner has stopped. */
-export async function recoverAbandonedKanbanLock(directory: string, expectedToken: string): Promise<boolean> {
+async function recoverLock(directory: string, filename: typeof LOCK_FILE | typeof LANE_LOCK_FILE, expectedToken: string): Promise<boolean> {
   if (!await directoryReady(directory, false)) return false;
-  const path = join(directory, LOCK_FILE);
+  const path = join(directory, filename);
   let named;
   try { named = await lstat(path); }
   catch (error: unknown) {
@@ -196,7 +206,7 @@ export async function recoverAbandonedKanbanLock(directory: string, expectedToke
   }
   if (!named.isFile() || named.isSymbolicLink() || named.nlink !== 1 || named.size > MAX_LOCK_BYTES)
     throw new Error("Unsafe Kanban lock.");
-  const record = await inspectKanbanLock(directory);
+  const record = await inspectLock(directory, filename);
   if (!record) throw new Error("Kanban lock changed during recovery.");
   if (record.token !== expectedToken) throw new Error("Kanban lock token changed.");
   if (record.host !== hostname()) throw new Error("Kanban lock belongs to another host.");
@@ -213,6 +223,53 @@ export async function recoverAbandonedKanbanLock(directory: string, expectedToke
     return true;
   }
   throw new Error("Kanban lock owner is still active.");
+}
+
+export function recoverAbandonedKanbanLock(directory: string, expectedToken: string): Promise<boolean> {
+  return recoverLock(directory, LOCK_FILE, expectedToken);
+}
+
+/** Explicit recovery only; never replays a lane or releases its claimed worker tasks. */
+export function recoverAbandonedKanbanLaneLock(directory: string, expectedToken: string): Promise<boolean> {
+  return recoverLock(directory, LANE_LOCK_FILE, expectedToken);
+}
+
+/** Host-scoped, cross-process serialization; the board still owns each worker claim. */
+export async function withKanbanLaneLock<T>(directory: string, operation: () => Promise<T>): Promise<T> {
+  await directoryReady(directory, true);
+  const path = join(directory, LANE_LOCK_FILE);
+  const busy = "Kanban worker lane is busy; inspect the lock before explicit recovery.";
+  // Exclusive open can follow an existing symlink on Windows; inspect the name first.
+  try { await lstat(path); throw new Error(busy); }
+  catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  let lock;
+  try { lock = await open(path, "wx", 0o600); }
+  catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(busy);
+    throw error;
+  }
+  let identity: Awaited<ReturnType<typeof lock.stat>> | undefined;
+  try {
+    identity = await lock.stat();
+    const named = await lstat(path);
+    if (!named.isFile() || named.isSymbolicLink() || named.nlink !== 1 || named.dev !== identity.dev || named.ino !== identity.ino)
+      throw new Error(busy);
+    await lock.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), token: randomUUID() }));
+    return await operation();
+  } finally {
+    await lock.close();
+    if (identity) {
+      try {
+        const current = await lstat(path);
+        if (current.isFile() && !current.isSymbolicLink() && current.nlink === 1
+          && current.dev === identity.dev && current.ino === identity.ino) await rm(path);
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+  }
 }
 
 /** Shared, data-only board. The trusted host supplies the active actor; tasks never run tools. */
@@ -267,15 +324,24 @@ export function createFileKanbanBoard(directory: string, profiles: DragonsProfil
 
   async function mutate(operation: (tasks: StoredTask[]) => StoredTask): Promise<KanbanTask> {
     await directoryReady(directory, true);
+    const busy = "Kanban board is busy; recover an abandoned lock explicitly.";
+    // Windows exclusive open may follow a dangling symlink; inspect the entry itself.
+    try { await lstat(lockPath); throw new Error(busy); }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     let lock;
     try { lock = await open(lockPath, "wx", 0o600); }
     catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Kanban board is busy; recover an abandoned lock explicitly.");
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(busy);
       throw error;
     }
     let identity: Awaited<ReturnType<typeof lock.stat>> | undefined;
     try {
       identity = await lock.stat();
+      const named = await lstat(lockPath);
+      if (!named.isFile() || named.isSymbolicLink() || named.nlink !== 1 || named.dev !== identity.dev || named.ino !== identity.ino)
+        throw new Error(busy);
       await lock.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), token: randomUUID() }));
       const board = await readBoard();
       const changed = operation(board.tasks);
