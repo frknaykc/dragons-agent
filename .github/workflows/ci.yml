@@ -28,7 +28,8 @@ jobs:
       - name: Test (Linux, sandboxed Electron with a virtual display)
         if: runner.os == 'Linux'
         run: |
-          sandbox="$(dirname "$(node -p "require('electron')")")/chrome-sandbox"
+          node -e "require('electron')" >/dev/null
+          sandbox="$(node -p "require('node:path').join(require('node:path').dirname(require.resolve('electron/package.json')), 'dist/chrome-sandbox')")"
           sudo chown root:root "$sandbox"
           sudo chmod 4755 "$sandbox"
           xvfb-run -a pnpm test
