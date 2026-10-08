@@ -1,0 +1,3 @@
+# Reviewed catalog digests pin repository bytes; do not rewrite line endings on Windows.
+catalog/plugins/**/plugin.json text eol=lf
+catalog/skills/**/SKILL.md text eol=lf

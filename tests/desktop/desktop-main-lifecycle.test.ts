@@ -18,10 +18,12 @@ type FixtureOptions = {
   hold?: "ready" | "workspace" | "runtime" | "load";
   fail?: "local" | "session" | "window" | "updates" | "bridge" | "ipc" | "load";
   remote?: boolean;
+  lineEndings?: "crlf";
 };
 
 async function fixture(options: FixtureOptions = {}) {
-  const source = await readFile(new URL("../../desktop/main.mjs", import.meta.url), "utf8");
+  const source = (await readFile(new URL("../../desktop/main.mjs", import.meta.url), "utf8"))
+    .replace(/\r?\n/g, options.lineEndings === "crlf" ? "\r\n" : "\n");
   const handlers = new Map<string, unknown>();
   const order: string[] = [];
   const logs: unknown[][] = [];
@@ -75,7 +77,7 @@ async function fixture(options: FixtureOptions = {}) {
     selectDesktopWorkspace: async () => { if (options.hold === "workspace") await gate.promise; return "/fixture"; }, createDesktopRuntime: createRuntime, connectRemoteRuntime: createRuntime,
   });
   // Execute the actual launcher and before-quit registration, not an openDesktop-only slice.
-  const executable = source.replace(/^import .*;\n/gm, "").replace("export async function", "async function")
+  const executable = source.replace(/^import .*;\r?\n/gm, "").replace("export async function", "async function")
     .replaceAll("import.meta.url", JSON.stringify("file:///fixture/main.mjs"))
     .replace("desktop = owner;", "desktop = owner; globalThis.desktop = owner;");
   vm.runInContext(executable, context);
@@ -84,6 +86,15 @@ async function fixture(options: FixtureOptions = {}) {
   return { gate, localCloses: () => localCloses, creations: () => creations, windows: () => windows, disposals: () => disposals, app, contents, window, context, cleanup, rejectCleanup, resolveCleanup, signals, allowedQuits: () => allowedQuits, logs, order, handlers,
     send: (event: unknown) => send(event), closes: () => closes, quits: () => quits };
 }
+
+test("main lifecycle fixture also runs when checkout uses CRLF", async () => {
+  const f = await fixture({ lineEndings: "crlf" });
+  f.app.quit();
+  assert.equal(f.closes(), 1);
+  f.resolveCleanup();
+  await flush();
+  assert.equal(f.allowedQuits(), 1);
+});
 
 for (const lifecycle of ["render-process-gone", "unresponsive", "closed", "did-start-navigation"]) {
   test(`main owns rejected ${lifecycle} cleanup without changing the external close contract`, async () => {

@@ -25,6 +25,15 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test
+      - name: Test (Linux, sandboxed Electron with a virtual display)
+        if: runner.os == 'Linux'
+        run: |
+          sandbox="$(dirname "$(node -p "require('electron')")")/chrome-sandbox"
+          sudo chown root:root "$sandbox"
+          sudo chmod 4755 "$sandbox"
+          xvfb-run -a pnpm test
+      - name: Test
+        if: runner.os != 'Linux'
+        run: pnpm test
       - run: pnpm typecheck
       - run: pnpm build
