@@ -16,6 +16,19 @@ import { createTuiLocalCommands, safeTuiAuthNotice } from "../../dist/tui/local-
 import { createDragonsProfileStore } from "../../dist/profiles.js";
 
 
+test("TUI exposes checkpoint commands in its picker and help without offering worktree switching", async (t) => {
+  const { runtime } = await fixture(t, answer);
+  const controller = new TuiController(runtime);
+  t.after(() => controller.close());
+  await controller.initialize();
+  for (const command of ["/checkpoint", "/rollback"]) {
+    assert.ok(controller.choices(command).some((choice) => choice.value.startsWith(command)));
+    await controller.submit(`/help ${command}`);
+    assert.match(controller.state.messages.at(-1)!.text, new RegExp(command));
+  }
+  assert.equal(controller.choices("/worktree").length, 0);
+});
+
 test("TUI auth selects explicit/session/default providers and exposes only sanitized presence", async (t) => {
   const { runtime, store } = await fixture(t, answer);
   const root = await mkdtemp(join(tmpdir(), "dragons-tui-auth-"));
@@ -203,6 +216,53 @@ test("TUI new and resume commands use isolated runtime sessions and preserve sta
   await controller.submit("/reset");
   assert.notEqual(controller.state.session!.id, original);
 });
+
+for (const command of ["/provider fixture", "/model fixture-2", "/new", "/reset", "/resume"] as const) for (const reject of [false, true]) {
+  test(`TUI cancelled session switch ${command} suppresses late ${reject ? "failure" : "success"}`, { timeout: 10_000 }, async (t) => {
+    const { runtime } = await fixture(t, answer);
+    const controller = new TuiController(runtime);
+    t.after(() => controller.close());
+    await controller.initialize();
+    await controller.submit("keep this conversation");
+    const original = controller.state.session!;
+    const messages = structuredClone(controller.state.messages);
+    const target = await runtime.createSession({});
+    const entered = barrier();
+    const release = barrier();
+    const create = runtime.createSession;
+    const resume = runtime.resumeSession;
+    runtime.createSession = async (options) => {
+      entered.release(); await release.promise;
+      if (reject) throw new Error("private late session error");
+      return create(options);
+    };
+    runtime.resumeSession = async (id) => {
+      entered.release(); await release.promise;
+      if (reject) throw new Error("private late resume error");
+      return resume(id);
+    };
+    const pending = controller.submit(command === "/resume" ? `/resume ${target.id}` : command);
+    try {
+      await entered.promise;
+      const cancelled = controller.cancel();
+      assert.equal(controller.state.busy, true, "admission stays locked until the in-flight facade call settles");
+      await controller.submit("must not run during cancellation");
+      release.release();
+      await pending;
+      assert.equal(cancelled, true);
+      assert.equal(controller.state.session!.id, original.id);
+      assert.deepEqual(controller.state.messages, messages);
+      assert.equal(controller.state.error, undefined);
+      assert.equal(controller.state.busy, false);
+      await controller.submit("next run works");
+      assert.equal(controller.state.session!.id, original.id);
+      assert.equal(controller.state.messages.at(-1)!.text, "Final answer.");
+    } finally {
+      release.release();
+      await pending;
+    }
+  });
+}
 
 test("TUI slash controls stay local and help only advertises supported commands", async (t) => {
   let calls = 0;

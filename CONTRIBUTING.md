@@ -12,6 +12,8 @@ Requirements:
 ```sh
 pnpm install
 pnpm test
+pnpm test:terminal  # CLI/TUI and shared runtime
+pnpm test:desktop   # Desktop/Web-only regressions
 pnpm typecheck
 pnpm build
 ```
@@ -30,13 +32,17 @@ Run `pnpm release:check` before proposing package or release-facing changes.
 - `src/` contains application TypeScript only; `desktop/` contains the Electron shell assets.
 - `tests/<subsystem>/` contains permanent Node regressions. Use `tests/integration/` for cross-subsystem milestone tests, `tests/fixtures/` for subprocess servers/PTY fixtures and `tests/acceptance/` for explicit acceptance harnesses plus their deterministic regressions.
 - `experiments/macos-native/` preserves the disposable M78 C labs and their shell gates. They are not shipping app code or production updater acceptance.
-- `scripts/` retains build, packaging, verification and development entrypoints; script regression tests live in `tests/desktop/`.
+- `scripts/` retains build, packaging, verification and development entrypoints; shared test infrastructure regressions live in `tests/scripts/`, existing Desktop/package script regressions remain in `tests/desktop/`.
 
 `pnpm build` always cleans `dist/` before compiling application JavaScript/declarations. This removes stale tests from old checkouts; do not delete individual generated files by hand. `pnpm build:tests` builds the app, cleans `.test-build/`, then compiles only `tests/**/*.ts` without declarations. Both output directories are ignored. `pnpm clean` removes only `dist/`; `node scripts/clean-build.mjs tests` removes only `.test-build/`.
 
 Tests use explicit relative `.js` imports into `dist/`: TypeScript checks the generated declarations and Node exercises the same application build that ships. Imports within test/acceptance/fixture code remain relative `.js` imports. The parallel `tests/` and `.test-build/` layouts preserve those paths. Use `new URL(..., import.meta.url)` for repository assets and child-process modules; preserve deliberately injected subprocess cwd values.
 
 `pnpm test` recursively discovers all compiled `*.test.js` and source `tests/**/*.test.mjs`; it never auto-runs fixture servers or live acceptance entrypoints. The Windows NSIS PowerShell regression remains an explicit native CI step. `pnpm typecheck` builds declarations and checks both production and test TypeScript. Live provider commands remain explicit opt-ins; this layout does not grant permission to run them.
+
+The first delivery target is the existing CLI/TUI on macOS arm64, Windows x64 and Ubuntu LTS x64. CI reports `test:terminal` and `test:desktop` independently. The Desktop suite contains `tests/desktop/**` plus the remote Dashboard and three personal-browser UI integrations listed in `scripts/run-tests.mjs`; all remaining tests, including shared runtime/provider/LSP coverage, belong to the terminal suite. New unclassified tests default to terminal, not to exclusion. The two suites together preserve `pnpm test` coverage. After `pnpm build:tests`, inspect selection without running tests using `node scripts/run-tests.mjs --suite=terminal --list` (also `desktop` or `all`). Unknown options and empty selections fail.
+
+The terminal CI job also runs global typechecking and `verify:package` (isolated installed Node package, no live credentials). Desktop regression failures remain visible; they are not silently skipped or converted to success. Shared build/type errors can still affect both jobs. If branch protection references the former CI job names, a repository administrator must update required checks after the new jobs have run; changing a YAML file does not change repository settings. Runner evidence and actual interactive terminal acceptance remain separate: see [the platform test plan](docs/platform-test-plan.md).
 
 Historical acceptance documents may show the old `src/*.test.ts` / `dist/*.test.js` locations. Those commands describe the recorded snapshot, not current focused-test commands.
 

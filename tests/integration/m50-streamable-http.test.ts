@@ -71,14 +71,7 @@ async function settlesWithin(operation: Promise<void>, milliseconds: number, mes
   }
 }
 
-async function createHttpFixture(mode: FixtureMode): Promise<HttpFixture> {
-  let releaseWait = (): void => undefined;
-  let requestStarted = (): void => undefined;
-  let requestClosed = (): void => undefined;
-  let sessionTerminated = (): void => undefined;
-  const requestStartedPromise = new Promise<void>((resolve) => { requestStarted = resolve; });
-  const requestClosedPromise = new Promise<void>((resolve) => { requestClosed = resolve; });
-  const sessionTerminatedPromise = new Promise<void>((resolve) => { sessionTerminated = resolve; });
+async function createHttpConnection(mode: FixtureMode, wait: () => Promise<void>) {
   const mcp = new McpServer({ name: "dragons-m50-http-fixture", version: "1.0.0" });
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: mode === "sessionful" ? () => "m50-http-session" : undefined,
@@ -104,7 +97,7 @@ async function createHttpFixture(mode: FixtureMode): Promise<HttpFixture> {
     },
     async ({ nested }) => {
       if (mode === "wait") {
-        await new Promise<void>((resolve) => { releaseWait = resolve; });
+        await wait();
       }
       const text = mode === "large-result" ? "x".repeat(1_000)
         : mode === "secret-result" ? `remote Authorization: Bearer ${HTTP_M50_TEST_SECRET}`
@@ -114,7 +107,20 @@ async function createHttpFixture(mode: FixtureMode): Promise<HttpFixture> {
     },
   );
   await mcp.connect(transport);
+  return { mcp, transport };
+}
 
+async function createHttpFixture(mode: FixtureMode): Promise<HttpFixture> {
+  let releaseWait = (): void => undefined;
+  let requestStarted = (): void => undefined;
+  let requestClosed = (): void => undefined;
+  let sessionTerminated = (): void => undefined;
+  const requestStartedPromise = new Promise<void>((resolve) => { requestStarted = resolve; });
+  const requestClosedPromise = new Promise<void>((resolve) => { requestClosed = resolve; });
+  const sessionTerminatedPromise = new Promise<void>((resolve) => { sessionTerminated = resolve; });
+  const wait = () => new Promise<void>((resolve) => { releaseWait = resolve; });
+  const session = mode === "sessionful" ? await createHttpConnection(mode, wait) : undefined;
+  const active = new Set<McpServer>(session ? [session.mcp] : []);
   const nodeServer = createServer(async (request, response) => {
     try {
       if (mode === "stall-connect") {
@@ -147,7 +153,17 @@ async function createHttpFixture(mode: FixtureMode): Promise<HttpFixture> {
         response.end();
         return;
       }
-      await writeResponse(await transport.handleRequest(await toRequest(request)), response);
+      // Stateless connections cannot be shared between HTTP requests in SDK 2.3.
+      const connection = session ?? await createHttpConnection(mode, wait);
+      active.add(connection.mcp);
+      try {
+        await writeResponse(await connection.transport.handleRequest(await toRequest(request)), response);
+      } finally {
+        if (!session) {
+          await connection.mcp.close();
+          active.delete(connection.mcp);
+        }
+      }
     } catch {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: "fixture failure" }));
@@ -156,13 +172,13 @@ async function createHttpFixture(mode: FixtureMode): Promise<HttpFixture> {
   const port = await listen(nodeServer);
   return {
     url: `http://127.0.0.1:${port}/mcp`,
-    releaseWait,
+    releaseWait: () => releaseWait(),
     waitForRequestStart: () => requestStartedPromise,
     waitForRequestClose: () => requestClosedPromise,
     waitForSessionTermination: () => sessionTerminatedPromise,
     async close() {
       releaseWait();
-      await Promise.allSettled([transport.close(), mcp.close()]);
+      await Promise.allSettled([...active].map((mcp) => mcp.close()));
       await new Promise<void>((resolve, reject) => nodeServer.close((error) => error ? reject(error) : resolve()));
     },
   };

@@ -163,7 +163,8 @@ with tempfile.TemporaryDirectory(prefix="dragons-m72-pty-") as directory:
         assert "clipboard-fixture" not in p.raw
         checks.append("untrusted terminal output sanitized")
         p.send("wait\r")
-        p.wait(lambda: "RUNNING" in p.screen, "pending run")
+        # RUNNING includes runtime admission, before the provider receives its signal.
+        p.wait(lambda: "RUNNING" in p.screen and (root / "wait-started.txt").exists(), "provider entered")
         p.send("\x03")
         p.wait(lambda: "READY" in p.screen and (root / "cancelled.txt").exists(), "cancel")
         checks.append("Ctrl+C cancels actual provider fixture")

@@ -8,13 +8,55 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    name: ${{ matrix.os }}
+  terminal:
+    name: CLI-TUI / ${{ matrix.os }} / ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+            arch: x64
+          - os: macos-15
+            platform: darwin
+            arch: arm64
+          - os: windows-2022
+            platform: win32
+            arch: x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Record and verify platform
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: >-
+          node -e "const assert = require('node:assert/strict'); console.log(JSON.stringify({commit: process.env.GITHUB_SHA, platform: process.platform, arch: process.arch, node: process.version, runner: process.env.ImageOS, imageVersion: process.env.ImageVersion})); assert.equal(process.platform, process.env.EXPECTED_PLATFORM); assert.equal(process.arch, process.env.EXPECTED_ARCH);"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:terminal
+      - name: Verify isolated POSIX TUI terminal lifecycle
+        if: runner.os != 'Windows'
+        run: python3 scripts/verify-tui-pty.py
+      - run: pnpm typecheck
+      - name: Verify installed Node package in an isolated profile
+        run: pnpm verify:package
+
+  desktop:
+    name: Desktop-Web regression / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -32,9 +74,7 @@ jobs:
           sandbox="$(node -p "require('node:path').join(require('node:path').dirname(require.resolve('electron/package.json')), 'dist/chrome-sandbox')")"
           sudo chown root:root "$sandbox"
           sudo chmod 4755 "$sandbox"
-          xvfb-run -a pnpm test
+          xvfb-run -a pnpm test:desktop
       - name: Test
         if: runner.os != 'Linux'
-        run: pnpm test
-      - run: pnpm typecheck
-      - run: pnpm build
+        run: pnpm test:desktop

@@ -11,6 +11,7 @@ import {
 import { observeRuntimeRun } from "../runtime-observation.js";
 import { formatProviderList, slashChoices } from "../slash-choices.js";
 import { formatSlashHelp } from "../slash-commands.js";
+import { isCheckpointCommand } from "../checkpoint.js";
 import type { TuiLocalCommands } from "./local-commands.js";
 
 export type TuiState = {
@@ -50,7 +51,7 @@ export class TuiController {
   constructor(private readonly runtime: DragonsRuntime, private readonly onChange: () => void = () => {}, private readonly localCommands?: TuiLocalCommands) {}
 
   choices(input: string) {
-    return slashChoices(input, ["/help", "/status", "/new", "/resume", "/clear", "/exit", "/provider", "/model", "/context", "/diagnostics", "/mcp", "/tasks", ...(this.localCommands?.names ?? [])], this.runtime.providers(), this.state.session?.provider, this.state.session?.model);
+    return slashChoices(input, ["/help", "/status", "/new", "/resume", "/clear", "/exit", "/provider", "/model", "/context", "/diagnostics", "/mcp", "/tasks", "/checkpoint", "/rollback", ...(this.localCommands?.names ?? [])], this.runtime.providers(), this.state.session?.provider, this.state.session?.model);
   }
 
   async initialize(options: { resume?: string; provider?: string; model?: string } = {}): Promise<void> {
@@ -83,7 +84,7 @@ export class TuiController {
     this.attachObservation();
     if (this.closed || this.exitRequested || this.state.busy || !content.trim()) return;
     const command = content.trim();
-    if (command.startsWith("/")) {
+    if (command.startsWith("/") && !isCheckpointCommand(command)) {
       const [name, ...args] = command.split(/\s+/);
       if (this.localCommands?.names.includes(name!) || ["/provider", "/model", "/context", "/diagnostics", "/tasks", "/mcp"].includes(name!)) {
         await this.localOperation(async (signal) => {
@@ -104,7 +105,7 @@ export class TuiController {
                 : `Model: ${this.state.session?.model ?? "none"}`);
             } else {
               const session = await this.runtime.createSession(name === "/provider" ? { provider: args[0] } : { provider: this.state.session?.provider, model: args[0] });
-              if (this.closed) return;
+              if (signal.aborted) return;
               this.state.session = session;
               this.state.messages = []; this.state.activity = []; this.state.background = [];
               this.state.status = undefined; this.state.approval = undefined; this.submission = undefined;
@@ -147,38 +148,28 @@ export class TuiController {
       } else if (name === "/resume" && args.length !== 1) {
         this.message("notice", "Usage: /resume <id>");
       } else if (command === "/help" || command.startsWith("/help ")) {
-        this.message("notice", formatSlashHelp(command.slice(5), ["/help", "/status", "/new", "/resume", "/clear", "/exit", "/provider", "/model", "/context", "/diagnostics", "/mcp", "/tasks", ...(this.localCommands?.names ?? [])]));
+        this.message("notice", formatSlashHelp(command.slice(5), ["/help", "/status", "/new", "/resume", "/clear", "/exit", "/provider", "/model", "/context", "/diagnostics", "/mcp", "/tasks", "/checkpoint", "/rollback", ...(this.localCommands?.names ?? [])]));
       } else if (command === "/new" || command === "/reset" || command.startsWith("/resume ")) {
         const previous = this.state.session;
-        this.state.busy = true;
-        this.state.error = undefined;
-        this.refreshVersion += 1;
-        this.pending = Promise.resolve().then(async () => {
-          try {
-            if (this.closed) return;
-            const session = command.startsWith("/resume ")
-              ? await this.runtime.resumeSession(command.slice(8).trim())
-              : await this.runtime.createSession({ provider: previous?.provider, model: previous?.model });
-            if (this.closed) return;
-            this.state.session = session;
-            this.state.messages = [];
-            this.state.activity = [];
-            this.state.background = [];
-            this.state.status = undefined;
-            this.state.approval = undefined;
-            this.submission = undefined;
-            this.message("notice", command.startsWith("/resume ")
-              ? "Session resumed. The prior transcript is not available through the runtime API."
-              : "New session started.");
-            await this.refresh();
-          } catch {
-            if (!this.closed) this.state.error = "Unable to change session. Check the session ID, workspace, provider, and model.";
-          } finally {
-            if (!this.closed) { this.state.busy = false; this.attachObservation(); this.changed(); }
-          }
-        });
-        this.changed();
-        await this.pending;
+        await this.localOperation(async (signal) => {
+          const session = command.startsWith("/resume ")
+            ? await this.runtime.resumeSession(command.slice(8).trim())
+            : await this.runtime.createSession({ provider: previous?.provider, model: previous?.model });
+          // Facade admission may finish after cancellation; never adopt its late result.
+          if (signal.aborted) return;
+          this.state.session = session;
+          this.state.messages = [];
+          this.state.activity = [];
+          this.state.background = [];
+          this.state.status = undefined;
+          this.state.approval = undefined;
+          this.submission = undefined;
+          this.message("notice", command.startsWith("/resume ")
+            ? "Session resumed. The prior transcript is not available through the runtime API."
+            : "New session started.");
+          await this.refresh();
+        }, "Unable to change session. Check the session ID, workspace, provider, and model.");
+        this.attachObservation();
       } else if (command === "/status" || command === "/session") {
         await this.localOperation(() => this.refresh());
         if (this.closed) return;
@@ -290,7 +281,7 @@ export class TuiController {
     return this.closing;
   }
 
-  private async localOperation(operation: (signal: AbortSignal) => Promise<void>): Promise<void> {
+  private async localOperation(operation: (signal: AbortSignal) => Promise<void>, failureMessage = "Unable to complete local command. Check arguments and configuration."): Promise<void> {
     const controller = new AbortController();
     this.localController = controller;
     const signal = AbortSignal.any([this.lifecycle.signal, controller.signal]);
@@ -299,7 +290,7 @@ export class TuiController {
     this.refreshVersion += 1;
     this.pending = Promise.resolve().then(async () => {
       try { if (!signal.aborted) await operation(signal); }
-      catch { if (!signal.aborted) this.state.error = "Unable to complete local command. Check arguments and configuration."; }
+      catch { if (!signal.aborted) this.state.error = failureMessage; }
       finally {
         this.localController = undefined;
         if (!this.closed) { this.state.busy = false; this.changed(); }

@@ -70,6 +70,10 @@ Attach context with `@file(src/index.ts)`, `@folder(src)`, or `@diff`. URL conte
 
 The CLI and Desktop also support optional MCP integrations, skills, background tasks, workspace Kanban, and read-only scheduled work. Start with [advanced usage](docs/advanced-usage.md) for configuration and limitations.
 
+In the interactive CLI and TUI, use `/skills list`, `/skills show <id>`, `/skills activate <id>`, and `/skills deactivate <id>` to manage advisory session instructions. Skills do not grant tool permissions. `/checkpoint list`, `/checkpoint diff <id>`, and `/rollback <id>` use the existing runtime; rollback still requires WRITE approval. Checkpoints do not recover shell or MCP side effects or survive a restart.
+
+Worktree switching is available in the plain interactive CLI, not inside a TUI session. Create/select the worktree with the CLI, then start `dragons --tui` from the target directory.
+
 ## Desktop and source checkout
 
 Requires Node.js 22+ and pnpm 11.17.0:
@@ -84,6 +88,14 @@ pnpm dragons --tui  # optional full-screen client
 ```
 
 These commands build the current checkout before launching. Desktop packages are not published as signed installers. See [Contributing](CONTRIBUTING.md) for test and build commands.
+
+### Current delivery scope
+
+The next delivery targets the Node.js CLI and existing optional TUI on **macOS arm64, Windows x64, and Ubuntu LTS/glibc x64**. Desktop/Web development and additional architectures follow later; no new TUI framework is required.
+
+GitHub Actions separates CLI/TUI and shared-runtime tests (`pnpm test:terminal`) from Desktop/Web regressions (`pnpm test:desktop`). `pnpm test` still runs the full suite, and build/typecheck remain global. The terminal job verifies the runner OS/architecture, installed package, and POSIX PTY lifecycle where supported. Windows ConPTY, live providers, and native credential stores require separate evidence.
+
+The [delivery acceptance record](docs/terminal-delivery-scope.md) identifies the isolated candidate and its successful three-platform CI run at `458b73ad64bdc13791ce9dd9918d7a176e73336e`: terminal tests, global typecheck, and isolated installed-package checks passed on all three targets; POSIX PTY checks passed on macOS and Ubuntu. This is CI/fixture acceptance, not live-provider, Windows ConPTY, or production-release acceptance. Earlier [coding](docs/terminal-coding-acceptance.md) and [extension](docs/terminal-extension-acceptance.md) results describe a larger local working tree, not this candidate. Current platform requirements and historical results are in the [platform test plan](docs/platform-test-plan.md).
 
 ## Permissions and privacy
 
