@@ -2,7 +2,7 @@
 
 ## CT05 ayrı aday — 2026-10-26
 
-`ci/terminal-ct05` dalının seçilmiş 24 yolluk kapsamı, güvenlik bağımlılık düzeltmesi ve kaynak kimliği [aday kabul kaydındadır](terminal-delivery-scope.md). Bu adayda son `pnpm release:check` **1520 toplam / 1514 başarılı / 0 hata / 6 skip**, typecheck/build/kurulu paket PASS; izole Mac PTY **10/10 + shared 10/10**, production audit temiz. Aşağıdaki daha büyük dirty ağaç kayıtları tarihsel kalır; yeni adayın sonucu yerine geçmez. Üç hedefin aynı commit uzak sonucu henüz bekleniyor; main merge/yayın yapılmaz.
+`ci/terminal-ct05` dalının kapsamı, güvenlik bağımlılık düzeltmesi ve kaynak kimliği [aday kabul kaydındadır](terminal-delivery-scope.md). İlk 24 yola Windows paket lisansı CRLF doğrulama onarımı ve regresyon dosyası eklendi: toplam **26 yol**. Son `pnpm release:check` **1523 toplam / 1517 başarılı / 0 hata / 6 skip**, typecheck/build/kurulu paket PASS; izole Mac PTY **10/10 + shared 10/10**, production audit temiz. İlk CI'da macOS/Ubuntu terminal işleri ve üç Desktop işi geçti; Windows yalnız paket lisans kontrolünde durdu. Düzeltme sonrası aynı commit üç hedef uzak kabulü bekleniyor; önceki daha büyük dirty ağaç kayıtları tarihsel kalır. Main merge/yayın yapılmaz.
 
 ## Takvim ve kaynak sınırı
 

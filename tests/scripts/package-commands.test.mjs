@@ -7,10 +7,29 @@ import { promisify } from "node:util";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { pnpmInvocation } from "../../scripts/release-check.mjs";
-import { command, commandWithInput, isolatedPackageEnvironment } from "../../scripts/verify-package.mjs";
+import { assertPackagedLicense, command, commandWithInput, isolatedPackageEnvironment } from "../../scripts/verify-package.mjs";
 
 const exec = promisify(execFile);
 const releaseCheck = fileURLToPath(new URL("../../scripts/release-check.mjs", import.meta.url));
+
+for (const [name, eol] of [["LF", "\n"], ["CRLF", "\r\n"]]) {
+  test(`packaged license accepts the authorized copyright with ${name} line endings`, async () => {
+    const license = await readFile(new URL("../../LICENSE", import.meta.url), "utf8");
+    assert.doesNotThrow(() => assertPackagedLicense(license.replace(/\r?\n/g, eol)));
+  });
+}
+
+test("packaged license still rejects wrong licensing, ownership, placeholders and malformed line endings", async () => {
+  const license = (await readFile(new URL("../../LICENSE", import.meta.url), "utf8")).replace(/\r?\n/g, "\n");
+  for (const invalid of [
+    license.replace("MIT License", "Other License"),
+    license.replace('Furkan "NaxoziwuS" Aykaç', "Other Holder"),
+    license + "[INSERT COPYRIGHT HOLDER]\n",
+    license.replace(/\n/g, "\r"),
+  ]) {
+    assert.throws(() => assertPackagedLicense(invalid), { code: "ERR_ASSERTION" });
+  }
+});
 
 async function fixture(run) {
   const directory = await mkdtemp(join(tmpdir(), "dragons-cmd & spaces-"));

@@ -2,17 +2,21 @@
 
 ## Ayrı aday — 2026-10-26
 
-Kullanıcı ayrı aday doğrulaması, ayrı dal commit/push ve CI takibini onayladı. Dal: `ci/terminal-ct05`; taban: `470aa97313db3dcbaa68e8f5c1deae53e02cbc4c`. Main merge, tag, sürüm değişikliği veya yayın yok. Ayrı worktree yalnız aşağıdaki 24 yolu içerir; asıl karma çalışma ağacı korunur. Aşağıdaki ilk kapsam incelemesi ve CT03/CT04 belgeleri tarihsel kayıttır, aday sonucu değildir.
+Kullanıcı ayrı aday doğrulaması, ayrı dal commit/push ve CI takibini onayladı. Dal: `ci/terminal-ct05`; taban: `470aa97313db3dcbaa68e8f5c1deae53e02cbc4c`. Main merge, tag, sürüm değişikliği veya yayın yok. İlk aday 24 yol; aşağıda açıklanan Windows paket kapısı onarımıyla toplam **26 yol**. Asıl karma çalışma ağacı korunur. Aşağıdaki ilk kapsam incelemesi ve CT03/CT04 belgeleri tarihsel kayıttır, aday sonucu değildir.
 
 Seçilmiş manifest ile lockfile yeniden üretildi. İlk güncel `pnpm audit --prod` dört açık bildirdi: Zod `GHSA-mrhx-c7xc-m3w5`; Undici `GHSA-xjj6-f33q-929c`, `GHSA-4qv8-2p9j-2685`, `GHSA-f72v-6w45-q472`. Yalnız bu geçişli paketler mevcut sürüm aralıkları içinde paket yöneticisiyle güncellendi: **zod 4.6.7, undici 7.30.1** (aynı seçimin tooling dalı: **undici 6.29.1**). MCP client/server/core **2.3.0**; OpenAI **7.9.0** ve diğer doğrudan bağımlılıklar değişmedi. Ertelenen canvas/PDF/XML/ZIP bağımlılıkları taşınmadı.
 
-Son maddi kaynak: macOS arm64, Node **v22.22.3**, pnpm **11.17.0**. Markdown hariç 444 kaynak/config/test yolunun `path + NUL + SHA256(bytes) + LF` sıralı kayıtları için SHA-256: `0252f9f9bd51a76b6e487cd6fcb84c7d6d75e17e1b7281976f849436d0d91820`. Yol kümesi tabanın tracked Markdown-dışı dosyaları ve bu kapsamdaki yeni test dosyalarıdır; generated/build çıktıları dahil değildir. Bu digest commit SHA değildir; sonraki yalnız-belge değişikliği test edilen kaynakla karşılaştırılabilir.
+İlk uzak koşu: [`cdde56059afd1f4a1aa340d3369c4ff6eb08f453` / 40286247011](https://github.com/frknaykc/dragons-agent/actions/runs/40286247011), **FAIL**. Üç terminal test kümesi **1144 PASS / 0 FAIL / 4 skip**; üç global typecheck PASS; macOS/Ubuntu kurulu paket ve PTY PASS. Windows kurulu paket adımı `LICENSE` CRLF satır sonlarını LF-only regex ile reddetti. Desktop/Web üç işi PASS. Bu koşu üç hedef teslimat kabulü değildir.
+
+Bu somut platform kusuru için iki yeni aday yolu: `scripts/verify-package.mjs` ve `tests/scripts/package-commands.test.mjs`. Yalnız lisans doğrulama yardımcı fonksiyonu ve LF/CRLF/yanlış içerik regresyonları eklendi; ana ağaçtaki ertelenmiş exports değişikliği alınmadı. Gerçek LICENSE/copyright değişmedi, yanlış lisans/holder/placeholder reddi korundu. Regresyon önce CRLF için **6 PASS / 1 FAIL**, düzeltme sonrası **7/7 PASS**. Yeni kaynağın Windows paket sonucu yeniden CI ile ölçülecek.
+
+Son maddi kaynak: macOS arm64, Node **v22.22.3**, pnpm **11.17.0**. Markdown hariç 444 kaynak/config/test yolunun `path + NUL + SHA256(bytes) + LF` sıralı kayıtları için SHA-256: `f8d2c6bf804a91a51618274a77ddd851b15e601bbeebd398ba91038707224a32`. Yol kümesi tabanın tracked Markdown-dışı dosyaları ve bu kapsamdaki yeni test dosyalarıdır; generated/build çıktıları dahil değildir. Bu digest commit SHA değildir; sonraki yalnız-belge değişikliği test edilen kaynakla karşılaştırılabilir.
 
 | Aday kontrolü | Sonuç |
 |---|---|
 | Frozen install | PASS |
 | Composition/controller/skills, MCP ve suite-runner odakları | **79/79**, exit 0 (son transitive güvenlik güncellemesinden önce; aşağıdaki tam gate bu testleri son kaynakta yeniden kapsar) |
-| Son kaynak `pnpm release:check` | **1520 toplam / 1514 başarılı / 0 hata / 6 skip**, exit 0; global typecheck/build ve `PACKAGE_ACCEPTANCE_OK`, `RELEASE_CHECK_OK` |
+| Son kaynak `pnpm release:check` | **1523 toplam / 1517 başarılı / 0 hata / 6 skip**, exit 0; global typecheck/build ve `PACKAGE_ACCEPTANCE_OK`, `RELEASE_CHECK_OK` |
 | İzole yerel POSIX PTY / shared-runtime PTY | **10/10 + 10/10**, exit 0; fixture provider, canlı inference değil |
 | `pnpm audit --prod` | **Bilinen açık yok**, exit 0 |
 

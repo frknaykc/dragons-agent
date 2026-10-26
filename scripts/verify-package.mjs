@@ -11,6 +11,11 @@ import { pnpmInvocation } from "./release-check.mjs";
 const run = promisify(execFile);
 const root = fileURLToPath(new URL("..", import.meta.url));
 
+export function assertPackagedLicense(packagedLicense) {
+  assert.match(packagedLicense, /^MIT License\r?\n\r?\nCopyright \(c\) 2026 Furkan "NaxoziwuS" Aykaç\r?\n/);
+  assert.equal(packagedLicense.includes("[INSERT COPYRIGHT HOLDER]"), false, "packaged license must not retain a copyright placeholder");
+}
+
 export async function command(command_, args, cwd, env = process.env) {
   const { stdout, stderr } = await run(command_, args, { cwd, env: { ...env, NO_UPDATE_NOTIFIER: "1" } });
   return `${stdout}${stderr}`;
@@ -91,8 +96,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   assert.equal(packagedManifest.license, "MIT");
   assert.equal(packagedManifest.types, "./dist/runtime.d.ts");
   assert.deepEqual(packagedManifest.exports, { ".": "./dist/runtime.js", "./runtime": "./dist/runtime.js", "./plugins": "./dist/plugins.js", "./lifecycle-hooks": "./dist/lifecycle-hooks.js", "./plugin-catalog": "./dist/plugin-catalog.js", "./skill-hub": "./dist/skill-hub.js", "./skill-management": "./dist/skill-management.js", "./skill-curator": "./dist/skill-curator.js", "./external-memory": "./dist/external-memory.js", "./cron-schedule": "./dist/cron-schedule.js", "./cron-scheduler": "./dist/cron-scheduler.js", "./cron-store": "./dist/cron-store.js", "./cron-runner": "./dist/cron-runner.js", "./session-loop": "./dist/session-loop.js", "./session-loop-runtime": "./dist/session-loop-runtime.js", "./persistent-goals": "./dist/persistent-goals.js", "./persistent-goal-store": "./dist/persistent-goal-store.js", "./persistent-goals-runtime": "./dist/persistent-goals-runtime.js", "./kanban": "./dist/kanban.js", "./kanban-worker": "./dist/kanban-worker.js", "./kanban-worker-process": "./dist/kanban-worker-process.js", "./kanban-worker-lane": "./dist/kanban-worker-lane.js", "./mixture-of-agents": "./dist/mixture-of-agents.js", "./batch-queue": "./dist/batch-queue.js", "./batch-runner": "./dist/batch-runner.js", "./profiles": "./dist/profiles.js", "./skills": "./dist/skills.js", "./remote/client": "./dist/remote/client.js", "./remote/server": "./dist/remote/server.js", "./remote/runtime": "./dist/remote/runtime.js", "./shared-runtime": "./dist/shared-runtime.js" });
-  assert.match(packagedLicense, /^MIT License\n\nCopyright \(c\) 2026 Furkan "NaxoziwuS" Aykaç\n/);
-  assert.equal(packagedLicense.includes("[INSERT COPYRIGHT HOLDER]"), false, "packaged license must not retain a copyright placeholder");
+  assertPackagedLicense(packagedLicense);
 
   const install = join(directory, "install");
   await mkdir(install, { recursive: true });
