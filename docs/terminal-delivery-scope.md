@@ -8,7 +8,7 @@ Seçilmiş manifest ile lockfile yeniden üretildi. İlk güncel `pnpm audit --p
 
 İlk uzak koşu: [`cdde56059afd1f4a1aa340d3369c4ff6eb08f453` / 40286247011](https://github.com/frknaykc/dragons-agent/actions/runs/40286247011), **FAIL**. Üç terminal test kümesi **1144 PASS / 0 FAIL / 4 skip**; üç global typecheck PASS; macOS/Ubuntu kurulu paket ve PTY PASS. Windows kurulu paket adımı `LICENSE` CRLF satır sonlarını LF-only regex ile reddetti. Desktop/Web üç işi PASS. Bu koşu üç hedef teslimat kabulü değildir.
 
-Bu somut platform kusuru için iki yeni aday yolu: `scripts/verify-package.mjs` ve `tests/scripts/package-commands.test.mjs`. Yalnız lisans doğrulama yardımcı fonksiyonu ve LF/CRLF/yanlış içerik regresyonları eklendi; ana ağaçtaki ertelenmiş exports değişikliği alınmadı. Gerçek LICENSE/copyright değişmedi, yanlış lisans/holder/placeholder reddi korundu. Regresyon önce CRLF için **6 PASS / 1 FAIL**, düzeltme sonrası **7/7 PASS**. Yeni kaynağın Windows paket sonucu yeniden CI ile ölçülecek.
+Bu somut platform kusuru için iki yeni aday yolu: `scripts/verify-package.mjs` ve `tests/scripts/package-commands.test.mjs`. Yalnız lisans doğrulama yardımcı fonksiyonu ve LF/CRLF/yanlış içerik regresyonları eklendi; ana ağaçtaki ertelenmiş exports değişikliği alınmadı. Gerçek LICENSE/copyright değişmedi, yanlış lisans/holder/placeholder reddi korundu. Regresyon önce CRLF için **6 PASS / 1 FAIL**, düzeltme sonrası **7/7 PASS**. Aşağıdaki yeni CI'da Windows kurulu paket kontrolü de PASS.
 
 Son maddi kaynak: macOS arm64, Node **v22.22.3**, pnpm **11.17.0**. Markdown hariç 444 kaynak/config/test yolunun `path + NUL + SHA256(bytes) + LF` sıralı kayıtları için SHA-256: `f8d2c6bf804a91a51618274a77ddd851b15e601bbeebd398ba91038707224a32`. Yol kümesi tabanın tracked Markdown-dışı dosyaları ve bu kapsamdaki yeni test dosyalarıdır; generated/build çıktıları dahil değildir. Bu digest commit SHA değildir; sonraki yalnız-belge değişikliği test edilen kaynakla karşılaştırılabilir.
 
@@ -20,7 +20,25 @@ Son maddi kaynak: macOS arm64, Node **v22.22.3**, pnpm **11.17.0**. Markdown har
 | İzole yerel POSIX PTY / shared-runtime PTY | **10/10 + 10/10**, exit 0; fixture provider, canlı inference değil |
 | `pnpm audit --prod` | **Bilinen açık yok**, exit 0 |
 
-Mac atlamaları: desteklenmeyen checkpoint platformu senaryosu, üç Windows checkpoint senaryosu ve iki Linux AppImage worker senaryosu. Atlamalar native kabul sayılmaz. Eski geniş dirty ağacın Web Dashboard hatası bu adayda taşınmadı veya düzeltilmiş sayılmadı; tabandaki mevcut Desktop/Web testleri tam gate içinde korundu. **Üç hedef aynı-commit CI sonucu henüz bekleniyor.** Windows ConPTY, gerçek Windows/Linux kullanıcı terminali, canlı provider, OS credential store ve üretim yayını bu kanıtın dışında.
+Mac atlamaları: desteklenmeyen checkpoint platformu senaryosu, üç Windows checkpoint senaryosu ve iki Linux AppImage worker senaryosu. Atlamalar native kabul sayılmaz. Eski geniş dirty ağacın Web Dashboard hatası bu adayda taşınmadı veya düzeltilmiş sayılmadı; tabandaki mevcut Desktop/Web testleri tam gate içinde korundu.
+
+## Aynı commit üç hedef kabulü — 2026-10-26
+
+**CT02/CT03/CT05, yalnız tanımlanan CI/fixture kapsamıyla PASS.** Kaynak commit: `458b73ad64bdc13791ce9dd9918d7a176e73336e`; [GitHub Actions 40287586759](https://github.com/frknaykc/dragons-agent/actions/runs/40287586759), altı işin tamamı PASS. Koşu SHA'sı yerel ve uzak dal SHA'sıyla eşleştirildi. Aşağıdaki sayılar iş loglarındandır; test dosyasını okumaya veya eski dirty ağaç sonuçlarına dayanmaz.
+
+| Terminal hedefi | Runner / Node | Testler (toplam / PASS / FAIL / skip) | Frozen install / global typecheck / kurulu paket | PTY |
+|---|---|---|---|---|
+| macOS arm64 | `macos-15`, `darwin/arm64`, `v22.23.2` | **1151 / 1147 / 0 / 4** | PASS / PASS / PASS | POSIX fixture 10/10 |
+| Windows x64 | `windows-2022`, `win32/x64`, `v22.23.4` | **1151 / 1147 / 0 / 4** | PASS / PASS / PASS | Çalıştırılmadı; POSIX adımı koşullu skip |
+| Ubuntu LTS x64 | `ubuntu-24.04`, `linux/x64`, `v22.23.3` | **1151 / 1147 / 0 / 4** | PASS / PASS / PASS | POSIX fixture 10/10 |
+
+- Her terminal işinde OS/arch doğrulaması ve `PACKAGE_ACCEPTANCE_OK dragons-agent-0.1.0.tgz` var. Test kümesi gerçek CLI/TUI composition, fixture provider ile stream/onay-ret/iptal/persisted resume ve seçilmiş extension yollarını kapsıyor; canlı inference değil.
+- macOS/Ubuntu terminal skip'leri: desteklenmeyen checkpoint platformu ve üç Windows checkpoint testi. Windows terminal skip'leri: desteklenmeyen checkpoint platformu ve üç home-less senaryosu (Windows native home çözümlemesi). Windows checkpoint testleri Windows'ta çalıştı.
+- Ayrı Desktop/Web işi: macOS **372 / 370 / 0 / 2**, Ubuntu **372 / 369 / 0 / 3**, Windows **374 / 335 / 0 / 39** (toplam / PASS / FAIL / skip). Platform koşullu native testler atlanır; bu sonuç ertelenen yeni Desktop/Web farklarına veya native üretim dağıtımına kabul vermez. Hiçbir iş `continue-on-error` ile gizlenmedi.
+- Ana çalışma ağacında başlangıç envanterinin **147 dosya hash'i** korundu; ROADMAP'ın önceki kapsam notu dışında değişiklik yok. `main` HEAD/index ve `AGENTS.md` korunur. Adayda yalnız tanımlı 26 yol; hariç bırakılan önceki farklar taşınmadı.
+- Kabul kaydı güncellemesi yalnız Markdown'dır; yukarıdaki 444-yol kaynak digest'i değişmedi. Bu kayıt kaynak commit'in kanıtıdır, ilerideki değişiklikler için otomatik kabul değildir.
+
+**Açık sınırlar:** Windows ConPTY ve gerçek kullanıcı terminali, canlı provider/ücretli inference, OS credential store, diğer mimari/distro, imzalı üretim dağıtımı/yayın bu kanıtın dışında. CT01'in izin gerektiren `AGENTS.md` yazımı ve CT06 Desktop/Web işleri açık kalır. Main merge, tag veya yayın yapılmadı.
 
 ## İlk kapsam incelemesi — 2026-10-26 (tarihsel)
 

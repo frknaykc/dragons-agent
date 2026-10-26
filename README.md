@@ -95,7 +95,7 @@ The next delivery targets the Node.js CLI and existing optional TUI on **macOS a
 
 GitHub Actions separates CLI/TUI and shared-runtime tests (`pnpm test:terminal`) from Desktop/Web regressions (`pnpm test:desktop`). `pnpm test` still runs the full suite, and build/typecheck remain global. The terminal job verifies the runner OS/architecture, installed package, and POSIX PTY lifecycle where supported. Windows ConPTY, live providers, and native credential stores require separate evidence.
 
-The [delivery scope](docs/terminal-delivery-scope.md) identifies the isolated candidate. Earlier [coding](docs/terminal-coding-acceptance.md) and [extension](docs/terminal-extension-acceptance.md) results describe a larger local working tree, **not acceptance of this candidate**. Current platform requirements and historical results are in the [platform test plan](docs/platform-test-plan.md).
+The [delivery acceptance record](docs/terminal-delivery-scope.md) identifies the isolated candidate and its successful three-platform CI run at `458b73ad64bdc13791ce9dd9918d7a176e73336e`: terminal tests, global typecheck, and isolated installed-package checks passed on all three targets; POSIX PTY checks passed on macOS and Ubuntu. This is CI/fixture acceptance, not live-provider, Windows ConPTY, or production-release acceptance. Earlier [coding](docs/terminal-coding-acceptance.md) and [extension](docs/terminal-extension-acceptance.md) results describe a larger local working tree, not this candidate. Current platform requirements and historical results are in the [platform test plan](docs/platform-test-plan.md).
 
 ## Permissions and privacy
 

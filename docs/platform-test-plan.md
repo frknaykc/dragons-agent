@@ -2,7 +2,9 @@
 
 ## CT05 ayrı aday — 2026-10-26
 
-`ci/terminal-ct05` dalının kapsamı, güvenlik bağımlılık düzeltmesi ve kaynak kimliği [aday kabul kaydındadır](terminal-delivery-scope.md). İlk 24 yola Windows paket lisansı CRLF doğrulama onarımı ve regresyon dosyası eklendi: toplam **26 yol**. Son `pnpm release:check` **1523 toplam / 1517 başarılı / 0 hata / 6 skip**, typecheck/build/kurulu paket PASS; izole Mac PTY **10/10 + shared 10/10**, production audit temiz. İlk CI'da macOS/Ubuntu terminal işleri ve üç Desktop işi geçti; Windows yalnız paket lisans kontrolünde durdu. Düzeltme sonrası aynı commit üç hedef uzak kabulü bekleniyor; önceki daha büyük dirty ağaç kayıtları tarihsel kalır. Main merge/yayın yapılmaz.
+`ci/terminal-ct05` dalının kapsamı, güvenlik bağımlılık düzeltmesi ve kaynak kimliği [aday kabul kaydındadır](terminal-delivery-scope.md). İlk 24 yola Windows paket lisansı CRLF doğrulama onarımı ve regresyon dosyası eklendi: toplam **26 yol**. Son `pnpm release:check` **1523 toplam / 1517 başarılı / 0 hata / 6 skip**, typecheck/build/kurulu paket PASS; izole Mac PTY **10/10 + shared 10/10**, production audit temiz.
+
+**Aynı kaynak commit üç hedef CI kabulü PASS:** `458b73ad64bdc13791ce9dd9918d7a176e73336e`, [koşu 40287586759](https://github.com/frknaykc/dragons-agent/actions/runs/40287586759). macOS arm64, Windows x64 ve Ubuntu 24.04 x64 terminal işlerinin her biri **1147 PASS / 0 FAIL / 4 skip**; frozen install/global typecheck/kurulu paket PASS. macOS/Ubuntu POSIX PTY **10/10**, Windows'ta PTY koşullu skip. Ayrı Desktop/Web üç işi PASS; platforma göre sayılar ve atlamalar kabul kaydında. İlk koşunun Windows CRLF hatası bu kaynakta giderildi. Windows ConPTY, gerçek kullanıcı terminali, canlı provider/native store ve üretim yayını kabul edilmedi. Önceki daha büyük dirty ağaç kayıtları tarihsel kalır; main merge/yayın yok.
 
 ## Takvim ve kaynak sınırı
 
