@@ -23,7 +23,9 @@ Bu dosya ileriye dönük iş ve kabul takibidir; mevcut davranışın kanıtı k
   - RED kanıtı: otomatik review fsmonitor/clean/process ve 16→8 kapasite için 4 beklenen hata. Odaklı ve son `release:check` logları yerel doğrulama dizininde `dragons-review-integration-focused.log` ve `dragons-review-release-check-final.log`; son kaynak için nihai kanıt `dragons-review-release-final-v2.log`; scoped geliştirme kabulü tamamlandı, yayın/platform kapıları açık.
   - Bu kayıt 1.1–1.5 veya M78 için yeni kabul/yayın iddiası taşımaz. `AGENTS.md` güncel dizinler, komutlar ve güvenlik/yaşam döngüsü sınırlarıyla eşlendi.
 
-## Arayüz kararı: CLI ve Desktop öncelikli
+## Tarihsel arayüz kararı: CLI ve Desktop öncelikli
+
+Bu bölümün geliştirme önceliği aşağıdaki 2026-10-23 CLI/TUI kararıyla değiştirilmiştir; kaynak ve güvenlik sınırları korunur.
 
 - Şimdilik aktif ürün ve yeni özellik geliştirme yüzeyleri **CLI ve Desktop** olacaktır. Plain CLI ve non-TTY davranışı korunacaktır.
 - Hazır bir tam ekran TUI framework'ü ürünün veya runtime'ın zorunlu bağımlılığı olarak gömülmeyecektir. Şu aşamada yeni TUI framework'ü seçilmeyecektir.
@@ -32,6 +34,17 @@ Bu dosya ileriye dönük iş ve kabul takibidir; mevcut davranışın kanıtı k
 - CLI ve Desktop ortak, UI'dan bağımsız komut/metadata/event sözleşmelerini kullanır; gelecekteki TUI aynı sözleşmelere bağlanabilmelidir. UI-only geliştirmeler için gereksiz yeni framework soyutlamaları oluşturulmaz.
 - Mevcut TUI kaynakları bu kararla silinmez veya devre dışı bırakılmaz; ayrı onay olmadan kaldırılmaz. Yeni TUI özellik geliştirmesi ertelenmiştir. Ortak değişikliklerin mevcut TUI'yi kırmaması için mevcut regresyonlar korunur.
 - Yeni fazların kabulünde uygulanabilir CLI/Desktop bağlantısı esas alınır; TUI özellik eşitliği zorunlu değildir. Gelecekte TUI çalışması ayrıca kapsamlandırılır.
+
+## Güncel öncelik — CLI/TUI önce, Desktop sonra (2026-10-23)
+
+İlk hedef Node.js CLI ve mevcut isteğe bağlı TUI: macOS arm64, Windows x64 ve Ubuntu LTS/glibc x64. Yeni framework veya yeniden yazım yok; plain CLI/non-TTY ve runtime yetkisi korunur. Desktop/Web, diğer mimariler, kişisel browser/Computer Use, ses ve ücretli canlı kabuller bu teslimatın dışında. CI/fixture sonucu gerçek kullanıcı terminali veya canlı provider kabulü sayılmaz.
+
+- [ ] **CT01 · Kapsam ve kayıt hizalaması — KISMİ:** README, CONTRIBUTING ve platform planı hizalandı. `AGENTS.md` öncelik yazımı için önceki izin engeli korunur; tekrar denenmez.
+- [ ] **CT02 · CI ve kurulum temeli:** Üç hedefte aynı commit için frozen install, terminal testleri, global typecheck ve kurulu paket kontrolü. Desktop/Web işi ayrı, `pnpm test` tam kümedir. Yeni dalın uzak sonucu henüz yok.
+- [ ] **CT03 · Temel coding akışı:** CLI/TUI provider/model, stream, READ, WRITE/EXECUTE onay-ret, iptal ve persisted resume. [Tarihsel yerel kanıt](docs/terminal-coding-acceptance.md) daha büyük dirty ağaca aittir; ayrıştırılmış adayın testi değildir.
+- [x] **CT04 · Hazır yeteneklerin erişilebilirliği — seçili yerel yollar:** Skills/checkpoint bağları ve MCP/context/session search/Git/worktree kullanıcı yolları önceki yerel kaynakta doğrulandı. [Kapsam, 52/52 ve inceleme sınırları](docs/terminal-extension-acceptance.md). Bu kayıt yeni aday veya üç platform kabulü sayılmaz.
+- [ ] **CT05 · Sınırlı terminal teslimat kabulü — UZAK CI BEKLENİYOR:** [Onaylı kapsam ve yeni aday kanıtı](docs/terminal-delivery-scope.md): 23 mevcut yolun seçili farkları + kapsam belgesi; dal `ci/terminal-ct05`. 125 yolun yeni farkları ana çalışma ağacında korunur. Son kaynak `release:check` **1514 PASS / 0 FAIL / 6 skip**; global typecheck/build/paket, PTY **10+10**, production audit PASS. Güncel audit'in bildirdiği Zod/Undici açıkları uyumlu geçişli sürüm güncellemesiyle kapatıldı. Kullanıcının ayrı dal commit/push ve CI takip onayı var; main merge/tag/yayın yok. Aynı SHA üç hedef uzak kanıtı bekleniyor.
+- [ ] **CT06 · Terminal sonrasında Desktop/Web:** Önceki geniş çalışma ağacındaki Web Dashboard hatası ve diğer ertelenen işler ayrı kalır; bu dalda düzeltilmiş sayılmaz. HEAD'deki mevcut Desktop kaynak/testleri korunur.
 
 ## Takip kuralları
 

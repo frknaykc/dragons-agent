@@ -85,6 +85,8 @@
     "build": "pnpm clean && node scripts/build-checkpoint-native.mjs && tsc -p tsconfig.json",
     "typecheck": "pnpm build && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "pnpm build:tests && node scripts/run-tests.mjs",
+    "test:terminal": "pnpm build:tests && node scripts/run-tests.mjs --suite=terminal",
+    "test:desktop": "pnpm build:tests && node scripts/run-tests.mjs --suite=desktop",
     "dragons": "pnpm build && node dist/cli.js",
     "desktop": "pnpm build && electron desktop/main.mjs",
     "desktop:pack": "pnpm build && electron-builder --config electron-builder.json --dir --publish never",
@@ -122,8 +124,8 @@
     "build:tests": "pnpm build && node scripts/clean-build.mjs tests && tsc -p tsconfig.test.json"
   },
   "dependencies": {
-    "@modelcontextprotocol/client": "2.0.0",
-    "@modelcontextprotocol/server": "2.0.0",
+    "@modelcontextprotocol/client": "2.3.0",
+    "@modelcontextprotocol/server": "2.3.0",
     "@napi-rs/keyring": "2.0.0",
     "openai": "^7.9.0",
     "string-width": "^8.2.2"

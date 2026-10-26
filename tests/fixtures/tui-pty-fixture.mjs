@@ -17,6 +17,7 @@ const providers = createProviderRegistry([{
   createModel: () => ({ async respond(request, delta) {
     const task = request.task;
     if (task === "wait") {
+      await writeFile(join(root, "wait-started.txt"), "started");
       await new Promise((resolve_, reject) => {
         const cancel = () => { void writeFile(join(root, "cancelled.txt"), "cancelled").then(() => reject(new AgentRunCancelledError())); };
         if (request.signal?.aborted) cancel(); else request.signal?.addEventListener("abort", cancel, { once: true });

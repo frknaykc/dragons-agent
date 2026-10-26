@@ -1698,6 +1698,21 @@ export async function main(
           reasoning: providers.reasoning.bind(providers),
           auth: dependencies.chatgptAuth!, profiles: profiles ?? createDragonsProfileStore({ configPath: dependencies.configPath }),
           sessions: sessionStoreFor(dependencies, providers),
+          skills: async (task, sessionId, signal) => {
+            const sessionStore = sessionStoreFor(dependencies, providers);
+            const session = await sessionStore.load(sessionId);
+            signal.throwIfAborted();
+            if (!session || session.workingDirectory !== await realpath(workingDirectory)) {
+              throw new Error("Skills require the current workspace session.");
+            }
+            let text = "";
+            const result = await handleInteractiveSkillsCommand({
+              task, directory: skillsDirectoryFor(dependencies), workingDirectory: session.workingDirectory,
+              activeSkillReferences: session.skills ?? [], session, sessionStore, signal,
+              write: (chunk) => { text = (text + chunk).slice(0, 16_000); },
+            });
+            return result.handled ? text.trim() : "Usage: /skills [list|show [project] <id>|activate [project] <id>|deactivate [project] <id>]";
+          },
           authNotices: (notice, signal) => { tuiAuthNotice = notice; tuiAuthSignal = signal; },
         }),
         ...(parsedCommand.resume ? { resume: parsedCommand.resume } : { provider, model }),
@@ -1824,7 +1839,8 @@ export async function main(
 
   // Runtime-owned unattended turns compare exact canonical workspace identities.
   const workingDirectory = resumedSession?.workingDirectory ?? await realpath(dependencies.workingDirectory ?? process.cwd());
-  const tools = dependencies.tools ?? await createCodingTools(workingDirectory, {
+  // Interactive plan/MCP tools belong to this client, not to the caller's reusable bindings.
+  const tools = dependencies.tools ? [...dependencies.tools] : await createCodingTools(workingDirectory, {
     maxToolOutputBytes: config.maxToolOutputBytes,
     shellTimeoutMilliseconds: config.shellTimeoutMilliseconds,
   });

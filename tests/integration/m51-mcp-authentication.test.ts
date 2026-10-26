@@ -63,16 +63,6 @@ async function closeServer(server: Server): Promise<void> {
 
 async function createAuthenticatedFixture(requiredToken = AUTH_TOKEN, toolError?: string): Promise<AuthFixture> {
   const authorizations: string[] = [];
-  const mcp = new McpServer({ name: "dragons-m51-auth-fixture", version: "1.0.0" });
-  const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  mcp.registerTool(
-    "inspect",
-    { inputSchema: fromJsonSchema<{ value: string }>({ type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }) },
-    async ({ value }) => toolError
-      ? { isError: true, content: [{ type: "text" as const, text: toolError }] }
-      : { content: [{ type: "text" as const, text: `authenticated:${value}` }] },
-  );
-  await mcp.connect(transport);
   const server = createServer(async (request, response) => {
     const authorization = request.headers.authorization;
     if (typeof authorization === "string") authorizations.push(authorization);
@@ -81,7 +71,22 @@ async function createAuthenticatedFixture(requiredToken = AUTH_TOKEN, toolError?
       response.end(JSON.stringify({ error: `rejected:${authorization ?? "missing"}` }));
       return;
     }
-    await writeResponse(await transport.handleRequest(await toRequest(request)), response);
+    // SDK 2.3 rejects stateless transport reuse: each request owns its server and transport.
+    const mcp = new McpServer({ name: "dragons-m51-auth-fixture", version: "1.0.0" });
+    const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    mcp.registerTool(
+      "inspect",
+      { inputSchema: fromJsonSchema<{ value: string }>({ type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }) },
+      async ({ value }) => toolError
+        ? { isError: true, content: [{ type: "text" as const, text: toolError }] }
+        : { content: [{ type: "text" as const, text: `authenticated:${value}` }] },
+    );
+    try {
+      await mcp.connect(transport);
+      await writeResponse(await transport.handleRequest(await toRequest(request)), response);
+    } finally {
+      await mcp.close();
+    }
   });
   const origin = await listen(server);
   return {
@@ -258,9 +263,61 @@ test("M51 scopes stored bearer tokens to the configured server and origin", asyn
   }
 });
 
-test("M51 rejects authenticated HTTP redirects before a bearer token can reach another origin", async () => {
+test("M51 isolates concurrent HTTP clients and keeps the surviving client usable after peer close", { timeout: 10_000 }, async () => {
+  const fixture = await createAuthenticatedFixture();
+  const managers = [0, 1].map(() => new McpClientManager([
+    { id: "shared", transport: "http", url: fixture.url, auth: { type: "bearer" } },
+  ], { credentialStore: scopedStore(() => AUTH_TOKEN) }));
+  try {
+    const [[first], [second]] = await Promise.all(managers.map((manager) => manager.connect("shared", [])));
+    const results = await Promise.all([first!.execute({ value: "first" }), second!.execute({ value: "second" })]);
+    assert.deepEqual(results, ["first", "second"].map((value) => ({
+      ok: true, output: JSON.stringify([{ type: "text", text: `authenticated:${value}` }]),
+    })));
+    await managers[0]!.closeAll();
+    assert.deepEqual(await second!.execute({ value: "still-open" }), {
+      ok: true, output: JSON.stringify([{ type: "text", text: "authenticated:still-open" }]),
+    });
+    assert.equal(managers[1]!.status()[0]!.state, "connected");
+  } finally {
+    await Promise.all(managers.map((manager) => manager.closeAll()));
+    await fixture.close();
+  }
+});
+
+test("M51 rejects a remote OAuth discovery challenge without contacting its authorization server", { timeout: 10_000 }, async () => {
+  let discoveryRequests = 0;
+  const discovery = createServer((_request, response) => {
+    discoveryRequests += 1;
+    response.writeHead(500);
+    response.end();
+  });
+  const origin = await listen(discovery);
+  const fixture = await createReflectedHttpFailureFixture("authentication required", 401, {
+    "www-authenticate": `Bearer resource_metadata="${origin}/metadata"`,
+  });
+  const scopes: McpCredentialScope[] = [];
+  const manager = new McpClientManager([
+    { id: "challenge", transport: "http", url: fixture.url, auth: { type: "bearer" } },
+  ], { credentialStore: scopedStore((scope) => { scopes.push(scope); return AUTH_TOKEN; }) });
+  try {
+    await assert.rejects(manager.connect("challenge", []), /authentication required or rejected/i);
+    assert.equal(discoveryRequests, 0);
+    assert.ok(scopes.length > 0);
+    assert.ok(scopes.every((scope) => scope.origin === new URL(fixture.url).origin));
+    assert.equal(manager.status()[0]!.lastFailureCategory, "authentication");
+    assert.doesNotMatch(JSON.stringify(manager.status()), new RegExp(AUTH_TOKEN));
+  } finally {
+    await manager.closeAll();
+    await Promise.all([fixture.close(), closeServer(discovery)]);
+  }
+});
+
+for (const status of [301, 302, 303, 307, 308]) test(`M51 rejects authenticated HTTP ${status} redirects before any request reaches another origin`, async () => {
+  let targetRequests = 0;
   const targetAuthorizations: string[] = [];
   const target = createServer((request, response) => {
+    targetRequests += 1;
     if (typeof request.headers.authorization === "string") targetAuthorizations.push(request.headers.authorization);
     response.writeHead(500);
     response.end();
@@ -269,7 +326,7 @@ test("M51 rejects authenticated HTTP redirects before a bearer token can reach a
   const redirectAuthorizations: string[] = [];
   const redirect = createServer((request, response) => {
     if (typeof request.headers.authorization === "string") redirectAuthorizations.push(request.headers.authorization);
-    response.writeHead(302, { location: `${targetOrigin}/mcp` });
+    response.writeHead(status, { location: `${targetOrigin}/mcp` });
     response.end();
   });
   const redirectOrigin = await listen(redirect);
@@ -278,7 +335,9 @@ test("M51 rejects authenticated HTTP redirects before a bearer token can reach a
   ], { credentialStore: scopedStore(() => AUTH_TOKEN) });
   try {
     await assert.rejects(manager.connect("redirect", []));
+    assert.ok(redirectAuthorizations.length > 0);
     assert.ok(redirectAuthorizations.every((value) => value === `Bearer ${AUTH_TOKEN}`));
+    assert.equal(targetRequests, 0);
     assert.deepEqual(targetAuthorizations, []);
   } finally {
     await manager.closeAll();

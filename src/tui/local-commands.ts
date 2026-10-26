@@ -4,7 +4,7 @@ import type { ChatGPTAuthService } from "../provider/codex-auth.js";
 import type { DragonsProfileStore } from "../profiles.js";
 import type { SessionStore } from "../session-store.js";
 
-export type TuiLocalCommandContext = { requestSecret?: SecretPrompt; notice(text: string): void; signal: AbortSignal; session?: { provider: string; model: string } };
+export type TuiLocalCommandContext = { requestSecret?: SecretPrompt; notice(text: string): void; signal: AbortSignal; session?: { id?: string; provider: string; model: string } };
 /** Explicit trusted-host injection. Never constructed from remote runtime metadata. */
 export type TuiLocalCommands = {
   names: readonly string[];
@@ -26,16 +26,21 @@ export function createTuiLocalCommands(options: {
   auth: Pick<ChatGPTAuthService, "login" | "status" | "logout">;
   profiles: DragonsProfileStore;
   sessions: SessionStore;
+  skills?: (command: string, sessionId: string, signal: AbortSignal) => Promise<string>;
   /** Routes service output only while login is active. */
   reasoning?: (provider: string, model: string, level?: string) => Promise<string>;
   authNotices?: (notice?: (text: string) => void, signal?: AbortSignal) => void;
 }): TuiLocalCommands {
   return {
-    names: [...(options.reasoning ? ["/reasoning"] : []), "/login", "/logout", "/auth", "/profile", "/sessions"],
+    names: [...(options.skills ? ["/skills"] : []), ...(options.reasoning ? ["/reasoning"] : []), "/login", "/logout", "/auth", "/profile", "/sessions"],
     async execute(command, context) {
       const [name, ...args] = command.split(/\s+/);
       if (context.signal.aborted) return;
-      if (name === "/reasoning" && options.reasoning) {
+      if (name === "/skills" && options.skills) {
+        if (!context.session?.id) { context.notice("Create a session first."); return; }
+        const text = await options.skills(command, context.session.id, context.signal);
+        if (!context.signal.aborted) context.notice(text);
+      } else if (name === "/reasoning" && options.reasoning) {
         if (!context.session) { context.notice("Create a session first."); return; }
         if (args.length > 1) { context.notice("Usage: /reasoning [default|level]"); return; }
         try { context.notice(await options.reasoning(context.session.provider, context.session.model, args[0])); }
